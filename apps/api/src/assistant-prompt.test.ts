@@ -28,6 +28,7 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "渠道全退后0元是不是资料缺失，会禁用其他订单吗？", ids: ["room-status", "refunds"], facts: ["完整退款与计价依据可核对", "不因合法全退禁用其他订单", "缺失或矛盾资料仍须核对", "部分退款、全额退款及撤销", "不等于允许普通企微新建或改价填0", "不证明平台实际到账"] },
     { question: "普通企微订单能调成0吗，免费和会员权益现金为0还合法吗？", ids: ["booking"], facts: ["普通非会员 WECOM 新建及更正金额必须大于0", "正式免费住宿、会员权益覆盖的合法零现金除外", "有会员档案不等于使用权益"] },
     { question: "两张订单合付款已整笔记在另一单，这单能调0消除欠款吗？", ids: ["payment-allocation"], facts: ["保留各单真实合同金额", "按真实份额分配", "款记在另一单不能调0或改免费/权益绕过", "历史归属及已退房零价错误交管理员核对", "助手不承诺已修复"] },
     { question: "已取消和已标记未到为什么不一定是异常，今天退房算逾期吗？", ids: ["workbench-exceptions"], facts: ["具体未完成事项", "正常取消/已标记未到不因状态或原住期纳入", "超过到店日仍预订", "超过离店日仍在住", "当天待离店不算逾期"] },

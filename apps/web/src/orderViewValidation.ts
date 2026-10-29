@@ -9,6 +9,24 @@ import type { OrderViewDto } from "./types";
 
 type JsonRecord = Record<string, unknown>;
 
+interface ChannelOperatingReadEvidence {
+  initialized: boolean;
+  currency: string;
+  businessDate: string;
+  originalSaleId: string | null;
+  openingRefundMinor: bigint;
+  facts: Array<{
+    id: string;
+    kind: string;
+    amount: number;
+    reference: string | null;
+    refundReference: string | null;
+    businessDate: string;
+    createdAt: string;
+    note: string;
+  }>;
+}
+
 const localDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 const arrangementChangeTypes = new Set(["INITIAL_BOOKING", "RESCHEDULE", "EXTENSION", "SHORTENING", "MOVE", "EARLY_CHECK_OUT", "CHECK_OUT_REVOCATION", "HISTORICAL_STAY_CORRECTION"]);
 const effectivePresentations = new Set(["CURRENT", "LAST", "BEFORE_CANCELLATION", "NO_SHOW_ORDER", "BEFORE_CHECK_IN_REVOCATION"]);
@@ -613,6 +631,95 @@ function historyItem(value: unknown, path: string): OrderArrangementHistoryItemD
   };
 }
 
+function assertChannelFundsRevision(
+  revision: JsonRecord,
+  prior: JsonRecord | undefined,
+  amendment: JsonRecord,
+  amendments: readonly unknown[],
+  evidence: ChannelOperatingReadEvidence | undefined,
+  order: JsonRecord,
+  path: string
+): void {
+  const payload = record(amendment.payload, `${path}.amendment.payload`);
+  const refund = amendment.amendment_type === "RECORD_REFUND";
+  const before = safeInteger(payload.contractBeforeMinor, `${path}.contractBeforeMinor`, 0);
+  const target = safeInteger(payload.contractTargetMinor, `${path}.contractTargetMinor`, 0);
+  const amount = safeInteger(payload.amountMinor, `${path}.amountMinor`, 1);
+  const businessDate = localDate(payload.businessDate, `${path}.businessDate`);
+  const note = stringValue(payload.note, `${path}.note`);
+  const reference = stringValue(refund ? payload.referencesFactId : payload.reversesFactId, `${path}.referencesFactId`);
+  const amendmentCreatedAt = dateTime(amendment.created_at, `${path}.amendment.created_at`);
+  const revisionCreatedAt = dateTime(revision.created_at, `${path}.created_at`);
+  stringValue(amendment.command_id, `${path}.amendment.command_id`);
+  const pricingReason = reason(revision.reason, `${path}.reason`);
+  if (!evidence?.initialized || !evidence.originalSaleId || !prior
+    || order.stay_type === "FREE" || order.member_id !== null || order.member_contract_id !== null
+    || typeof order.channel_order_reference !== "string" || !order.channel_order_reference.trim()
+    || payload.channelOperating !== true || payload.orderId !== order.id || amendment.order_id !== order.id
+    || payload.currency !== evidence.currency || payload.currency !== revision.currency || prior.currency !== revision.currency
+    || revision.pricing_basis !== "CHANNEL_CONTRACT" || prior.pricing_basis !== "CHANNEL_CONTRACT" || revision.manual_adjustment_minor !== 0
+    || prior.current_contract_amount_minor !== before || revision.current_contract_amount_minor !== target
+    || before === target || before > 2147483600 || target > 2147483600 || amount > 2147483600
+    || (refund ? target > before || before - target > amount : target < before || target - before > amount)
+    || revision.revision_no !== Number(prior.revision_no) + 1
+    || revision.policy_version_id !== prior.policy_version_id || revision.policy_version_id !== order.pricing_policy_version_id
+    || revision.policy_base_amount_minor !== prior.policy_base_amount_minor
+    || revision.arrival_date !== prior.arrival_date || revision.departure_date !== prior.departure_date
+    || JSON.stringify(revision.coverage_set) !== JSON.stringify(prior.coverage_set)
+    || JSON.stringify(revision.cash_lines) !== JSON.stringify(prior.cash_lines)
+    || amendment.reason_code !== pricingReason.code || amendment.reason_note !== pricingReason.note
+    || Date.parse(amendmentCreatedAt) > Date.parse(revisionCreatedAt) || businessDate > evidence.businessDate
+    || (refund ? payload.method !== "CHANNEL" || reference !== evidence.originalSaleId : payload.netEffectMinor !== amount)) {
+    fail(path, "渠道退款计价修订与原金额、住宿范围或同单依据不一致");
+  }
+  const refundReference = refund ? stringValue(payload.refundReference, `${path}.refundReference`) : null;
+  const matches = evidence.facts.filter((fact) => fact.kind === (refund ? "REFUND" : "REVERSAL")
+    && fact.reference === reference && fact.amount === (refund ? -amount : amount)
+    && fact.refundReference === refundReference && fact.businessDate === businessDate
+    && fact.note === note && fact.createdAt === revisionCreatedAt);
+  if (matches.length !== 1) fail(path, "渠道退款计价修订缺少唯一对应的渠道资金事实");
+  if (refund) {
+    // The API preserves database event order, including timestamps whose
+    // sub-millisecond precision is lost in the DTO. Later refunds/reversals
+    // must not change the balance used to validate this historical revision.
+    const factIndex = evidence.facts.indexOf(matches[0]!);
+    const netAfterRefund = evidence.facts.slice(0, factIndex + 1)
+      .reduce((sum, fact) => sum + BigInt(fact.amount), -evidence.openingRefundMinor);
+    const priorAmount = BigInt(before);
+    const expectedTarget = priorAmount < netAfterRefund ? priorAmount : netAfterRefund;
+    if (netAfterRefund < 0n || priorAmount > netAfterRefund + BigInt(amount) || BigInt(target) !== expectedTarget) {
+      fail(path, "渠道退款计价修订与退款当时的渠道净额不一致");
+    }
+  }
+  const source = evidence.facts.find((fact) => fact.id === reference);
+  if (!source || source.kind !== (refund ? "SALE" : "REFUND")
+    || businessDate < source.businessDate || Date.parse(source.createdAt) > Date.parse(matches[0]!.createdAt)) {
+    fail(path, "渠道退款计价修订的来源或日期无法核对");
+  }
+  if (!refund) {
+    const originals = amendments.filter((value) => {
+      const item = record(value, `${path}.originalRefund`);
+      const original = record(item.payload, `${path}.originalRefund.payload`);
+      return item.amendment_type === "RECORD_REFUND" && item.order_id === order.id
+        && original.channelOperating === true && original.orderId === order.id
+        && original.currency === payload.currency && original.method === "CHANNEL"
+        && original.referencesFactId === source.reference && original.refundReference === source.refundReference
+        && original.amountMinor === -source.amount && original.businessDate === source.businessDate
+        && original.note === source.note && item.created_at === source.createdAt;
+    });
+    if (originals.length !== 1 || source.amount !== -amount || businessDate !== source.businessDate) {
+      fail(path, "渠道撤销修订缺少唯一原退款依据");
+    }
+    const original = record(record(originals[0], `${path}.originalRefund`).payload, `${path}.originalRefund.payload`);
+    const originalBefore = safeInteger(original.contractBeforeMinor, `${path}.originalRefund.contractBeforeMinor`, 0);
+    const originalTarget = safeInteger(original.contractTargetMinor, `${path}.originalRefund.contractTargetMinor`, 0);
+    if (originalBefore < originalTarget || originalBefore - originalTarget > amount
+      || target - before !== originalBefore - originalTarget) {
+      fail(path, "渠道撤销修订与原退款应结减少金额不一致");
+    }
+  }
+}
+
 export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   const result = record(value, "根节点");
   exactKeysWithOptional(result, "根节点", [
@@ -627,12 +734,13 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     "pricing_policy_version_id", "member_id", "member_contract_id", "current_revision_id",
     "current_contract_amount_minor", "currency", "version", "created_at", "updated_at"
   ], ["current_primary_guest"]);
+  let channelEvidence: ChannelOperatingReadEvidence | undefined;
   if (result.channelOperating !== undefined && result.channelOperating !== null) {
     const channel=record(result.channelOperating,"channelOperating");
     exactKeys(channel,"channelOperating",["initialized","businessDate","currency","originalSaleFactId","netMinor","openingRefundMinor","facts"]);
     if(!["YOUMUDAO","CTRIP","MEITUAN"].includes(String(order.booking_channel_code)))fail("channelOperating","仅适用于外部渠道订单");
     if(typeof channel.initialized!=="boolean")fail("channelOperating.initialized","必须是布尔值");
-    localDate(channel.businessDate,"channelOperating.businessDate");
+    const channelBusinessDate=localDate(channel.businessDate,"channelOperating.businessDate");
     const code=stringValue(channel.currency,"channelOperating.currency");if(code!==order.currency)fail("channelOperating.currency","与订单币种不同");
     const decimal=(value:unknown,path:string)=>{if(typeof value!=="string"||!/^\d+$/.test(value)||value.length>20)fail(path,"必须是非负整数分字符串");return BigInt(value as string)};
     const net=decimal(channel.netMinor,"channelOperating.netMinor"),opening=decimal(channel.openingRefundMinor,"channelOperating.openingRefundMinor");
@@ -642,11 +750,11 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
       exactKeys(row,path,["id","kind","amountMinor","businessDate","referencesFactId","refundReference","note","createdAt"]);
       const id=stringValue(row.id,`${path}.id`),kind=stringValue(row.kind,`${path}.kind`),amount=safeInteger(row.amountMinor,`${path}.amountMinor`);
       if(!["SALE","CORRECTION","REFUND","REVERSAL"].includes(kind)||amount===0||(kind==='REFUND'&&amount>=0)||(['SALE','REVERSAL'].includes(kind)&&amount<=0))fail(path,"事实类型与金额方向不一致");
-      localDate(row.businessDate,`${path}.businessDate`);dateTime(row.createdAt,`${path}.createdAt`);
-      stringValue(row.note,`${path}.note`,true);const reference=nullableNonEmptyString(row.referencesFactId,`${path}.referencesFactId`);
+      const businessDate=localDate(row.businessDate,`${path}.businessDate`),createdAt=dateTime(row.createdAt,`${path}.createdAt`);
+      const note=stringValue(row.note,`${path}.note`,true),reference=nullableNonEmptyString(row.referencesFactId,`${path}.referencesFactId`);
       const refundReference=nullableNonEmptyString(row.refundReference,`${path}.refundReference`);
       if(kind==='REFUND'&&!refundReference)fail(path,"退款必须有平台退款单号");
-      return {id,kind,amount,reference};
+      return {id,kind,amount,reference,refundReference,businessDate,createdAt,note};
     });
     const byId=new Map(rows.map(row=>[row.id,row]));if(byId.size!==rows.length)fail("channelOperating.facts","事实ID重复");
     if(original!==null&&byId.get(original)?.kind!=='SALE')fail("channelOperating.originalSaleFactId","没有对应原成交");
@@ -654,6 +762,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     for(const row of rows){if(row.kind==='REFUND'&&(!row.reference||byId.get(row.reference)?.kind!=='SALE'))fail("channelOperating.facts","退款缺少同单成交来源");
       if(row.kind==='REVERSAL'){const source=row.reference?byId.get(row.reference):undefined;if(!source||source.kind!=='REFUND'||row.amount!==-source.amount||reversals.has(source.id))fail("channelOperating.facts","误录撤销来源或金额不一致");reversals.add(source.id);}}
     if(rows.reduce((sum,row)=>sum+BigInt(row.amount),0n)-opening!==net)fail("channelOperating.netMinor","与已登记事实和期初退款不一致");
+    channelEvidence = { initialized: channel.initialized, currency: code, businessDate: channelBusinessDate, originalSaleId: original, openingRefundMinor: opening, facts: rows };
   }
   const stay = record(result.stay, "stay");
   exactKeys(stay, "stay", ["id", "status"]);
@@ -971,6 +1080,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   });
   const standaloneRepriceRevisionIds = new Set<string>();
   const standaloneMemberRepriceRevisionIds = new Set<string>();
+  const channelFundsRevisionIds = new Set<string>();
   const lifecycleZeroRevisionIds = new Set<string>();
   const pricingRevisions = arrayValue(result.pricingRevisions, "pricingRevisions");
   if (pricingRevisions.length === 0) fail("pricingRevisions", "必须包含计价记录");
@@ -1005,6 +1115,19 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     if (!pricingBases.has(pricingBasis)) fail(`${path}.pricing_basis`, "不是支持的计价方式");
     const pricingReason = reason(revision.reason, `${path}.reason`);
     const revisionCreatedAt = dateTime(revision.created_at, `${path}.created_at`);
+    const fundsAmendments = amendments.filter((item) => {
+      const amendment = item as JsonRecord;
+      return amendment.id === revisionAmendmentId
+        && (amendment.amendment_type === "RECORD_REFUND" || amendment.amendment_type === "REVERSE_FACT");
+    });
+    if (fundsAmendments.length > 0) {
+      if (fundsAmendments.length !== 1 || amendments.filter((item) => (item as JsonRecord).id === revisionAmendmentId).length !== 1) {
+        fail(path, "渠道退款计价修订必须关联唯一变更记录");
+      }
+      assertChannelFundsRevision(revision, index > 0 ? record(pricingRevisions[index - 1], `${path}.prior`) : undefined,
+        fundsAmendments[0] as JsonRecord, amendments, channelEvidence, order, path);
+      channelFundsRevisionIds.add(revisionId);
+    }
     let standaloneReprice = false;
     const standaloneRepriceCandidate = index > 0
       && revisionNo === index + 1
@@ -1110,7 +1233,7 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
             && latestRevisionManualAdjustment === 0));
     const validLifecycleZeroRevision = currentContractAmount.minorUnits === 0
       && lifecycleZeroRevisionIds.has(latestRevisionId);
-    if ((!validStandaloneBasis && !validLifecycleZeroRevision)
+    if ((!validStandaloneBasis && !validLifecycleZeroRevision && !channelFundsRevisionIds.has(latestRevisionId))
       || latestRevisionArrival !== effective.arrivalDate
       || latestRevisionDeparture !== effective.departureDate
       || Date.parse(latestRevisionCreatedAt) < Date.parse(history.at(-1)!.recordedAt)) {

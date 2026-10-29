@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import { gzipSync } from "node:zlib";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import fastJsonStringify from "fast-json-stringify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ROOM_STATUS_MAX_QUERY_NIGHTS,
@@ -29,10 +30,11 @@ import { sql, type Kysely, type Updateable } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { assertRoomStatusBoard } from "../../apps/web/src/room-status/roomStatusValidation.ts";
+import { parseOrderView } from "../../apps/web/src/orderViewValidation.ts";
 import * as orderReader from "../../packages/db/src/orders.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
 import { assertUnitAvailable, inventoryFingerprint, loadInventoryUnit, lockRoomDays } from "../../packages/db/src/inventory.ts";
-import { RoomStatusBoardSchema } from "../../apps/api/src/schemas.ts";
+import { OrderDetailResponseSchema, RoomStatusBoardSchema } from "../../apps/api/src/schemas.ts";
 import { authScope } from "../helpers/auth-principals.ts";
 import { resetDatabase } from "../helpers/database.ts";
 import { newId, newOpaqueSecret, sha256 } from "@qintopia/domain";
@@ -54,6 +56,7 @@ let sequence = 0;
 const roomStatusSchemaValidator = new Ajv2020({ allErrors: true, strict: true });
 addFormats(roomStatusSchemaValidator);
 const validateRoomStatusBoardSchema = roomStatusSchemaValidator.compile(RoomStatusBoardSchema);
+const serializeOrderDetail = fastJsonStringify(OrderDetailResponseSchema);
 
 function metadata(prefix: string) {
   sequence += 1;
@@ -73,6 +76,65 @@ async function prepare(envelope: CommandEnvelope, prefix: string) {
 
 async function writableOrderView(orderId: string) {
   return getOrderView(db, orderId, "WRITE", ordinaryCommandGrants);
+}
+
+async function parsedOrderDetail(orderId: string) {
+  return parseOrderView(JSON.parse(serializeOrderDetail(await writableOrderView(orderId))));
+}
+
+async function channelRefundFixture(
+  channel: "YOUMUDAO" | "CTRIP" | "MEITUAN",
+  prefix: string,
+  shorten = false,
+  unitId: string = demo.secondRoomId
+) {
+  const today = await propertyLocalToday(db, demo.propertyId);
+  const arrivalDate = shiftLocalDate(today, shorten ? -4 : -7);
+  const originalDeparture = shiftLocalDate(today, shorten ? 2 : -2);
+  const created = await createOrder({ unitId, arrivalDate, departureDate: originalDeparture,
+    prefix, bookingChannelCode: channel, channelOrderReference: `SYNTHETIC-${prefix}` });
+  expect(created.businessCommitted, JSON.stringify(created.error)).toBe(true);
+  const orderId = String(created.result!.orderId);
+  await markOrderInHouseFixture(orderId);
+  const initialView = await writableOrderView(orderId);
+  const saleMinor = Number(initialView.channelOperating!.netMinor);
+  expect(saleMinor).toBeGreaterThan(1_000);
+  const departureDate = shorten ? today : originalDeparture;
+  if (shorten) {
+    const shortened = await execute({ commandType: "SHORTEN_STAY", input: {
+      propertyId: demo.propertyId, orderId, newDepartureDate: today,
+      targetCurrentContractAmountMinor: saleMinor - 2_000,
+      channelPriceDifferenceReason: "合成渠道缩短后保留待退差额"
+    } }, `${prefix}-shorten`);
+    expect(shortened.businessCommitted, JSON.stringify(shortened.error)).toBe(true);
+  } else {
+    const checkout = await execute({ commandType: "CHECK_OUT", input: { propertyId: demo.propertyId, orderId } }, `${prefix}-checkout`);
+    expect(checkout.businessCommitted, JSON.stringify(checkout.error)).toBe(true);
+  }
+  // 只初始化本测试库的合成经营基线，正式命令仍检查平台退款引用及回执。
+  await sql`INSERT INTO operating_sales_baselines(property_id,month,amount_minor,currency,recognition_from,evidence_note,evidence_sha256)
+    VALUES(${demo.propertyId},(date_trunc('month',${today}::date)-interval '1 month')::date,0,'CNY',
+      date_trunc('month',${today}::date)::date,'合成渠道全退读回回归',${"0".repeat(64)})
+    ON CONFLICT(property_id,month,currency) DO NOTHING`.execute(db);
+  const admin = await createAdministratorSessionPrincipal();
+  const applyFunds = async (envelope: CommandEnvelope, label: string) => {
+    const prepared = await createCommandPreview(db, admin, envelope, metadata(`${prefix}-${label}-preview`));
+    const receipt = await confirmCommandPreview(db, admin, prepared.preview.previewId, {
+      propertyId: demo.propertyId, commandType: envelope.commandType, confirmation: true,
+      expectedEffectHash: prepared.preview.effectHash, reason: { code: "ACCEPTANCE", note: "合成渠道退款读回" }
+    }, metadata(`${prefix}-${label}-confirm`));
+    expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+    return receipt;
+  };
+  const refund = (amountMinor: number, label: string) => applyFunds({ commandType: "RECORD_REFUND", input: {
+    propertyId: demo.propertyId, orderId, amountMinor, method: "CHANNEL",
+    referencesFactId: initialView.channelOperating!.originalSaleFactId!,
+    refundReference: `${prefix}-${label}`, note: "合成平台退款"
+  } }, label);
+  const reverse = (receipt: ReceiptDto, label: string) => applyFunds({ commandType: "REVERSE_FACT", input: {
+    propertyId: demo.propertyId, orderId, reversesFactId: String(receipt.result!.factId), note: "撤销合成退款"
+  } }, label);
+  return { today, orderId, arrivalDate, departureDate, saleMinor, refund, reverse };
 }
 
 async function createAdministratorSessionPrincipal(): Promise<AuthPrincipal> {
@@ -488,6 +550,7 @@ describe("PostgreSQL room-status projection", () => {
         const projected = await board(inspectionRange);
         expect(projected.projectionState).toBe("READY");
         expect(() => assertRoomStatusBoard(projected, { propertyId: demo.propertyId, range: inspectionRange, pageIndex: 0 })).not.toThrow();
+        expect((await parsedOrderDetail(orderId)).order.id).toBe(orderId);
       }
     };
     await refundAndReverse("active-channel-funds", { arrivalDate: today, departureDate: shiftLocalDate(today, 1) });
@@ -502,6 +565,144 @@ describe("PostgreSQL room-status projection", () => {
     expect(intervalForOrder(result, demo.secondRoomId, orderId)).toMatchObject({ status: "SETTLED", blocking: false, sourceCategory: "YOUMUDAO" });
     expect(() => assertRoomStatusBoard(result, { propertyId: demo.propertyId, range: { arrivalDate, departureDate }, pageIndex: 0 })).not.toThrow();
     await refundAndReverse("completed-channel-funds", { arrivalDate, departureDate });
+  });
+
+  it.each(["YOUMUDAO", "CTRIP", "MEITUAN"] as const)(
+    "keeps %s full channel refunds and reversals readable without blocking other orders",
+    async (channel) => {
+      const fixture = await channelRefundFixture(channel, `full-refund-${channel.toLowerCase()}`);
+      const currentOrder = await createOrder({ unitId: demo.roomId, arrivalDate: fixture.today,
+        departureDate: shiftLocalDate(fixture.today, 1), prefix: `other-today-${channel}` });
+      expect(currentOrder.businessCommitted, JSON.stringify(currentOrder.error)).toBe(true);
+      const currentOrderId = String(currentOrder.result!.orderId);
+      const inventoryBefore = await db.selectFrom("inventory_claims").selectAll().orderBy("id").execute();
+      const range = { arrivalDate: fixture.arrivalDate, departureDate: shiftLocalDate(fixture.today, 1) };
+      const assertReadable = async (expectedMinor: number) => {
+        const detail = await parsedOrderDetail(fixture.orderId);
+        expect(detail.order.status).toBe("CHECKED_OUT");
+        expect(detail.amounts.currentContractAmount.minorUnits).toBe(expectedMinor);
+        expect(detail.channelOperating?.netMinor).toBe(String(expectedMinor));
+        const projected = await board(range);
+        expect(projected.projectionState).toBe("READY");
+        expect(intervalForOrder(projected, demo.secondRoomId, fixture.orderId))
+          .toMatchObject({ status: "SETTLED", blocking: false, sourceCategory: channel });
+        expect(() => assertRoomStatusBoard(projected, { propertyId: demo.propertyId, range, pageIndex: 0 })).not.toThrow();
+        expect((await parsedOrderDetail(currentOrderId)).allowedActions.find(action => action.code === "CHECK_IN"))
+          .toEqual({ code: "CHECK_IN", enabled: true, disabledReason: null });
+        expect(await db.selectFrom("inventory_claims").selectAll().orderBy("id").execute()).toEqual(inventoryBefore);
+      };
+      const partial = await fixture.refund(1_000, "partial");
+      await assertReadable(fixture.saleMinor - 1_000);
+      const remainder = await fixture.refund(fixture.saleMinor - 1_000, "remainder");
+      await assertReadable(0);
+      const app = await buildServer(createDatabase(databaseUrl));
+      try {
+        const response = await app.inject({ method: "GET", url: `/api/v1/orders/${fixture.orderId}`,
+          headers: { authorization: `Bearer ${demo.writeToken}` } });
+        expect(response.statusCode).toBe(200);
+        expect(parseOrderView(response.json()).amounts.currentContractAmount.minorUnits).toBe(0);
+      } finally { await app.close(); }
+      const firstReversal = channel === "CTRIP" ? partial : remainder;
+      const secondReversal = channel === "CTRIP" ? remainder : partial;
+      await fixture.reverse(firstReversal, "reverse-first");
+      await assertReadable(channel === "CTRIP" ? 1_000 : fixture.saleMinor - 1_000);
+      await fixture.reverse(secondReversal, "reverse-second");
+      await assertReadable(fixture.saleMinor);
+    }
+  );
+
+  it("keeps a shortened channel stay readable after refunding the original sale in full", async () => {
+    const fixture = await channelRefundFixture("YOUMUDAO", "shortened-channel-full-refund", true);
+    const before = await parsedOrderDetail(fixture.orderId);
+    expect(before.order.status).toBe("CHECKED_OUT");
+    expect(before.amounts.currentContractAmount.minorUnits).toBe(fixture.saleMinor - 2_000);
+    expect(before.channelOperating?.netMinor).toBe(String(fixture.saleMinor));
+    const claimsBefore = await db.selectFrom("inventory_claims").selectAll().orderBy("id").execute();
+    const refund = await fixture.refund(fixture.saleMinor, "full");
+    const range = { arrivalDate: fixture.arrivalDate, departureDate: shiftLocalDate(fixture.today, 1) };
+    for (const step of ["REFUND", "REVERSAL"] as const) {
+      if (step === "REVERSAL") await fixture.reverse(refund, "reverse-full");
+      const detail = await parsedOrderDetail(fixture.orderId);
+      expect(detail.order.status).toBe("CHECKED_OUT");
+      expect(detail.effectiveArrangement).toEqual(before.effectiveArrangement);
+      expect(detail.amounts.currentContractAmount.minorUnits).toBe(step === "REFUND" ? 0 : fixture.saleMinor - 2_000);
+      expect(detail.channelOperating?.netMinor).toBe(String(step === "REFUND" ? 0 : fixture.saleMinor));
+      const projected = await board(range);
+      expect(projected.projectionState).toBe("READY");
+      expect(intervalForOrder(projected, demo.secondRoomId, fixture.orderId))
+        .toMatchObject({ status: "SETTLED", blocking: false, sourceCategory: "YOUMUDAO" });
+      expect(await db.selectFrom("inventory_claims").selectAll().orderBy("id").execute()).toEqual(claimsBefore);
+    }
+  });
+
+  it("keeps a fully refunded channel stay readable after later repricing returns to zero", async () => {
+    const fixture = await channelRefundFixture("MEITUAN", "full-refund-zero-reprice");
+    await fixture.refund(fixture.saleMinor, "full");
+    const range = { arrivalDate: fixture.arrivalDate, departureDate: fixture.departureDate };
+    expect((await board(range)).projectionState).toBe("READY");
+    for (const [index, amount] of [0, 1_000, 0].entries()) {
+      const repriced = await execute({ commandType: "REPRICE_ORDER", input: { propertyId: demo.propertyId,
+        orderId: fixture.orderId, targetCurrentContractAmountMinor: amount } }, `full-refund-later-reprice-${index}`);
+      expect(repriced.businessCommitted, JSON.stringify(repriced.error)).toBe(true);
+      const detail = await parsedOrderDetail(fixture.orderId);
+      expect(detail.amounts.currentContractAmount.minorUnits).toBe(amount);
+      expect(detail.channelOperating?.netMinor).toBe(String(amount));
+      const projected = await board(range);
+      expect(projected.projectionState).toBe("READY");
+      expect(intervalForOrder(projected, demo.secondRoomId, fixture.orderId).status).toBe("SETTLED");
+    }
+  });
+
+  it.each(["prior-refund", "opening"] as const)("rejects zero channel settlement with a damaged %s currency", async source => {
+    const fixture = await channelRefundFixture("CTRIP", `channel-currency-${source}`, source === "opening");
+    let priorRefundId: string | undefined;
+    if (source === "opening") {
+      await sql`INSERT INTO operating_sales_opening(property_id,source_kind,source_id,amount_minor,currency,evidence_note)
+        VALUES(${demo.propertyId},'CHANNEL_REFUND',${fixture.orderId},1000,'CNY','合成期初已退')`.execute(db);
+    } else {
+      priorRefundId = String((await fixture.refund(1_000, "partial")).result!.factId);
+    }
+    await fixture.refund(fixture.saleMinor - 1_000, "remainder");
+    const range = { arrivalDate: fixture.arrivalDate, departureDate: fixture.departureDate };
+    expect((await board(range)).projectionState).toBe("READY");
+    await db.transaction().execute(async trx => {
+      await sql`SET LOCAL session_replication_role = replica`.execute(trx);
+      if (source === "opening") {
+        await sql`UPDATE operating_sales_opening SET currency = 'USD' WHERE property_id = ${demo.propertyId}
+          AND source_kind = 'CHANNEL_REFUND' AND source_id = ${fixture.orderId}`.execute(trx);
+      } else {
+        await sql`UPDATE channel_operating_facts SET currency = 'USD' WHERE id = ${priorRefundId!}`.execute(trx);
+      }
+    });
+    const damaged = await board(range);
+    expect(damaged.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(damaged, demo.secondRoomId, fixture.orderId).status).toBe("UNKNOWN");
+  });
+
+  it.each(["missing", "businessDate", "note", "receipt"] as const)("keeps zero channel settlement fail-closed with %s refund evidence", async damage => {
+    const fixture = await channelRefundFixture("CTRIP", "missing-channel-refund-evidence");
+    const refund = await fixture.refund(fixture.saleMinor, "full");
+    const range = { arrivalDate: fixture.arrivalDate, departureDate: fixture.departureDate };
+    expect((await board(range)).projectionState).toBe("READY");
+    // 仅在新建合成测试库模拟历史损坏；事务结束后恢复触发器模式。
+    await db.transaction().execute(async trx => {
+      await sql`SET LOCAL session_replication_role = replica`.execute(trx);
+      if (damage === "missing") {
+        await sql`DELETE FROM channel_operating_facts WHERE id = ${String(refund.result!.factId)}`.execute(trx);
+      } else if (damage === "receipt") {
+        await sql`UPDATE command_receipts SET business_committed = false WHERE command_id = (
+          SELECT command_id FROM channel_operating_facts WHERE id = ${String(refund.result!.factId)})`.execute(trx);
+      } else {
+        const value = damage === "businessDate" ? shiftLocalDate(fixture.today, -1) : "不一致的退款说明";
+        await sql`UPDATE amendments SET payload = jsonb_set(payload, ARRAY[${damage}]::text[], to_jsonb(${value}::text))
+          WHERE command_id = (SELECT command_id FROM channel_operating_facts WHERE id = ${String(refund.result!.factId)})`.execute(trx);
+      }
+    });
+    const damaged = await board(range);
+    expect(damaged.projectionState).toBe("PARTIAL");
+    expect(intervalForOrder(damaged, demo.secondRoomId, fixture.orderId).status).toBe("UNKNOWN");
+    // 回执不在订单详情 DTO 中；其失败由服务端房态证据核对。
+    if (damage !== "receipt") await expect(parsedOrderDetail(fixture.orderId)).rejects.toThrow();
   });
 
   it("returns whole-property daily availability before filtering without double-counting split beds", async () => {
@@ -5026,8 +5227,17 @@ describe("PostgreSQL room-status projection", () => {
       physical_bed_count: 1
     }))).execute();
 
+    const refundedOrderIds: string[] = [];
+    for (const [index, unitId] of [demo.roomId, demo.secondRoomId].entries()) {
+      const fixture = await channelRefundFixture("YOUMUDAO", `perf-refunded-${index}`, false, unitId);
+      await fixture.refund(1_000, "partial");
+      await fixture.refund(fixture.saleMinor - 1_000, "remainder");
+      refundedOrderIds.push(fixture.orderId);
+    }
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const performanceRange = { arrivalDate: shiftLocalDate(today, -29), departureDate: shiftLocalDate(today, 1) };
     const firstPageStartedAt = performance.now();
-    const firstPage = await board({ arrivalDate: "2029-01-01", departureDate: "2029-01-31", pageSize: 50 });
+    const firstPage = await board({ ...performanceRange, pageSize: 50 });
     const firstPageElapsedMs = performance.now() - firstPageStartedAt;
     expect(firstPage.rooms).toHaveLength(50);
     expect(firstPage.page).toMatchObject({
@@ -5038,7 +5248,7 @@ describe("PostgreSQL room-status projection", () => {
     });
     expect(firstPageElapsedMs).toBeLessThanOrEqual(500);
 
-    const query = () => board({ arrivalDate: "2029-01-01", departureDate: "2029-01-31", pageSize: 200 });
+    const query = () => board({ ...performanceRange, pageSize: 200 });
     await query();
     await query();
     const samples: number[] = [];
@@ -5048,13 +5258,18 @@ describe("PostgreSQL room-status projection", () => {
       samples.push(performance.now() - start);
       expect(result.rooms.reduce((count, room) => count + 1 + room.children.length, 0)).toBe(200);
       expect(result.dates).toHaveLength(ROOM_STATUS_MAX_QUERY_NIGHTS);
+      expect(result.projectionState).toBe("READY");
+      for (const [index, unitId] of [demo.roomId, demo.secondRoomId].entries()) {
+        expect(intervalForOrder(result, unitId, refundedOrderIds[index]!).status).toBe("SETTLED");
+      }
       const serialized = JSON.stringify(result);
       expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(2_100_000);
       expect(gzipSync(serialized).byteLength).toBeLessThanOrEqual(50_000);
     }
     samples.sort((left, right) => left - right);
     const p95 = samples[Math.ceil(samples.length * 0.95) - 1]!;
-    console.info("room-status-performance", JSON.stringify({ units: 200, nights: 30, firstPageElapsedMs, p95Ms: p95, samplesMs: samples }));
+    console.info("room-status-performance", JSON.stringify({ units: 200, nights: 30, refundedOrders: refundedOrderIds.length,
+      firstPageElapsedMs, p95Ms: p95, samplesMs: samples }));
     expect(p95).toBeLessThanOrEqual(500);
   }, 30_000);
 

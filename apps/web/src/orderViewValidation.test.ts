@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrderArrangementDto, OrderArrangementHistoryItemDto } from "@qintopia/contracts";
-import type { CollectionFactDto } from "./types";
+import type { CollectionFactDto, OrderViewDto } from "./types";
 import { OrderViewValidationError, parseOrderView } from "./orderViewValidation";
 
 type TestHistoryItem = Omit<OrderArrangementHistoryItemDto, "type"> & { type: string };
@@ -1476,4 +1476,199 @@ describe("渠道独立金额更正读回",()=>{
   ["非零人工调价",(v:ReturnType<typeof channelRepriceView>)=>{v.pricingRevisions[1]!.manual_adjustment_minor=28;}],
   ["更正早于住宿安排",(v:ReturnType<typeof channelRepriceView>)=>{v.pricingRevisions[1]!.created_at="2026-07-27T08:00:00.000Z";}]
  ] as const)("拒绝损坏的渠道调价：%s",(_,damage)=>{const input=channelRepriceView();damage(input);expect(()=>parseOrderView(input)).toThrow();});
+});
+
+function channelFundsView({
+  channel = "YOUMUDAO",
+  status = "RESERVED",
+  refunds = [20_000],
+  reverse = []
+}: {
+  channel?: string;
+  status?: "RESERVED" | "CHECKED_IN" | "CHECKED_OUT";
+  refunds?: number[];
+  reverse?: number[];
+} = {}) {
+  const base = orderView();
+  const businessDate = status === "CHECKED_OUT" ? "2026-07-30" : "2026-07-28";
+  Object.assign(base.order, { booking_channel_code: channel, channel_order_reference: "SYNTHETIC-REFUND", current_contract_amount_minor: 20_000, status });
+  base.pricingRevisions[0]!.pricing_basis = "CHANNEL_CONTRACT";
+  if (status !== "RESERVED") {
+    base.stay.status = status === "CHECKED_IN" ? "IN_HOUSE" : "COMPLETED";
+    base.fulfillment.state = status === "CHECKED_IN" ? "IN_HOUSE" : "CHECKED_OUT";
+    base.fulfillment.checkIn = fulfillmentFact("CHECK_IN", "2026-07-28", "2026-07-28T08:00:00.000Z");
+  }
+  if (status === "CHECKED_OUT") {
+    base.effectiveArrangement.presentation = "LAST";
+    base.effectiveArrangement.businessDate = businessDate;
+    base.fulfillment.checkOut = fulfillmentFact("CHECK_OUT", businessDate, "2026-07-30T08:00:00.000Z");
+  }
+  const channelOperating: NonNullable<OrderViewDto["channelOperating"]> = {
+    initialized: true, businessDate, currency: "CNY", originalSaleFactId: "channel_sale", netMinor: "20000", openingRefundMinor: "0",
+    facts: [{ id: "channel_sale", kind: "SALE", amountMinor: 20_000, businessDate: "2026-07-28", referencesFactId: null,
+      refundReference: null, note: "合成渠道成交", createdAt: "2026-07-28T08:00:00.000Z" }]
+  };
+  const input = { ...base, channelOperating };
+  const refundDeltas = new Map<string, number>();
+  const append = (amount: number, reversedIndex?: number) => {
+    const prior = input.pricingRevisions.at(-1)!;
+    const before = prior.current_contract_amount_minor;
+    const source = reversedIndex === undefined ? undefined : channelOperating.facts.find(fact => fact.id === `channel_refund_${reversedIndex}`)!;
+    const target = source ? before + refundDeltas.get(source.id)! : Math.min(before, Number(channelOperating.netMinor) - amount);
+    const commandType = source ? "REVERSE_FACT" : "RECORD_REFUND";
+    const sequence = input.amendments.length + 1;
+    const id = `amendment_${sequence}`;
+    const createdAt = new Date(`${businessDate}T09:00:00.000Z`);
+    createdAt.setUTCSeconds(sequence);
+    const timestamp = createdAt.toISOString();
+    const note = source ? "撤销合成渠道退款" : "合成已发生渠道退款";
+    const refundIndex = channelOperating.facts.filter(fact => fact.kind === "REFUND").length;
+    const refundReference = `SYNTHETIC-REFUND-${refundIndex}`;
+    const payload = { channelOperating: true, orderId: input.order.id, amountMinor: amount, currency: "CNY", businessDate,
+      note, contractBeforeMinor: before, contractTargetMinor: target,
+      ...(source ? { reversesFactId: source.id, netEffectMinor: amount }
+        : { method: "CHANNEL", transactionReference: null, referencesFactId: "channel_sale", refundReference }) };
+    input.amendments.push(amendment({ id, sequence, amendment_type: commandType, reason_code: commandType, reason_note: note,
+      prior_version: sequence - 1, new_version: sequence, command_id: `command_${sequence}`, payload, created_at: timestamp }));
+    const factId = source ? `channel_reversal_${reversedIndex}` : `channel_refund_${refundIndex}`;
+    channelOperating.facts.push({ id: factId, kind: source ? "REVERSAL" : "REFUND", amountMinor: source ? amount : -amount,
+      businessDate, referencesFactId: source?.id ?? "channel_sale", refundReference: source ? null : refundReference, note, createdAt: timestamp });
+    if (!source) refundDeltas.set(factId, before - target);
+    channelOperating.netMinor = String(Number(channelOperating.netMinor) + (source ? amount : -amount));
+    if (target !== before) {
+      const revisionNo = input.pricingRevisions.length + 1;
+      input.pricingRevisions.push({ ...prior, id: `revision_${revisionNo}`, revision_no: revisionNo, amendment_id: id,
+        current_contract_amount_minor: target, difference_from_policy_minor: target - prior.policy_base_amount_minor,
+        reason: { code: commandType, note }, created_at: timestamp });
+      input.order.current_revision_id = `revision_${revisionNo}`;
+    }
+    input.order.version = sequence;
+    input.order.current_contract_amount_minor = target;
+    input.amounts.currentContractAmount.minorUnits = target;
+    input.amounts.collectionDifference.minorUnits = target;
+  };
+  for (const amount of refunds) append(amount);
+  for (const index of reverse) append(-channelOperating.facts.find(fact => fact.id === `channel_refund_${index}`)!.amountMinor, index);
+  return input;
+}
+
+describe("渠道退款独立计价修订读回", () => {
+  it.each(["YOUMUDAO", "CTRIP", "MEITUAN"])("%s 部分退款和全退后保留预订、在住、已退房的住宿历史", channel => {
+    for (const status of ["RESERVED", "CHECKED_IN", "CHECKED_OUT"] as const) {
+      for (const refund of [2_000, 20_000]) {
+        const input = channelFundsView({ channel, status, refunds: [refund] });
+        const parsed = parseOrderView(input);
+        expect(parsed.amounts.currentContractAmount.minorUnits).toBe(20_000 - refund);
+        expect(parsed.order.status).toBe(status);
+        expect(parsed.arrangementHistory).toEqual(orderView().arrangementHistory);
+        expect(parsed.collectionFacts).toEqual([]);
+      }
+    }
+  });
+
+  it("分次退至零及逐笔撤销均关联各自原退款，恢复应结不重写住宿历史", () => {
+    for (const reverse of [[], [1], [1, 0], [0], [0, 1]]) {
+      const input = channelFundsView({ status: "CHECKED_OUT", refunds: [5_000, 15_000], reverse });
+      const parsed = parseOrderView(input);
+      expect(parsed.amounts.currentContractAmount.minorUnits).toBe(reverse.reduce((sum, index) => sum + [5_000, 15_000][index]!, 0));
+      expect(parsed.channelOperating!.netMinor).toBe(String(parsed.amounts.currentContractAmount.minorUnits));
+      expect(parsed.arrangementHistory).toEqual(orderView().arrangementHistory);
+    }
+  });
+
+  it("按每次退款当时的净额核对，扣除期初已退且不混入后续退款和撤销", () => {
+    const input = channelFundsView({ refunds: [5_000, 15_000], reverse: [1, 0] });
+    input.channelOperating.facts[0]!.amountMinor += 5_000;
+    input.channelOperating.openingRefundMinor = "5000";
+    expect(parseOrderView(input).amounts.currentContractAmount.minorUnits).toBe(20_000);
+    // Separate database transactions may serialize to the same millisecond;
+    // the response's event order still identifies each intermediate balance.
+    for (const fact of input.channelOperating.facts.slice(1)) fact.createdAt = "2026-07-28T09:00:00.000Z";
+    for (const item of input.amendments.slice(1)) item.created_at = "2026-07-28T09:00:00.000Z";
+    for (const revision of input.pricingRevisions.slice(1)) revision.created_at = "2026-07-28T09:00:00.000Z";
+    expect(parseOrderView(input).amounts.currentContractAmount.minorUnits).toBe(20_000);
+  });
+
+  it("拒绝少降应结的退款修订，即使变更、修订和当前金额相互一致", () => {
+    const input = channelFundsView({ refunds: [10_000] });
+    Object.assign(input.amendments[1]!.payload, { contractTargetMinor: 15_000 });
+    input.pricingRevisions[1]!.current_contract_amount_minor = 15_000;
+    input.pricingRevisions[1]!.difference_from_policy_minor = -5_000;
+    input.order.current_contract_amount_minor = 15_000;
+    input.amounts.currentContractAmount.minorUnits = 15_000;
+    input.amounts.collectionDifference.minorUnits = 15_000;
+    expect(() => parseOrderView(input)).toThrow(/退款当时的渠道净额/);
+  });
+
+  it("撤销后再次登记相同平台退款号时，按各次原事实核对撤销", () => {
+    const input = channelFundsView({ refunds: [10_000], reverse: [0] });
+    for (const [index, sourceIndex] of [1, 2].entries()) {
+      const sequence = 4 + index;
+      const timestamp = `2026-07-28T09:00:0${sequence}.000Z`;
+      const sourceAmendment = structuredClone(input.amendments[sourceIndex]!);
+      Object.assign(sourceAmendment, { id: `amendment_${sequence}`, sequence, prior_version: sequence - 1, new_version: sequence,
+        command_id: `command_${sequence}`, created_at: timestamp });
+      if (index === 1) Object.assign(sourceAmendment.payload, { reversesFactId: "channel_refund_repeat" });
+      input.amendments.push(sourceAmendment);
+      input.pricingRevisions.push({ ...structuredClone(input.pricingRevisions[sourceIndex]!), id: `revision_${sequence}`,
+        revision_no: sequence, amendment_id: sourceAmendment.id, created_at: timestamp });
+      const sourceFact = structuredClone(input.channelOperating.facts[sourceIndex]!);
+      input.channelOperating.facts.push({ ...sourceFact, id: index === 0 ? "channel_refund_repeat" : "channel_reversal_repeat",
+        referencesFactId: index === 0 ? "channel_sale" : "channel_refund_repeat", createdAt: timestamp });
+    }
+    input.order.version = 5;
+    input.order.current_revision_id = "revision_5";
+    expect(parseOrderView(input).amounts.currentContractAmount.minorUnits).toBe(20_000);
+  });
+
+  it.each([
+    ["缺少渠道事实", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v, { channelOperating: null }); }],
+    ["尚未承接渠道数据", (v: ReturnType<typeof channelFundsView>) => { v.channelOperating.initialized = false; }],
+    ["缺少退款事实而只有修订", (v: ReturnType<typeof channelFundsView>) => { v.channelOperating.facts.pop(); v.channelOperating.netMinor = "20000"; }],
+    ["普通企微零金额", (v: ReturnType<typeof channelFundsView>) => { v.order.booking_channel_code = "WECOM"; }],
+    ["缺少渠道单号", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.order, { channel_order_reference: "" }); }],
+    ["免费住宿伪装渠道退款", (v: ReturnType<typeof channelFundsView>) => { v.order.stay_type = "FREE"; }],
+    ["跨订单变更", (v: ReturnType<typeof channelFundsView>) => { v.amendments[1]!.order_id = "another_order"; }],
+    ["跨订单退款依据", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { orderId: "another_order" }); }],
+    ["缺少渠道标识", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { channelOperating: false }); }],
+    ["缺少实际命令关联", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!, { command_id: null }); }],
+    ["退款币种不同", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { currency: "USD" }); }],
+    ["退款前金额不同", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { contractBeforeMinor: 19_000 }); }],
+    ["退款后金额不同", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { contractTargetMinor: 1 }); }],
+    ["退款金额不足以归零", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { amountMinor: 1_000 }); }],
+    ["退款来源不是原成交", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { referencesFactId: "other_sale" }); }],
+    ["平台退款号不同", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { refundReference: "OTHER-REFUND" }); }],
+    ["退款业务日期不同", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { businessDate: "2026-07-29" }); }],
+    ["伪造未来退款日期", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { businessDate: "2026-07-29" }); v.channelOperating.facts[1]!.businessDate = "2026-07-29"; }],
+    ["事实记录时间不同", (v: ReturnType<typeof channelFundsView>) => { v.channelOperating.facts[1]!.createdAt = "2026-07-28T10:00:00.000Z"; }],
+    ["退款说明不同", (v: ReturnType<typeof channelFundsView>) => { Object.assign(v.amendments[1]!.payload, { note: "其他退款" }); }],
+    ["篡改政策基础价", (v: ReturnType<typeof channelFundsView>) => { v.pricingRevisions[1]!.policy_base_amount_minor = 10_000; v.pricingRevisions[1]!.difference_from_policy_minor = -10_000; }],
+    ["篡改政策版本", (v: ReturnType<typeof channelFundsView>) => { v.pricingRevisions[1]!.policy_version_id = "other_policy"; }],
+    ["退款篡改住宿日期", (v: ReturnType<typeof channelFundsView>) => { v.pricingRevisions[1]!.arrival_date = "2026-07-29"; }],
+    ["退款伪装普通调价方式", (v: ReturnType<typeof channelFundsView>) => { v.pricingRevisions[1]!.pricing_basis = "POLICY"; }],
+    ["非零人工调价", (v: ReturnType<typeof channelFundsView>) => { v.pricingRevisions[1]!.manual_adjustment_minor = 1; }],
+    ["计价原因不同", (v: ReturnType<typeof channelFundsView>) => { v.pricingRevisions[1]!.reason.note = "其他原因"; }],
+    ["重复变更依据", (v: ReturnType<typeof channelFundsView>) => { v.amendments.push({ ...v.amendments[1]! }); }]
+  ] as const)("拒绝损坏的渠道退款修订：%s", (_, damage) => {
+    const input = channelFundsView();
+    damage(input);
+    expect(() => parseOrderView(input)).toThrow(OrderViewValidationError);
+  });
+
+  it("撤销后的金额即使回到原住宿金额，仍核对中间退款修订", () => {
+    const input = channelFundsView({ refunds: [20_000], reverse: [0] });
+    Object.assign(input.amendments[1]!.payload, { contractBeforeMinor: 19_000 });
+    expect(() => parseOrderView(input)).toThrow(/渠道退款计价修订/);
+  });
+
+  it("拒绝撤销与原退款合同减少额不符，即使退款金额本身相同", () => {
+    const input = channelFundsView({ refunds: [20_000], reverse: [0] });
+    Object.assign(input.amendments[2]!.payload, { contractTargetMinor: 19_000 });
+    input.pricingRevisions[2]!.current_contract_amount_minor = 19_000;
+    input.pricingRevisions[2]!.difference_from_policy_minor = -1_000;
+    input.order.current_contract_amount_minor = 19_000;
+    input.amounts.currentContractAmount.minorUnits = 19_000;
+    input.amounts.collectionDifference.minorUnits = 19_000;
+    expect(() => parseOrderView(input)).toThrow(/原退款应结减少金额/);
+  });
 });
