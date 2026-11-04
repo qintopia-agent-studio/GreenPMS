@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-10-29.1";
+export const assistantKnowledgeRevision = "2026-11-04.1";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -213,9 +213,9 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
   {
     id: "assistant-help", title: "AI助手的使用、配置与不确定性", commands: [],
     sources: ["docs/operations/ai-assistant.md", "docs/operations/ai-question-records.md", "apps/api/src/assistant.ts"],
-    content: `员工可问操作步骤、查询订单/会员或有限日期内的可用房间，并让助手打开支持的正式入口。当前能直接打开的订单表单只有续住、换房、记录收款、调整金额、取消订单；其他操作先打开订单详情，再由员工按说明点击真实按钮。没有具体订单时先确认目标，不猜ID。
-留存明细、退款流水、会员权益详情等未接入助手查询的实时数据，必须由员工到正式页面核对，不能从一般知识或历史对话编造。知识不足时说明缺少依据并引导管理员核实，不编造按钮、业务规则或办理结果。
-模型配置所属门店的管理员可在设置→AI助手修改地址、模型和密钥，测试连接后保存启用；测试连接会请求模型服务。模型故障不影响PMS其他业务；可停止生成或新建对话，不重复提交业务。员工反馈“未解决”会记录供改进分析，不会自动训练模型或自动修改业务规则。`
+    content: `员工可问操作、查询订单/会员及有限日期可用房间、打开正式入口。订单直开表单仅续住、换房、记录收款、调整金额、取消订单；其余先开详情，由员工操作。订单不明先确认，不猜ID。
+留存明细、退款流水、会员权益详情等未接入实时查询，需到页面核对，不能凭知识或历史对话编造。缺少依据时说明并引导管理员核实，不编造按钮、规则或结果。
+配置所属门店管理员在设置→AI助手修改地址、模型和密钥，测试后保存启用；测试会请求模型服务。首响等待60秒，此后连续60秒无有效进展才超时；文字、思考、工具增量均可续期，保活心跳不算。持续响应无总时限；停止即取消，不自动重试；断线、退出或权限失效仍停止。模型故障不影响PMS其他业务；可新建对话，不重复提交业务。“未解决”反馈仅供分析，不会训练模型或修改业务规则。`
   }
 ];
 

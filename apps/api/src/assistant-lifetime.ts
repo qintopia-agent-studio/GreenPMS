@@ -14,16 +14,25 @@ export function abortable<T>(work: Promise<T>, signal?: AbortSignal): Promise<T>
     if (signal.aborted) abort();
   });
 }
-export function assistantLifetime(request: FastifyRequest, reply: FastifyReply, timeoutMs = 120_000) {
+export function assistantLifetime(request: FastifyRequest, reply: FastifyReply, idleTimeoutMs = 120_000) {
   const controller = new AbortController();
   const { signal } = controller;
   let streaming = false, terminal = false;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
-  const timeout = setTimeout(() => controller.abort(new AssistantFailure("AI_TOTAL_TIMEOUT", "本次回答等待超时，已停止查询。请缩小问题范围后重试。")), timeoutMs);
+  let idle: ReturnType<typeof setTimeout> | undefined, disposed = false;
   const disconnect = () => { if (!reply.raw.writableFinished) controller.abort(new AssistantFailure("AI_CANCELLED", "本次回答已停止。")); };
   request.raw.once("aborted", disconnect);
   reply.raw.once("close", disconnect);
   const check = () => { if (signal.aborted) throw signal.reason; };
+  // Bound stalled dependencies, not the age of an actively progressing answer.
+  // Our own browser keepalive must never refresh this timer.
+  function progress() {
+    if (disposed) return;
+    check();
+    clearTimeout(idle);
+    idle = setTimeout(() => controller.abort(new AssistantFailure("AI_REQUEST_IDLE_TIMEOUT", "助手查询长时间没有进展，已停止本次请求，请稍后重试。")), idleTimeoutMs);
+  }
+  progress();
   function start() {
     check();
     if (!request.headers.accept?.includes("text/event-stream")) return;
@@ -58,12 +67,15 @@ export function assistantLifetime(request: FastifyRequest, reply: FastifyReply, 
       const safe = error instanceof DomainError ? error : new AssistantFailure("AI_REQUEST_FAILED", "助手暂时无法完成回答，请稍后重试。");
       terminal = true;
       reply.raw.end(`data: ${JSON.stringify({ type: "error", code: safe.code, status: safe.statusCode, message: safe.message })}\n\n`);
+      controller.abort(safe);
     }
     return true;
   }
   function dispose() {
-    clearTimeout(timeout); clearInterval(heartbeat);
+    disposed = true;
+    clearTimeout(idle); clearInterval(heartbeat);
+    if (!signal.aborted) controller.abort(new AssistantFailure("AI_CANCELLED", "本次回答已结束。"));
     request.raw.off("aborted", disconnect); reply.raw.off("close", disconnect);
   }
-  return { signal, check, start, emit, fail, dispose, get streaming() { return streaming; } };
+  return { signal, check, progress, start, emit, fail, dispose, get streaming() { return streaming; } };
 }

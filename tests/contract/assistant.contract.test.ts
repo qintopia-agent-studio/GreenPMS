@@ -20,8 +20,18 @@ let owner: Kysely<Database>, runtime: Kysely<Database>, app: FastifyInstance, ad
 const calls: ModelInput[] = [];
 let mode = "guide";
 let duringModel: (() => Promise<void>) | undefined;
+let reasoningCompletions = 0;
 const transport: ModelTransport = async input => {
   calls.push(input);
+  if (mode === "reasoning-only") {
+    expect(input.onProgress).toBeTypeOf("function");
+    await input.onProgress?.(); // no visible text: the provider is still thinking
+    if (duringModel) { const action = duringModel; duringModel = undefined; await action(); }
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    await input.onProgress?.(); // authorization must fail here, before any final answer
+    reasoningCompletions++;
+    return { content: "不应返回的最终回答" };
+  }
   if (duringModel) { const action = duringModel; duringModel = undefined; await action(); }
   if (mode === "fail") throw new Error("DO-NOT-LEAK synthetic-provider-key");
   if (mode === "waiting") return new Promise((_, reject) => {
@@ -250,6 +260,60 @@ describe.sequential("AI assistant authenticated contract", () => {
     expect((await feedback(question, temporary)).statusCode).toBe(401);
     await expect(sql`SELECT qintopia_feedback_ai_question(${question}, ${row.actor_subject_id}, ${row.actor_session_id}, ${demo.propertyId}, 'RESOLVED')`.execute(runtime)).rejects.toThrow("AI_QUESTION_FORBIDDEN");
   });
+  it("keeps actively progressing long questions finishable without reviving stale or foreign records", async () => {
+    mode = "guide";
+    const completed = (await chat()).json().questionId as string;
+    const base = (await rows()).find(r => r.id === completed)!;
+    for (const [id, idle] of [["long-active", "5 minutes"], ["long-stale", "11 minutes"]]) {
+      await sql`INSERT INTO ai_question_records(id,property_id,actor_subject_id,actor_session_id,conversation_id,question_redacted,source,page,topic,application_version,created_at,updated_at)
+        VALUES (${id},${demo.propertyId},${base.actor_subject_id},${base.actor_session_id},'long-fixture','合成长问答','USER','unknown','OTHER','test',clock_timestamp()-interval '2 hours',clock_timestamp()-${idle}::interval)`.execute(owner);
+    }
+    await expect(sql`SELECT qintopia_touch_ai_question('long-active','forged',${base.actor_session_id})`.execute(runtime)).rejects.toThrow("AI_QUESTION_FORBIDDEN");
+    await expect(sql`SELECT qintopia_touch_ai_question('long-active',${base.actor_subject_id},'forged')`.execute(runtime)).rejects.toThrow("AI_QUESTION_FORBIDDEN");
+    await expect(owner.transaction().execute(async trx => {
+      await sql`SET LOCAL ROLE qintopia_ai_analytics_reader`.execute(trx);
+      await sql`SELECT qintopia_touch_ai_question('long-active',${base.actor_subject_id},${base.actor_session_id})`.execute(trx);
+    })).rejects.toThrow("permission denied");
+    await sql`SELECT qintopia_touch_ai_question('long-active',${base.actor_subject_id},${base.actor_session_id})`.execute(runtime);
+    await sql`SELECT qintopia_touch_ai_question('long-stale',${base.actor_subject_id},${base.actor_session_id})`.execute(runtime);
+    await sql`SELECT qintopia_maintain_ai_questions()`.execute(runtime);
+    expect((await rows()).find(r => r.id === "long-active")?.outcome).toBe("PENDING");
+    expect((await rows()).find(r => r.id === "long-stale")?.outcome).toBe("INTERRUPTED");
+    const before = await totals();
+    await Promise.all([
+      sql`SELECT qintopia_touch_ai_question('long-active',${base.actor_subject_id},${base.actor_session_id})`.execute(runtime),
+      sql`SELECT qintopia_finish_ai_question('long-active',${base.actor_subject_id},${base.actor_session_id},'ANSWERED',NULL,ARRAY[]::text[],7200000)`.execute(runtime)
+    ]);
+    const finished = (await rows()).find(r => r.id === "long-active")!;
+    expect(finished).toMatchObject({ outcome: "ANSWERED", duration_ms: 7_200_000 });
+    await sql`SELECT qintopia_touch_ai_question('long-active',${base.actor_subject_id},${base.actor_session_id})`.execute(runtime);
+    expect((await rows()).find(r => r.id === "long-active")).toEqual(finished);
+    await sql`SELECT qintopia_finish_ai_question('long-stale',${base.actor_subject_id},${base.actor_session_id},'ANSWERED',NULL,ARRAY[]::text[],7200000)`.execute(runtime);
+    expect((await rows()).find(r => r.id === "long-stale")?.outcome).toBe("INTERRUPTED");
+    expect(await totals()).toMatchObject({ questions: before.questions, pending: before.pending - 1, answered: before.answered + 1, interrupted: before.interrupted });
+    expect((await feedback("long-active")).statusCode).toBe(200);
+    const revoked = (await sql<{ id: string; actor_subject_id: string; actor_session_id: string }>`
+      SELECT q.id,q.actor_subject_id,q.actor_session_id FROM ai_question_records q
+        JOIN web_sessions w ON w.id=q.actor_session_id
+        WHERE w.revoked_at IS NOT NULL LIMIT 1`.execute(owner)).rows[0]!;
+    expect(revoked).toBeDefined();
+    await expect(sql`SELECT qintopia_touch_ai_question(${revoked.id},${revoked.actor_subject_id},${revoked.actor_session_id})`.execute(runtime)).rejects.toThrow("AI_QUESTION_FORBIDDEN");
+  });
+  it("rejects readiness when question progress privileges or implementation drift", async () => {
+    expect(await databaseReady(runtime)).toBe(true);
+    await sql`GRANT EXECUTE ON FUNCTION qintopia_touch_ai_question(text,text,text) TO PUBLIC`.execute(owner);
+    try { expect(await databaseReady(runtime)).toBe(false); }
+    finally { await sql`REVOKE EXECUTE ON FUNCTION qintopia_touch_ai_question(text,text,text) FROM PUBLIC`.execute(owner); }
+    await sql`REVOKE EXECUTE ON FUNCTION qintopia_touch_ai_question(text,text,text) FROM qintopia_runtime`.execute(owner);
+    try { expect(await databaseReady(runtime)).toBe(false); }
+    finally { await sql`GRANT EXECUTE ON FUNCTION qintopia_touch_ai_question(text,text,text) TO qintopia_runtime`.execute(owner); }
+    const original = (await sql<{ definition: string }>`SELECT pg_get_functiondef('qintopia_touch_ai_question(text,text,text)'::regprocedure) AS definition`.execute(owner)).rows[0]!.definition;
+    await sql`CREATE OR REPLACE FUNCTION qintopia_touch_ai_question(question_id text, actor_id text, session_id text) RETURNS void
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$ BEGIN RETURN; END; $$`.execute(owner);
+    try { expect(await databaseReady(runtime)).toBe(false); }
+    finally { await sql.raw(original).execute(owner); }
+    expect(await databaseReady(runtime)).toBe(true);
+  });
   it("denies runtime reads and arbitrary mutation, and exposes no record-list route", async () => {
     for (const table of ["ai_question_records", "ai_question_export", "ai_question_daily"]) {
       await expect(sql`SELECT * FROM ${sql.table(table)}`.execute(runtime)).rejects.toThrow("permission denied");
@@ -270,8 +334,8 @@ describe.sequential("AI assistant authenticated contract", () => {
   it("expires details and interrupts abandoned requests without erasing lifetime counts", async () => {
     const base = (await rows()).find(r => r.outcome === "ANSWERED")!;
     for (const [id, age, outcome] of [["retention-old", "91 days", "ANSWERED"], ["retention-abandoned", "91 days", "PENDING"], ["retention-keep", "89 days", "ANSWERED"], ["retention-pending", "11 minutes", "PENDING"]]) {
-      await sql`INSERT INTO ai_question_records(id, property_id, actor_subject_id, actor_session_id, conversation_id, question_redacted, source, page, topic, application_version, created_at, outcome)
-        VALUES (${id},${demo.propertyId},${base.actor_subject_id},${base.actor_session_id},'retention-fixture','合成保留测试','USER','unknown','OTHER','test',clock_timestamp()-${age}::interval,${outcome})`.execute(owner);
+      await sql`INSERT INTO ai_question_records(id, property_id, actor_subject_id, actor_session_id, conversation_id, question_redacted, source, page, topic, application_version, created_at, updated_at, outcome)
+        VALUES (${id},${demo.propertyId},${base.actor_subject_id},${base.actor_session_id},'retention-fixture','合成保留测试','USER','unknown','OTHER','test',clock_timestamp()-${age}::interval,clock_timestamp()-${age}::interval,${outcome})`.execute(owner);
     }
     expect((await sql`SELECT * FROM ai_question_export WHERE id IN ('retention-old','retention-abandoned')`.execute(owner)).rows).toEqual([]);
     const before = await totals();
@@ -311,10 +375,50 @@ describe.sequential("AI assistant authenticated contract", () => {
       expect(await readdir(directory)).toEqual(["snapshot.jsonl"]);
     } finally { await sql`DROP ROLE ${sql.id(role)}`.execute(owner); await rm(directory, { recursive: true, force: true }); }
   });
+  it.each([false, true])("rechecks logout during reasoning-only progress before a final answer (SSE=%s)", async streaming => {
+    const login = await app.inject({ method: "POST", remoteAddress: `127.0.0.${++peer}`, url: "/api/v1/auth/login", payload: { username: "operator", password: "demo-pass-2026" } });
+    expect(login.statusCode, login.body).toBe(200);
+    const temporary = login.cookies.find(c => c.name === "qintopia_session")!.value;
+    mode = "reasoning-only"; reasoningCompletions = 0;
+    duringModel = async () => {
+      const logout = await app.inject({ method: "POST", url: "/api/v1/auth/logout", cookies: cookies(temporary) });
+      expect(logout.statusCode).toBe(204);
+    };
+    try {
+      const response = await app.inject({ method: "POST", remoteAddress: `127.0.0.${++peer}`, url: "/api/v1/assistant/chat", cookies: cookies(temporary),
+        headers: streaming ? { accept: "text/event-stream" } : {}, payload: { propertyId: demo.propertyId, message: "合成纯思考权限复核", page: "房态" } });
+      expect(reasoningCompletions).toBe(0);
+      expect(response.statusCode).toBe(streaming ? 200 : 401);
+      expect(response.body).toContain("AUTHENTICATION_REQUIRED");
+      expect(response.body).not.toContain("不应返回的最终回答");
+      expect(response.body).not.toContain('"type":"delta"'); expect(response.body).not.toContain('"type":"done"');
+      await vi.waitFor(async () => expect((await rows()).at(-1)).toMatchObject({ outcome: "FAILED", error_code: "AUTHENTICATION_REQUIRED" }));
+    } finally { mode = "guide"; duringModel = undefined; }
+    expect((await chat()).statusCode).toBe(200); // the same subject can start again
+  });
+  it.each(["disabled", "version"])("rechecks %s settings during reasoning-only progress and releases the subject lock", async change => {
+    const save = async (extra: object) => {
+      const current = await owner.selectFrom("ai_model_settings").select("version").executeTakeFirstOrThrow();
+      const body = settingsBody({ expectedVersion: current.version, ...extra }); delete (body as { apiKey?: string }).apiKey;
+      const result = await app.inject({ method: "PUT", remoteAddress: `127.0.0.${++peer}`, url: "/api/v1/assistant/settings", cookies: cookies(admin), payload: body });
+      expect(result.statusCode, result.body).toBe(200);
+    };
+    mode = "reasoning-only"; reasoningCompletions = 0;
+    duringModel = () => save(change === "disabled" ? { enabled: false } : { model: "synthetic-new-model" });
+    try {
+      // Legacy JSON clients receive no onDelta callback but must still stop promptly.
+      const response = await chat();
+      expect(response.statusCode, response.body).toBe(400);
+      expect(response.body).toContain("模型配置已变化");
+      expect(reasoningCompletions).toBe(0); expect(response.body).not.toContain("不应返回的最终回答");
+    } finally { mode = "guide"; duringModel = undefined; await save({ enabled: true, model: "synthetic-model" }); }
+    expect((await chat()).statusCode).toBe(200);
+  });
   it("retains Key on same host, records versions and disables chat", async () => {
     mode = "guide";
-    const body = settingsBody({ expectedVersion: 1, enabled: false }); delete (body as { apiKey?: string }).apiKey;
-    const response = await app.inject({ method: "PUT", url: "/api/v1/assistant/settings", cookies: cookies(admin), payload: body }); expect(response.statusCode, response.body).toBe(200); expect(response.json()).toMatchObject({ version: 2, enabled: false, hasKey: true });
+    const current = await owner.selectFrom("ai_model_settings").select("version").executeTakeFirstOrThrow();
+    const body = settingsBody({ expectedVersion: current.version, enabled: false }); delete (body as { apiKey?: string }).apiKey;
+    const response = await app.inject({ method: "PUT", url: "/api/v1/assistant/settings", cookies: cookies(admin), payload: body }); expect(response.statusCode, response.body).toBe(200); expect(response.json()).toMatchObject({ version: current.version + 1, enabled: false, hasKey: true });
     const disabled = await chat(); expect(disabled.statusCode).toBe(400); expect(disabled.body).toContain("尚未启用");
   });
 });

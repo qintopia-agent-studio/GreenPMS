@@ -70,7 +70,7 @@ export async function resolvePublicEndpoint(baseUrl: string, signal?: AbortSigna
 export type ModelMessage = { role: "system" | "user" | "assistant" | "tool"; content: string | null; reasoning_content?: string; tool_calls?: ModelToolCall[]; tool_call_id?: string };
 export type ModelToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 export type ModelTool = { type: "function"; function: { name: string; description: string; parameters: object } };
-export interface ModelInput { baseUrl: string; apiKey: string; model: string; messages: ModelMessage[]; tools: ModelTool[]; toolChoice?: string; signal?: AbortSignal; onDelta?: (text: string) => Promise<void> }
+export interface ModelInput { baseUrl: string; apiKey: string; model: string; messages: ModelMessage[]; tools: ModelTool[]; toolChoice?: string; signal?: AbortSignal; onDelta?: (text: string) => Promise<void>; onProgress?: () => void | Promise<void> }
 export type ModelResponse = { content: string | null; reasoning_content?: string; tool_calls?: ModelToolCall[]; finishReason?: string };
 export type ModelTransport = (input: ModelInput) => Promise<ModelResponse>;
 
@@ -105,7 +105,9 @@ export class ModelStreamDecoder {
   private tools = new Map<number, ModelToolCall>();
   private finish: unknown;
   private done = false;
+  private progressRevision = 0;
   get complete() { return this.done; }
+  get progress() { return this.progressRevision; }
   push(text: string): string {
     let delta = "";
     for (const data of this.frames.push(text)) {
@@ -118,15 +120,18 @@ export class ModelStreamDecoder {
       const choice = parsed.choices[0];
       if (parsed.choices.length !== 1 || !choice || choice.index !== 0 || this.finish || !choice.delta || typeof choice.delta !== "object" || Array.isArray(choice.delta)) throw invalidResponse();
       const part = choice.delta;
+      let progressed = false;
       if (part.reasoning_content != null) {
         if (typeof part.reasoning_content !== "string") throw invalidResponse("REASONING_CONTENT");
         this.reasoning += part.reasoning_content;
         if (this.reasoning.length > MAX_MODEL_TEXT) throw invalidResponse("REASONING_CONTENT");
+        progressed ||= part.reasoning_content.length > 0;
       }
       if (part.content != null) {
         if (typeof part.content !== "string") throw invalidResponse();
         this.content += part.content; delta += part.content;
         if (this.content.length > MAX_MODEL_TEXT) throw invalidResponse();
+        progressed ||= part.content.length > 0;
       }
       if (part.tool_calls !== undefined) {
         if (!Array.isArray(part.tool_calls) || part.tool_calls.length > 6) throw invalidResponse();
@@ -139,12 +144,14 @@ export class ModelStreamDecoder {
           tool.function.arguments += item.function?.arguments ?? "";
           if (tool.id.length > 200 || tool.function.name.length > 200 || tool.function.arguments.length > 6000) throw invalidResponse();
           this.tools.set(item.index, tool);
+          progressed ||= Boolean(item.id || item.function?.name || item.function?.arguments);
         }
       }
       if (choice.finish_reason != null) {
         if (!["stop", "tool_calls"].includes(choice.finish_reason)) throw invalidResponse(`FINISH_${choice.finish_reason}`);
         this.finish = choice.finish_reason;
       }
+      if (progressed) this.progressRevision++;
     }
     return delta;
   }
@@ -157,16 +164,22 @@ export class ModelStreamDecoder {
 
 export const callModel: ModelTransport = async (input) => {
   const endpoint = await resolvePublicEndpoint(input.baseUrl, input.signal);
-  const streaming = Boolean(input.onDelta);
-  const body = JSON.stringify({ model: input.model, messages: input.messages, tools: input.tools, stream: streaming,
+  // Collect the same provider stream even for callers that need only the final JSON reply.
+  const body = JSON.stringify({ model: input.model, messages: input.messages, tools: input.tools, stream: true,
     max_tokens: 2048, ...(input.toolChoice ? { tool_choice: { type: "function", function: { name: input.toolChoice } } } : {}) });
   try {
     return await new Promise<Awaited<ReturnType<ModelTransport>>>((resolve, reject) => {
-      let settled = false, idle: ReturnType<typeof setTimeout> | undefined;
+      let settled = false, hasProgress = false, progressTimer: ReturnType<typeof setTimeout> | undefined;
       const finish = (error?: unknown, result?: Awaited<ReturnType<ModelTransport>>) => {
         if (settled) return;
-        settled = true; clearTimeout(deadline); clearTimeout(idle); input.signal?.removeEventListener("abort", abort);
+        settled = true; clearTimeout(progressTimer); input.signal?.removeEventListener("abort", abort);
         if (error) { req.destroy(); reject(error); } else resolve(result!);
+      };
+      const resetProgressDeadline = () => {
+        clearTimeout(progressTimer);
+        progressTimer = setTimeout(() => finish(hasProgress
+          ? new AssistantFailure("AI_MODEL_IDLE_TIMEOUT", "模型已连续60秒没有新的响应，已停止本次回答。请稍后重试。")
+          : new AssistantFailure("AI_MODEL_FIRST_RESPONSE_TIMEOUT", "模型在60秒内没有开始响应，已停止本次请求。请稍后重试或联系管理员检查连接。")), 60_000);
       };
       const req = request(endpoint.url, {
         method: "POST", family: endpoint.address.family,
@@ -174,41 +187,36 @@ export const callModel: ModelTransport = async (input) => {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${input.apiKey}`, "Content-Length": Buffer.byteLength(body) }
       }, async (response) => {
         if (response.statusCode !== 200) { finish(new AssistantFailure(`AI_HTTP_${response.statusCode ?? 0}`, `模型服务返回 HTTP ${response.statusCode ?? "未知"}，请检查模型、凭证或稍后重试。`)); response.destroy(); return; }
-        if (streaming && !response.headers["content-type"]?.includes("text/event-stream")) { finish(invalidResponse()); response.destroy(); return; }
-        let size = 0, raw = "";
+        if (!response.headers["content-type"]?.includes("text/event-stream")) { finish(invalidResponse()); response.destroy(); return; }
+        let size = 0;
         const decoder = new TextDecoder("utf-8", { fatal: true }), stream = new ModelStreamDecoder();
-        const resetIdle = () => { clearTimeout(idle); idle = setTimeout(() => finish(new AssistantFailure("AI_MODEL_IDLE_TIMEOUT", "模型响应中断，已停止本次回答，请稍后重试。")), 25_000); };
-        resetIdle();
+        const decode = async (text: string) => {
+          const previousProgress = stream.progress, delta = stream.push(text);
+          // Headers, comments, empty deltas and usage-only frames do not prove model progress.
+          if (stream.progress !== previousProgress) {
+            hasProgress = true; resetProgressDeadline(); await input.onProgress?.();
+          }
+          if (settled) return;
+          if (delta) await input.onDelta?.(delta);
+        };
         try {
           for await (const chunk of response) {
             if (settled) return;
             size += chunk.length;
             if (size > 1_000_000) throw new AssistantFailure("AI_RESPONSE_TOO_LARGE", "模型响应过大，请缩小问题范围后重试。");
-            resetIdle();
-            const text = decoder.decode(chunk, { stream: true });
-            if (streaming) {
-              const delta = stream.push(text);
-              if (delta) await input.onDelta!(delta);
-              // The protocol terminator is authoritative; a proxy may keep its socket open.
-              if (stream.complete) { finish(undefined, stream.result()); response.destroy(); return; }
-            } else raw += text;
+            await decode(decoder.decode(chunk, { stream: true }));
+            if (settled) return;
+            // The protocol terminator is authoritative; a proxy may keep its socket open.
+            if (stream.complete) { finish(undefined, stream.result()); response.destroy(); return; }
           }
-          const tail = decoder.decode();
-          if (streaming) {
-            const delta = stream.push(tail);
-            if (delta) await input.onDelta!(delta);
-            finish(undefined, stream.result());
-          } else {
-            const parsed = JSON.parse(raw + tail), choice = parsed.choices?.[0];
-            if (!choice?.message) throw invalidResponse();
-            finish(undefined, validateMessage({ ...choice.message, content: choice.message.content ?? null }, choice.finish_reason));
-          }
+          await decode(decoder.decode());
+          finish(undefined, stream.result());
         } catch (error) { finish(error); }
       });
-      const deadline = setTimeout(() => finish(new AssistantFailure("AI_MODEL_TIMEOUT", "模型回答超时，已停止本次请求。请稍后重试或联系管理员检查连接。")), 60_000);
       const abort = () => finish(input.signal!.reason);
       input.signal?.addEventListener("abort", abort, { once: true });
       req.once("error", error => finish(error));
+      resetProgressDeadline();
       if (input.signal?.aborted) abort(); else req.end(body);
     });
   } catch (error) {

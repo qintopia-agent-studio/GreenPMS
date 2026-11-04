@@ -72,23 +72,14 @@ it("streams text before EOF, decodes split UTF-8, and sends one pinned HTTPS req
   expect(JSON.parse(req.end.mock.calls[0]![0] as unknown as string)).toMatchObject({ stream: true, max_tokens: 2048 });
   expect(vi.mocked(request).mock.calls[0]?.[1]).toMatchObject({ family: 4, lookup: expect.any(Function) });
 });
-function fakeJsonProvider() {
-  const response = Object.assign(new PassThrough(), { statusCode: 200, headers: { "content-type": "application/json" } });
-  const req = Object.assign(new EventEmitter(), { destroy: vi.fn(() => { response.destroy(); }), end: vi.fn<(body?: string) => void>() });
-  vi.mocked(request).mockImplementation(((_url: unknown, _options: unknown, callback: (response: unknown) => void) => {
-    req.end.mockImplementation(() => callback(response));
-    return req;
-  }) as never);
-  const input: ModelInput = { baseUrl: "https://model.example/v1", apiKey: "synthetic-private-key", model: "test", messages: [{ role: "user", content: "test" }], tools: [] };
-  return { input, response, req };
-}
-it("preserves reasoning content in the legacy non-stream response path", async () => {
-  const { input, response, req } = fakeJsonProvider();
+it("collects the provider stream for a legacy caller without a text callback", async () => {
+  const { input, response, req } = fakeProvider();
+  delete input.onDelta;
   const result = callModel(input);
   await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce());
-  response.end(JSON.stringify({ choices: [{ message: { content: null, reasoning_content: "内部推理", tool_calls: [{ id: "call-1", type: "function", function: { name: "open_entry", arguments: "{}" } }] }, finish_reason: "tool_calls" }] }));
+  response.write(frame({ reasoning_content: "内部推理", tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "open_entry", arguments: "{}" } }] }, "tool_calls") + done);
   expect(await result).toEqual({ content: null, reasoning_content: "内部推理", tool_calls: [{ id: "call-1", type: "function", function: { name: "open_entry", arguments: "{}" } }], finishReason: "tool_calls" });
-  expect(JSON.parse(req.end.mock.calls[0]![0] as unknown as string)).toMatchObject({ stream: false, max_tokens: 2048 });
+  expect(JSON.parse(req.end.mock.calls[0]![0] as unknown as string)).toMatchObject({ stream: true, max_tokens: 2048 });
 });
 it("cancels the HTTPS request and never retries", async () => {
   const { input, req } = fakeProvider();
@@ -99,22 +90,167 @@ it("cancels the HTTPS request and never retries", async () => {
   await rejected;
   expect(req.destroy).toHaveBeenCalled(); expect(request).toHaveBeenCalledOnce();
 });
-it("stops a silent provider after headers and preserves a classified timeout", async () => {
+it("waits up to sixty seconds for the first effective response even after headers", async () => {
   vi.useFakeTimers();
   const { input, req } = fakeProvider();
   const result = callModel(input);
-  const rejected = expect(result).rejects.toMatchObject({ diagnostic: "AI_MODEL_IDLE_TIMEOUT" });
-  await vi.advanceTimersByTimeAsync(25_001);
+  const rejected = expect(result).rejects.toMatchObject({ diagnostic: "AI_MODEL_FIRST_RESPONSE_TIMEOUT" });
+  await vi.advanceTimersByTimeAsync(59_999);
+  expect(req.destroy).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(2);
   await rejected; expect(req.destroy).toHaveBeenCalled(); expect(request).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
 });
 it("bounds the request even if no response headers arrive", async () => {
   vi.useFakeTimers();
   const { input, req } = fakeProvider();
   vi.mocked(request).mockImplementation((() => { req.end.mockImplementation(() => {}); return req; }) as never);
   const result = callModel(input);
-  const rejected = expect(result).rejects.toMatchObject({ diagnostic: "AI_MODEL_TIMEOUT" });
+  const rejected = expect(result).rejects.toMatchObject({ diagnostic: "AI_MODEL_FIRST_RESPONSE_TIMEOUT" });
   await vi.advanceTimersByTimeAsync(60_001);
   await rejected; expect(req.destroy).toHaveBeenCalled(); expect(request).toHaveBeenCalledOnce();
+});
+
+it("keeps an actively generating answer beyond the former model and browser deadlines", async () => {
+  vi.useFakeTimers();
+  const { input, response, req } = fakeProvider();
+  input.onProgress = vi.fn();
+  const result = callModel(input);
+  await vi.advanceTimersByTimeAsync(0);
+  for (let i = 0; i < 6; i++) {
+    await vi.advanceTimersByTimeAsync(50_000);
+    response.write(frame({ content: String(i) }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(req.destroy).not.toHaveBeenCalled();
+  }
+  response.write(frame({}, "stop") + done);
+  expect(await result).toEqual({ content: "012345", finishReason: "stop" });
+  expect(input.onProgress).toHaveBeenCalledTimes(6);
+  expect(request).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("counts reasoning and tool fragments as progress without exposing them as text", async () => {
+  vi.useFakeTimers();
+  const { input, response, req } = fakeProvider();
+  input.onProgress = vi.fn();
+  const result = callModel(input);
+  await vi.advanceTimersByTimeAsync(0);
+  for (const delta of [
+    { reasoning_content: "internal thought" },
+    { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "open_" } }] },
+    { tool_calls: [{ index: 0, function: { name: "entry", arguments: '{"page":' } }] },
+    { tool_calls: [{ index: 0, function: { arguments: '"orders"}' } }] }
+  ]) {
+    await vi.advanceTimersByTimeAsync(50_000);
+    response.write(frame(delta));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(req.destroy).not.toHaveBeenCalled();
+  }
+  response.write(frame({}, "tool_calls") + done);
+  expect(await result).toMatchObject({ content: null, reasoning_content: "internal thought", tool_calls: [{ id: "call-1", function: { name: "open_entry", arguments: '{"page":"orders"}' } }] });
+  expect(input.onDelta).not.toHaveBeenCalled();
+  expect(input.onProgress).toHaveBeenCalledTimes(4);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+const emptyFrames = ": heartbeat\n\n" + frame({ role: "assistant", content: "", reasoning_content: "", tool_calls: [{ index: 0, function: { name: "", arguments: "" } }] })
+  + 'data: {"choices":[],"usage":{"total_tokens":42}}\n\n';
+it("does not let heartbeats, usage or empty deltas extend the first-response deadline", async () => {
+  vi.useFakeTimers();
+  const { input, response, req } = fakeProvider();
+  input.onProgress = vi.fn();
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_MODEL_FIRST_RESPONSE_TIMEOUT" });
+  for (let i = 0; i < 5; i++) {
+    await vi.advanceTimersByTimeAsync(10_000);
+    response.write(emptyFrames);
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  await vi.advanceTimersByTimeAsync(10_001);
+  await rejected;
+  expect(input.onProgress).not.toHaveBeenCalled();
+  expect(req.destroy).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("times out sixty seconds after the last effective delta despite continued heartbeat traffic", async () => {
+  vi.useFakeTimers();
+  const { input, response, req } = fakeProvider();
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_MODEL_IDLE_TIMEOUT" });
+  await vi.advanceTimersByTimeAsync(40_000);
+  response.write(frame({ content: "answer started" }));
+  await vi.advanceTimersByTimeAsync(0);
+  for (let i = 0; i < 5; i++) {
+    await vi.advanceTimersByTimeAsync(10_000);
+    response.write(emptyFrames);
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  expect(req.destroy).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(10_001);
+  await rejected;
+  expect(req.destroy).toHaveBeenCalledOnce();
+  expect(request).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("does not treat a finish-reason-only frame as the first effective model response", async () => {
+  vi.useFakeTimers();
+  const { input, response, req } = fakeProvider();
+  input.onProgress = vi.fn();
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_MODEL_FIRST_RESPONSE_TIMEOUT" });
+  await vi.advanceTimersByTimeAsync(59_000);
+  response.write(frame({}, "stop"));
+  await vi.advanceTimersByTimeAsync(500);
+  response.write(": heartbeat\n\n");
+  await vi.advanceTimersByTimeAsync(501);
+  await rejected;
+  expect(input.onProgress).not.toHaveBeenCalled();
+  expect(req.destroy).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("still requires the protocol terminator and rejects a duplicate finish frame", async () => {
+  vi.useFakeTimers();
+  const { input, response } = fakeProvider();
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_MODEL_IDLE_TIMEOUT" });
+  await vi.advanceTimersByTimeAsync(0);
+  response.write(frame({ content: "complete text" }, "stop"));
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(60_001);
+  await rejected;
+  const stream = new ModelStreamDecoder();
+  stream.push(frame({ content: "complete text" }, "stop"));
+  expect(() => stream.push(frame({}, "stop"))).toThrow("不完整");
+});
+
+it("cleans up after manual cancellation during a long active response", async () => {
+  vi.useFakeTimers();
+  const { input, response, req } = fakeProvider();
+  const controller = new AbortController(); input.signal = controller.signal;
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_CANCELLED" });
+  for (let i = 0; i < 4; i++) {
+    await vi.advanceTimersByTimeAsync(50_000);
+    response.write(frame({ content: "still working" }));
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  controller.abort(new AssistantFailure("AI_CANCELLED", "cancelled"));
+  await rejected;
+  expect(req.destroy).toHaveBeenCalledOnce();
+  expect(request).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("awaits asynchronous progress checks and never emits text after access is denied", async () => {
+  vi.useFakeTimers();
+  const { input, response, req } = fakeProvider();
+  input.onProgress = async () => { await Promise.resolve(); throw new AssistantFailure("AI_CANCELLED", "cancelled"); };
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_CANCELLED" });
+  await vi.advanceTimersByTimeAsync(0);
+  response.write(frame({ content: "text" }));
+  await rejected;
+  expect(req.destroy).toHaveBeenCalledOnce();
+  expect(input.onDelta).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
 });
 it("rejects a provider disconnect before the terminator without retrying", async () => {
   const { input, response, req } = fakeProvider();
