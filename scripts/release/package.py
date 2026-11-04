@@ -286,6 +286,148 @@ def config_digest_from_member_name(name: str) -> str:
     return digest
 
 
+def archive_identity_for_built_image(path: Path, image: dict[str, object], tag: str) -> str:
+    """Bind the saved config to the inspected daemon identity before creating our manifest.
+
+    Classic Docker identifies a config; containerd identifies an OCI manifest/index.
+    Keep the latter's complete descriptor chain anchored to the independently inspected ID.
+    The public archive scanner still performs all release/platform/layer-content checks.
+    """
+    manifest_types = {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"}
+    index_types = {"application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"}
+    config_types = {"application/vnd.oci.image.config.v1+json", "application/vnd.docker.container.image.v1+json"}
+    layer_types = {"application/vnd.oci.image.layer.v1.tar", "application/vnd.oci.image.layer.v1.tar+gzip",
+                   "application/vnd.docker.image.rootfs.diff.tar", "application/vnd.docker.image.rootfs.diff.tar.gzip"}
+    try:
+        with tarfile.open(path, mode="r:*") as archive:
+            members = {}
+            for member in archive.getmembers():
+                require(member.name not in members, "Docker archive contains duplicate members")
+                members[member.name] = member
+
+            def member_bytes(name: str) -> bytes:
+                member = members.get(name)
+                require(member is not None and member.isfile(), "Docker archive identity member is missing")
+                require(member.size <= 8 * 1024 * 1024, "Docker archive identity JSON is too large")
+                stream = archive.extractfile(member)
+                require(stream is not None, "Docker archive identity member is unreadable")
+                return stream.read()
+
+            def json_object(raw: bytes) -> dict:
+                try:
+                    value = json.loads(raw)
+                except (UnicodeError, ValueError):
+                    raise ReleaseError("Docker archive identity JSON is invalid") from None
+                require(isinstance(value, dict), "Docker archive identity JSON is invalid")
+                return value
+
+            def descriptor_key(descriptor: object, allowed: set[str]) -> tuple[str, int, str]:
+                require(isinstance(descriptor, dict), "Docker archive descriptor is invalid")
+                digest, size, media_type = descriptor.get("digest"), descriptor.get("size"), descriptor.get("mediaType")
+                require(isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is not None,
+                        "Docker archive descriptor digest is invalid")
+                require(type(size) is int and size >= 0 and isinstance(media_type, str) and media_type in allowed,
+                        "Docker archive descriptor size or type is invalid")
+                return digest, size, media_type
+
+            def checked_blob(descriptor: object, allowed: set[str], *, as_json=False):
+                digest, size, media_type = descriptor_key(descriptor, allowed)
+                name = "blobs/sha256/" + digest.removeprefix("sha256:")
+                member = members.get(name)
+                require(member is not None and member.isfile() and member.size == size, "Docker archive descriptor blob is missing or has wrong size")
+                stream = archive.extractfile(member)
+                require(stream is not None, "Docker archive descriptor blob is unreadable")
+                hasher = hashlib.sha256()
+                while chunk := stream.read(1024 * 1024):
+                    hasher.update(chunk)
+                require("sha256:" + hasher.hexdigest() == digest, "Docker archive descriptor blob hash mismatch")
+                if not as_json:
+                    return name
+                value = json_object(member_bytes(name))
+                if media_type in manifest_types | index_types:
+                    require(value.get("schemaVersion") == 2 and value.get("mediaType", media_type) == media_type,
+                            "Docker archive manifest descriptor type mismatch")
+                return value
+
+            try:
+                docker_manifest = json.loads(member_bytes("manifest.json"))
+            except (UnicodeError, ValueError):
+                raise ReleaseError("Docker archive manifest is invalid") from None
+            require(isinstance(docker_manifest, list) and len(docker_manifest) == 1, "Docker archive manifest count mismatch")
+            entry = docker_manifest[0]
+            require(isinstance(entry, dict) and entry.get("RepoTags") == [tag], "Docker archive tag mismatch")
+            config_name, layers = entry.get("Config"), entry.get("Layers")
+            require(isinstance(config_name, str) and isinstance(layers, list) and all(isinstance(layer, str) for layer in layers),
+                    "Docker archive image entry is incomplete")
+            config_bytes = member_bytes(config_name)
+            config_id = "sha256:" + config_digest_from_member_name(config_name)
+            require("sha256:" + hashlib.sha256(config_bytes).hexdigest() == config_id, "Docker archive config hash mismatch")
+            if image.get("Id") == config_id:
+                return config_id
+
+            descriptor = image.get("Descriptor")
+            inspected_key = descriptor_key(descriptor, manifest_types | index_types)
+            require(inspected_key[0] == image.get("Id"), "Docker inspected image descriptor identity mismatch")
+            layout = json_object(member_bytes("oci-layout"))
+            require(layout.get("imageLayoutVersion") == "1.0.0", "Docker archive OCI layout is invalid")
+            index = json_object(member_bytes("index.json"))
+            roots = index.get("manifests")
+            require(index.get("schemaVersion") == 2 and index.get("mediaType", "application/vnd.oci.image.index.v1+json") in index_types,
+                    "Docker archive OCI index is invalid")
+            require(isinstance(roots, list) and len(roots) == 1, "Docker archive root descriptor count mismatch")
+            require(descriptor_key(roots[0], manifest_types | index_types) == inspected_key,
+                    "Docker archive root differs from inspected image")
+            root = checked_blob(descriptor, manifest_types | index_types, as_json=True)
+            attestations = []
+            if inspected_key[2] in index_types:
+                children = root.get("manifests")
+                require(isinstance(children, list) and 1 <= len(children) <= 16, "Docker archive platform manifest list is invalid")
+                runnable = []
+                for child in children:
+                    descriptor_key(child, manifest_types)
+                    platform = child.get("platform")
+                    annotations = child.get("annotations", {})
+                    require(isinstance(platform, dict) and isinstance(annotations, dict), "Docker archive platform descriptor is invalid")
+                    if platform.get("os") == "linux" and platform.get("architecture") == "amd64" and not platform.get("variant"):
+                        runnable.append(child)
+                    else:
+                        require(platform.get("os") == "unknown" and platform.get("architecture") == "unknown"
+                                and annotations.get("vnd.docker.reference.type") == "attestation-manifest",
+                                "Docker archive contains an unsupported platform manifest")
+                        attestations.append(child)
+                require(len(runnable) == 1, "Docker archive runnable manifest count mismatch")
+                descriptor = runnable[0]
+                root = checked_blob(descriptor, manifest_types, as_json=True)
+            require(not root.get("artifactType") and not root.get("subject"), "Docker archive target is not a runnable image")
+            require(checked_blob(root.get("config"), config_types) == config_name,
+                    "Docker archive manifest config differs from saved config")
+            model_layers = root.get("layers")
+            require(isinstance(model_layers, list) and len(model_layers) == len(layers), "Docker archive manifest layer count mismatch")
+            for layer, expected_name in zip(model_layers, layers):
+                require(checked_blob(layer, layer_types) == expected_name, "Docker archive manifest layer order mismatch")
+
+            # BuildKit's recognized non-runnable attestations remain bound to this image.
+            # They are metadata, never an alternative runtime config or filesystem layer.
+            for attestation in attestations:
+                require(attestation["annotations"].get("vnd.docker.reference.digest") == descriptor["digest"],
+                        "Docker archive attestation target mismatch")
+                proof = checked_blob(attestation, {"application/vnd.oci.image.manifest.v1+json"}, as_json=True)
+                if proof.get("artifactType") is not None:
+                    require(proof["artifactType"] == "application/vnd.docker.attestation.manifest.v1+json"
+                            and descriptor_key(proof.get("subject"), manifest_types) == descriptor_key(descriptor, manifest_types),
+                            "Docker archive attestation subject mismatch")
+                elif proof.get("subject") is not None:
+                    raise ReleaseError("Docker archive attestation subject is invalid")
+                checked_blob(proof.get("config"), config_types | {"application/vnd.oci.empty.v1+json"})
+                proof_layers = proof.get("layers")
+                require(isinstance(proof_layers, list) and proof_layers, "Docker archive attestation layers are invalid")
+                for layer in proof_layers:
+                    checked_blob(layer, {"application/vnd.in-toto+json"})
+            return config_id
+    except (tarfile.TarError, OSError):
+        raise ReleaseError("Docker archive identity is unreadable") from None
+
+
 def inspect_archive(path: str | Path, manifest: dict[str, object]) -> dict[str, object]:
     """Inspect a docker save tar or zstd tar without extracting it."""
     validate_manifest(manifest)
@@ -420,6 +562,7 @@ def build_bundle(source_root: Path, version: str, revision: str, output: Path) -
     with tempfile.TemporaryDirectory(prefix="greenpms-package-") as temporary:
         raw_archive = Path(temporary) / "image.tar"
         command(["docker", "save", "--output", str(raw_archive), tag])
+        provisional["imageId"] = archive_identity_for_built_image(raw_archive, image, tag)
         inspect_archive(raw_archive, provisional)
         archive_path = output / ARCHIVE
         command(["zstd", "--quiet", "--threads=0", "--force", str(raw_archive), "-o", str(archive_path)])
