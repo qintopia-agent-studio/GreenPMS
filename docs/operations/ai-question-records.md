@@ -31,9 +31,9 @@
 | `page` | 受控页面：`inventory/orders/order/members/today/settings/unknown`；不存任意页面字符串 |
 | `topic` | 本地关键词初步分类，见下文；不是模型对用户真实意图的确认 |
 | `application_version` | PMS 应用版本，用于比较改版前后 |
-| `outcome` | `PENDING` 处理中；`ANSWERED` 回答通过服务端校验；`FAILED` 请求失败；`INTERRUPTED` 超过 10 分钟仍未记录完成 |
+| `outcome` | `PENDING` 处理中；`ANSWERED` 回答通过服务端校验；`FAILED` 请求失败；`INTERRUPTED` 连续 10 分钟没有记录到有效进展且仍未完成 |
 | `error_code` | 固定错误代码，无供应商错误正文；如 `ASSISTANT_DISABLED`、`VALIDATION_ERROR`、`RATE_LIMITED`、`AUTHENTICATION_REQUIRED`、`REQUEST_INTERRUPTED`、`AI_INVALID_RESPONSE_FINISH_*` |
-| `tools_used`, `duration_ms` | 已尝试的白名单工具名称、服务端处理耗时；不含工具参数、查询结果或模型回答 |
+| `tools_used`, `duration_ms` | 已尝试的白名单工具名称、服务端处理耗时；耗时支持超过 10 分钟，最大记录 2147483647 毫秒；不含工具参数、查询结果或模型回答 |
 | `feedback` | `UNKNOWN` 未反馈，`RESOLVED` 用户点“已解决”，`UNRESOLVED` 用户点“未解决”；可更改，不重复累计 |
 
 主题为 `STAY_EXTENSION` 续住、`MOVE_ROOM` 换房、`MEMBERSHIP` 会员、`PAYMENT` 款项、`CANCELLATION` 取消、`AVAILABILITY` 房态、`ORDER_QUERY` 订单查询、`SYSTEM_HELP` 系统帮助、`OTHER` 未分类。多主题问题按规则优先级归类，Codex 可结合脱敏文本重新归并，保留原始主题作对照。
@@ -54,9 +54,9 @@
 
 自动规则不能保证任意自由文本完全匿名：没有标签的姓名、地址或特殊格式标识可能残留。因此明细仍按受限业务资料处理，不上传公共空间，也不以“已脱敏”为由扩大共享。分析时不需要查回住客身份。
 
-API 启动和之后每小时维护：超过 10 分钟未完成的记录改为 `INTERRUPTED`；超过 90 天的在线明细删除，长期汇总保留。停机后启动会补清理；导出视图随时隐藏过期明细。数据库备份和本地导出文件有各自的保留规则，90 天清理不会删除现有备份或已经下载的历史文件。日常分析使用最新快照，旧明细文件按本地资料保留要求管理。
+API 启动和之后每小时维护：`PENDING` 记录连续 10 分钟没有记录到有效进展时改为 `INTERRUPTED`；超过 90 天的在线明细删除，长期汇总保留。迁移 `078_ai_question_progress.sql` 后，真实模型增量或业务处理进展最多每分钟通过受控函数刷新一次 `updated_at`，连接保活心跳不续期；持续生成超过 10 分钟仍可正常完成并反馈，不会仅因创建时间较早而误记中断。进度刷新核对原用户、登录会话和当前门店授权，不复活已经完成或中断的记录，停止后的在途刷新也不能覆盖完成结果。停机后启动会补清理；导出视图随时隐藏过期明细。数据库备份和本地导出文件有各自的保留规则，90 天清理不会删除现有备份或已经下载的历史文件。日常分析使用最新快照，旧明细文件按本地资料保留要求管理。
 
-统计写入失败不会触发模型重试或改变订单业务，只写固定诊断日志代码：`AI_QUESTION_RECORD_FAILED`、`AI_QUESTION_FINISH_FAILED`、`AI_QUESTION_MAINTENANCE_FAILED`。出现这些代码的时段可能有记录缺口或状态不确定，不能据此断言没有用户提问。
+统计写入失败不会触发模型重试或改变订单业务，只写固定诊断日志代码：`AI_QUESTION_RECORD_FAILED`、`AI_QUESTION_PROGRESS_FAILED`、`AI_QUESTION_FINISH_FAILED`、`AI_QUESTION_MAINTENANCE_FAILED`。出现这些代码的时段可能有记录缺口或状态不确定，不能据此断言没有用户提问。
 
 ## 给 Codex 的同步步骤
 

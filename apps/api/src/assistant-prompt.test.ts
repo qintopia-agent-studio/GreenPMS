@@ -69,6 +69,7 @@ describe("versioned employee operating knowledge", () => {
     { question: "清洁按钮怎么用？", ids: ["maintenance"], facts: ["清洁工作流关闭", "内部占用也不是当前可办理能力"] },
     { question: "如何改房型价格、工作人员权限和外部密钥？", ids: ["catalog", "accounts-tokens"], facts: ["设置→房型与价格", "设置→账号管理", "设置→智能体与外部访问", "不能因新增功能自动给旧Token增加能力"] }
   ];
+  scenarios.push({ question: "模型还在慢慢回答，超过一分钟会被停止吗？", ids: ["assistant-help"], facts: ["首响等待60秒", "连续60秒无有效进展才超时", "文字、思考、工具增量均可续期", "保活心跳不算", "持续响应无总时限", "停止即取消，不自动重试"] });
   it.each(scenarios)("supplies required evidence for: $question", ({ ids, facts }) => {
     const evidence = assistantKnowledgeTopics.filter(topic => ids.includes(topic.id)).map(topic => topic.content).join("\n");
     const prompt = buildAssistantSystemPrompt(context);

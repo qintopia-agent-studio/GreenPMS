@@ -12,7 +12,7 @@ import { assistantGuides, assistantOrderActions, type AssistantChatReply, type A
 import { authenticateRequest, requirePropertyAccess } from "./auth.ts";
 import { ErrorResponse, Id } from "./schemas.ts";
 import { aiError, callModel, decryptKey, encryptKey, keyReady, normalizeBaseUrl, resolvePublicEndpoint, type ModelMessage, type ModelTool, type ModelTransport } from "./assistant-model.ts";
-import { beginAssistantQuestion, finishAssistantQuestion, maintainAssistantQuestions } from "./assistant-question-records.ts";
+import { beginAssistantQuestion, createAssistantQuestionProgress, finishAssistantQuestion, maintainAssistantQuestions } from "./assistant-question-records.ts";
 import { abortable, AssistantFailure, assistantLifetime } from "./assistant-lifetime.ts";
 
 function guestName(value: unknown): string {
@@ -112,8 +112,16 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
   app.post("/api/v1/assistant/test", { validatorCompiler: guard(settingsSchema), config: { rateLimit: { max: 5, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsSchema, response: { 200: Type.Object({ message: Type.String() }), ...failures } } }, async (request, reply) => {
     const input = await configuredInput(db, request, request.body as AssistantSettingsInput, true);
     const lifetime = assistantLifetime(request, reply);
+    let lastAccessCheck = Date.now();
+    const onProgress = async () => {
+      lifetime.progress();
+      if (Date.now() - lastAccessCheck >= 1000) {
+        await abortable(adminSettings(db, request, (request.body as AssistantSettingsInput).propertyId), lifetime.signal);
+        lifetime.check(); lastAccessCheck = Date.now();
+      }
+    };
     let result;
-    try { result = await abortable(transport({ ...input, signal: lifetime.signal, onDelta: async () => {}, messages: [{ role: "user", content: "Call connection_check with ok=true." }], tools: [{ type: "function", function: { name: "connection_check", description: "Connection test", parameters: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } } }], toolChoice: "connection_check" }), lifetime.signal); }
+    try { result = await abortable(transport({ ...input, signal: lifetime.signal, onProgress, onDelta: async () => {}, messages: [{ role: "user", content: "Call connection_check with ok=true." }], tools: [{ type: "function", function: { name: "connection_check", description: "Connection test", parameters: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } } }], toolChoice: "connection_check" }), lifetime.signal); }
     finally { lifetime.dispose(); }
     if (result.tool_calls?.length !== 1 || result.tool_calls[0]?.function.name !== "connection_check" || result.tool_calls[0].function.arguments.replace(/\s/g, "") !== '{"ok":true}') throw aiError("连接已响应，但模型未正确返回工具调用；请使用支持 function tools 的模型。");
     await adminSettings(db, request, (request.body as AssistantSettingsInput).propertyId);
@@ -142,12 +150,19 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     const knownConversation = conversations.get(id);
     const recordConversation = !body.conversationId || knownConversation?.subjectId === principal.subjectId && knownConversation.propertyId === body.propertyId && knownConversation.credentialId === principal.credentialId ? id : randomUUID();
     const lifetime = assistantLifetime(request, reply);
-    const wait = <T>(work: Promise<T>) => abortable(work, lifetime.signal);
+    let questionProgress: ReturnType<typeof createAssistantQuestionProgress> | undefined;
+    const progress = () => { lifetime.progress(); questionProgress?.touch(); };
+    const wait = async <T>(work: Promise<T>) => {
+      const result = await abortable(work, lifetime.signal);
+      progress();
+      return result;
+    };
     const questionRecord = beginAssistantQuestion(db, app.log, principal, body, recordConversation);
     let questionId: string | undefined;
     let recordedOutcome: "ANSWERED" | "FAILED" = "FAILED", recordedError: string | null = null;
     try {
     questionId = await wait(questionRecord);
+    questionProgress = createAssistantQuestionProgress(db, app.log, questionId, principal);
     const settings = await wait(readSettings(db));
     if (!settings?.enabled) { recordedError = "ASSISTANT_DISABLED"; throw aiError("AI 助手尚未启用，请管理员在“设置 → AI 助手”配置连接。"); }
     const apiKey = decryptKey(settings.encrypted_key);
@@ -162,13 +177,14 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       conversations.set(id, conversation);
     }
     const entries: AssistantEntry[] = [];
+    let lastAccessCheck = 0;
     const freshPrincipal = async () => {
       lifetime.check();
       const fresh = await wait(currentUser(db, request, body.propertyId));
       if (fresh.subjectId !== principal.subjectId || fresh.credentialId !== principal.credentialId) throw new DomainError("INSUFFICIENT_ACCESS", "登录身份已变化。", 403);
       const current = await wait(readSettings(db));
       if (!current?.enabled || current.version !== settings.version) throw aiError("模型配置已变化，请新建对话后重试。");
-      lifetime.check(); return fresh;
+      lifetime.check(); lastAccessCheck = Date.now(); return fresh;
     };
     const orderView = async (orderId: string) => {
       const fresh = await freshPrincipal();
@@ -237,6 +253,11 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
         let response;
         try {
           response = await wait(transport({ baseUrl: settings.base_url, model: settings.model, apiKey, messages, tools: assistantTools, signal: lifetime.signal,
+            onProgress: async () => {
+              progress();
+              // Reasoning/tool-only streams and legacy JSON callers also need live authorization.
+              if (Date.now() - lastAccessCheck >= 1000) await freshPrincipal();
+            },
             ...(lifetime.streaming ? { onDelta: async (text: string) => {
               firstDeltaMs ??= Date.now() - modelStarted;
               await freshPrincipal();
@@ -282,9 +303,10 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       if (lifetime.fail(error)) return reply;
       throw error;
     } finally {
+      questionProgress?.dispose();
       lifetime.dispose();
       request.log.info({ code: "AI_QUESTION_FINISHED", outcome: recordedOutcome, failure: recordedError, durationMs: Date.now() - startedAt }, "Assistant question finished");
-      // Telemetry must not hold the response open after cancellation or the answer deadline.
+      // Telemetry must not hold the response open after cancellation or an inactivity timeout.
       if (questionId) await abortable(finishAssistantQuestion(db, app.log, questionId, principal, recordedOutcome, recordedError, toolsUsed, startedAt), AbortSignal.timeout(2000)).catch(() => {
         request.log.warn({ code: "AI_QUESTION_FINISH_TIMEOUT" }, "Assistant question telemetry delayed");
       });

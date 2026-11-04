@@ -63,8 +63,25 @@ export async function finishAssistantQuestion(db: Kysely<Database>, logger: Fast
   if (!questionId) return;
   try {
     await sql`SELECT qintopia_finish_ai_question(${questionId}, ${principal.subjectId}, ${principal.credentialId}, ${outcome},
-      ${errorCode}, ${[...tools]}::text[], ${Math.min(600000, Math.max(0, Date.now() - startedAt))})`.execute(db);
+      ${errorCode}, ${[...tools]}::text[], ${Math.min(2_147_483_647, Math.max(0, Date.now() - startedAt))})`.execute(db);
   } catch { logger.warn({ code: "AI_QUESTION_FINISH_FAILED" }, "Assistant question telemetry unavailable"); }
+}
+
+/** Invoke only for real model or dependency progress, never an SSE keepalive. */
+export function createAssistantQuestionProgress(db: Kysely<Database>, logger: FastifyBaseLogger,
+  questionId: string | undefined, principal: AuthPrincipal) {
+  let lastTouch = Date.now(), pending = false, disposed = false;
+  return {
+    touch() {
+      if (!questionId || disposed || pending || Date.now() - lastTouch < 60_000) return;
+      lastTouch = Date.now(); pending = true;
+      // Best effort and at most one write per minute; telemetry never blocks output.
+      void sql`SELECT qintopia_touch_ai_question(${questionId}, ${principal.subjectId}, ${principal.credentialId})`.execute(db)
+        .catch(() => { logger.warn({ code: "AI_QUESTION_PROGRESS_FAILED" }, "Assistant question progress telemetry unavailable"); })
+        .finally(() => { pending = false; });
+    },
+    dispose() { disposed = true; }
+  };
 }
 
 export async function maintainAssistantQuestions(db: Kysely<Database>, logger: FastifyBaseLogger) {

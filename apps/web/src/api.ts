@@ -1,6 +1,6 @@
 import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList, WorkbenchExceptionsQuery, WorkbenchExceptionsResponse } from "@qintopia/contracts";
 import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent } from "../../../packages/contracts/src/assistant.ts";
-import { readAssistantStream } from "./assistant/stream";
+import { readAssistantResponseText, readAssistantStream } from "./assistant/stream";
 import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusSyncDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
 import type {
   AvailabilityDto,
@@ -117,14 +117,28 @@ async function assistantChat(body: AssistantChatRequest, signal: AbortSignal, on
     if (sessionExpired || generation !== sessionGeneration) throw new ApiError(401, { code: "SESSION_EXPIRED", message: "登录已过期，请重新登录" });
   };
   check();
-  const deadline = AbortSignal.timeout(150_000);
+  const connection = new AbortController();
+  const connectionSignal = AbortSignal.any([signal, connection.signal]);
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  let idleTimedOut = false;
+  const resetIdle = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => {
+      idleTimedOut = true;
+      connection.abort(new DOMException("Assistant connection idle", "TimeoutError"));
+    }, 150_000);
+  };
+  const activity = () => { check(); resetIdle(); };
   try {
+    activity();
     const response = await fetch("/api/v1/assistant/chat", { method: "POST", credentials: "include", body: JSON.stringify(body),
-      signal: AbortSignal.any([signal, deadline]), headers: { Accept: "text/event-stream", "Content-Type": "application/json" } });
-    check();
+      signal: connectionSignal, headers: { Accept: "text/event-stream", "Content-Type": "application/json" } });
+    activity();
+    const responseActivity = { onActivity: activity, signal: connectionSignal };
     if (!response.ok) {
       if (response.status === 401) expireSession(generation);
-      const payload = await parseBody(response);
+      const text = await readAssistantResponseText(response, { signal: connectionSignal, onActivity: resetIdle });
+      const payload = response.headers.get("content-type")?.includes("application/json") ? JSON.parse(text) : text ? { message: text } : undefined;
       throw new ApiError(response.status, (payload ?? {}) as ErrorPayload);
     }
     const result = response.headers.get("content-type")?.includes("text/event-stream")
@@ -135,12 +149,15 @@ async function assistantChat(body: AssistantChatRequest, signal: AbortSignal, on
           throw new ApiError(event.status, { code: event.code, message: event.message });
         }
         onEvent(event);
-      })
-      : await response.json() as AssistantChatReply; // one request, compatible with an older server
+      }, responseActivity)
+      : JSON.parse(await readAssistantResponseText(response, responseActivity)) as AssistantChatReply; // one request, compatible with an older server
     check(); return result;
   } catch (error) {
-    if (deadline.aborted && !signal.aborted) throw new Error("回答等待超时，已断开连接，请重试。");
+    if (idleTimedOut && !signal.aborted) throw new Error("回答连接长时间未收到数据，已断开连接，请重试。");
     throw error;
+  } finally {
+    clearTimeout(idle);
+    connection.abort();
   }
 }
 

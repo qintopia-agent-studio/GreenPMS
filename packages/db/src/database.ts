@@ -98,7 +98,8 @@ export const currentMigrationNames = [
   "074_cancel_empty_membership_order.sql",
   "075_room_operating_statistics.sql",
   "076_multi_room_sequence_membership_upgrade.sql",
-  "077_owner_historical_payment_reprice.sql"
+  "077_owner_historical_payment_reprice.sql",
+  "078_ai_question_progress.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -173,6 +174,33 @@ export async function databaseReady(
     const migrationsReady = rows.length === currentMigrationNames.length
       && rows.every((row, index) => row.name === currentMigrationNames[index]);
     if (!migrationsReady) return false;
+
+    const questionProgress = await sql<{ ready: boolean }>`
+      SELECT NOT EXISTS (
+        SELECT 1 FROM (VALUES
+          ('qintopia_touch_ai_question(text,text,text)', 'f6cb2aec42e97dd37289b49e3b94d15603c8e5771e22ad11f8e28bc597e98b78'),
+          ('qintopia_finish_ai_question(text,text,text,text,text,text[],integer)', '4a84055f5027df1c01c0da2b682229607dfc46c19731583b70d56aeb54176064'),
+          ('qintopia_maintain_ai_questions()', 'd7683601ef768b5890d77dc3ca61aa6ae15922701ed3db2a196704b723682a77')
+        ) AS expected(signature, body_hash)
+        WHERE NOT COALESCE((
+          SELECT encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') = expected.body_hash
+            AND p.prosecdef AND p.prokind = 'f' AND p.provolatile = 'v'
+            AND p.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+            AND p.proowner = (SELECT datdba FROM pg_database WHERE datname = current_database())
+            AND p.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+            AND has_function_privilege('qintopia_runtime', p.oid, 'EXECUTE')
+            AND NOT has_function_privilege('qintopia_ai_analytics_reader', p.oid, 'EXECUTE')
+            AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) grant_row
+              WHERE grant_row.grantee = 0 AND grant_row.privilege_type = 'EXECUTE')
+          FROM pg_proc p WHERE p.oid = to_regprocedure(expected.signature)
+        ), false)
+      ) AND EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('ai_question_records')
+          AND conname = 'ai_question_records_duration_ms_check' AND convalidated
+          AND pg_get_constraintdef(oid, false) = 'CHECK ((duration_ms >= 0))'
+      ) AS ready
+    `.execute(db);
+    if (questionProgress.rows[0]?.ready !== true) return false;
 
     const expectedStaffProfileManifest = resolveStaffProfileManifest(
       options.staffProfileManifestName ?? process.env.STAFF_PROFILE_MANIFEST_NAME
