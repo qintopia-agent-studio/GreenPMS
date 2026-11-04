@@ -45,7 +45,7 @@ export async function readAssistantStream(response: Response, onEvent: (event: A
     for (const data of frames.push(decoder.decode(value, { stream: true }))) {
       const event = JSON.parse(data) as AssistantStreamEvent;
       if (event.type === "delta" && typeof event.text === "string" && event.text.length <= 12000
-        || event.type === "status" && ["thinking", "tool"].includes(event.phase)) {
+        || event.type === "status" && ["thinking", "tool", "fallback"].includes(event.phase)) {
         if (!Number.isInteger(event.round) || event.round < 1 || event.round > 4) throw new Error("回答格式异常，请重试。");
         onEvent(event);
       } else if (event.type === "error" && typeof event.message === "string" && typeof event.code === "string" && typeof event.status === "number") {

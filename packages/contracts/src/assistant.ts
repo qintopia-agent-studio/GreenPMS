@@ -8,13 +8,19 @@ export const assistantGuides: Record<AssistantOrderAction, { label: string; step
   CANCEL_ORDER: { label: "取消订单", steps: ["核对客人、订单和取消原因。", "阅读系统展示的库存、会员权益及款项处理提示。", "确认取消不会自动退款或释放流水；需要退款或留存时按正式流程另行核对办理。"] }
 };
 export type AssistantEntry = { page: "inventory" | "orders" | "members" | "today" | "settings" | "order"; label: string; steps: string[]; orderId?: string; memberId?: string; action?: AssistantOrderAction };
-export interface AssistantSettings { version: number; enabled: boolean; baseUrl: string; model: string; hasKey: boolean; keyReady: boolean; canManage: boolean; managementPropertyId: string | null; updatedAt: string | null }
-export interface AssistantSettingsInput { propertyId: string; expectedVersion: number; enabled: boolean; baseUrl: string; model: string; apiKey?: string }
+export type AssistantProviderRole = "primary" | "backup";
+export interface AssistantProviderSettings { name: string; enabled: boolean; baseUrl: string; model: string; hasKey: boolean; testedAt: string | null }
+export interface AssistantRoutingStatus { state: "primary" | "backup" | "checking" | "unavailable"; retryAfter: string | null; lastFailure: string | null; lastCheckedAt: string | null }
+export interface AssistantSettings { version: number; enabled: boolean; baseUrl: string; model: string; hasKey: boolean; keyReady: boolean; canManage: boolean; managementPropertyId: string | null; updatedAt: string | null; providers?: Record<AssistantProviderRole, AssistantProviderSettings>; routing?: AssistantRoutingStatus; backupAvailable?: boolean }
+export interface AssistantSettingsInput { propertyId: string; expectedVersion: number; enabled: boolean; baseUrl: string; model: string; apiKey?: string; provider?: AssistantProviderRole; name?: string; providerEnabled?: boolean; testToken?: string }
+export interface AssistantSettingsAction { propertyId: string; expectedVersion: number }
+export interface AssistantTestReply { message: string; testToken?: string }
+export interface AssistantRecoveryReply { message: string; settings: AssistantSettings }
 export type AssistantQuestionFeedback = "RESOLVED" | "UNRESOLVED";
-export interface AssistantChatRequest { propertyId: string; message: string; conversationId?: string; page: string; orderId?: string; source?: "USER" | "SUGGESTION" | "UNKNOWN" }
+export interface AssistantChatRequest { propertyId: string; message: string; conversationId?: string; page: string; orderId?: string; source?: "USER" | "SUGGESTION" | "UNKNOWN"; useBackup?: boolean }
 export interface AssistantChatReply { conversationId: string; text: string; entries: AssistantEntry[]; questionId?: string }
 export type AssistantStreamEvent =
-  | { type: "status"; phase: "thinking" | "tool"; round: number }
+  | { type: "status"; phase: "thinking" | "tool" | "fallback"; round: number }
   | { type: "delta"; text: string; round: number }
   | { type: "done"; result: AssistantChatReply }
-  | { type: "error"; code: string; message: string; status: number };
+  | { type: "error"; code: string; message: string; status: number; backupRetryAvailable?: boolean };

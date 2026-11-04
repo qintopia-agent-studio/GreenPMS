@@ -1,5 +1,5 @@
 import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList, WorkbenchExceptionsQuery, WorkbenchExceptionsResponse } from "@qintopia/contracts";
-import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent } from "../../../packages/contracts/src/assistant.ts";
+import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent, AssistantSettingsAction, AssistantTestReply, AssistantRecoveryReply } from "../../../packages/contracts/src/assistant.ts";
 import { readAssistantResponseText, readAssistantStream } from "./assistant/stream";
 import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusSyncDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
 import type {
@@ -146,7 +146,7 @@ async function assistantChat(body: AssistantChatRequest, signal: AbortSignal, on
         check();
         if (event.type === "error") {
           if (event.status === 401) expireSession(generation);
-          throw new ApiError(event.status, { code: event.code, message: event.message });
+          throw new ApiError(event.status, { code: event.code, message: event.message, details: { backupRetryAvailable: event.backupRetryAvailable === true } });
         }
         onEvent(event);
       }, responseActivity)
@@ -196,7 +196,9 @@ export const api = {
   dashboardDetails: (propertyId: string, query: string, signal: AbortSignal) => request<DashboardDetailsResponse>(`/api/v1/properties/${encodeURIComponent(propertyId)}/dashboard/details?${query}`, { signal }),
   assistantSettings: (propertyId: string) => request<AssistantSettings>(`/api/v1/assistant/settings?propertyId=${encodeURIComponent(propertyId)}`),
   assistantSave: (body: AssistantSettingsInput) => request<AssistantSettings>("/api/v1/assistant/settings", { method: "PUT", body: JSON.stringify(body) }),
-  assistantTest: (body: AssistantSettingsInput) => request<{ message: string }>("/api/v1/assistant/test", { method: "POST", body: JSON.stringify(body) }),
+  assistantTest: (body: AssistantSettingsInput) => request<AssistantTestReply>("/api/v1/assistant/test", { method: "POST", body: JSON.stringify(body) }),
+  assistantPromoteBackup: (body: AssistantSettingsAction) => request<AssistantSettings>("/api/v1/assistant/promote-backup", { method: "POST", body: JSON.stringify(body) }),
+  assistantRecoverPrimary: (body: AssistantSettingsAction) => request<AssistantRecoveryReply>("/api/v1/assistant/recover-primary", { method: "POST", body: JSON.stringify(body) }),
   assistantChat,
   assistantFeedback: (questionId: string, propertyId: string, feedback: AssistantQuestionFeedback) => request<{ saved: true }>(`/api/v1/assistant/questions/${encodeURIComponent(questionId)}/feedback`, { method: "POST", body: JSON.stringify({ propertyId, feedback }) }),
   roomCatalog: (propertyId: string) => request<RoomCatalogView>(`/api/v1/properties/${encodeURIComponent(propertyId)}/room-catalog`),

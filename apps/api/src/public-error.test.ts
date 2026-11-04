@@ -48,6 +48,12 @@ describe("business error HTTP contracts", () => {
     app.get("/unknown-error-detail", { schema: { response: { 409: ErrorResponse } } }, async () => {
       throw new DomainError("INVENTORY_CONFLICT", "房间已有占用", 409, false, { futurePrivateDetail: "must-not-be-exposed" });
     });
+    app.get<{ Params: { kind: string } }>("/assistant-retry/:kind", { schema: { response: { 400: ErrorResponse } } }, async (request) => {
+      const details = request.params.kind === "valid"
+        ? { backupRetryAvailable: true }
+        : { backupRetryAvailable: true, providerKey: "private-provider-key" };
+      throw new DomainError("VALIDATION_ERROR", "模型服务暂时不可用", 400, false, details);
+    });
   });
   afterAll(async () => { await app?.close(); });
   it.each(cases.map((item, index) => [item[0], index] as const))("preserves %s in errors and recovery receipts", async (_name, index) => {
@@ -72,6 +78,15 @@ describe("business error HTTP contracts", () => {
     expect(response.json()).toMatchObject({ code: "INVENTORY_CONFLICT", message: "房间已有占用" });
     expect(response.json()).not.toHaveProperty("details");
     expect(response.body).not.toContain("must-not-be-exposed");
+  });
+  it("preserves the assistant backup retry flag but rejects extra private fields", async () => {
+    const valid = await app.inject({ url: "/assistant-retry/valid" });
+    expect(valid.statusCode).toBe(400);
+    expect(valid.json().details).toEqual({ backupRetryAvailable: true });
+    const unsafe = await app.inject({ url: "/assistant-retry/private" });
+    expect(unsafe.statusCode).toBe(400);
+    expect(unsafe.json()).not.toHaveProperty("details");
+    expect(unsafe.body).not.toContain("private-provider-key");
   });
   it("projects wrapped recovery receipts without mutating stored evidence or business data", () => {
     const error = { code: "INVENTORY_CONFLICT", message: "房间已有占用", retryable: false, correlationId: "synthetic",

@@ -206,3 +206,42 @@ describe("assistant connection inactivity", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe("assistant provider controls", () => {
+  it("keeps a streamed backup retry hint on the error and never retries automatically in the browser", async () => {
+    const { api } = await import("./api");
+    const fetch = vi.fn().mockResolvedValue(new Response(frame({ type: "status", phase: "fallback", round: 1 })
+      + frame({ type: "error", code: "VALIDATION_ERROR", status: 400, message: "模型连接中断", backupRetryAvailable: true }), { headers: { "Content-Type": "text/event-stream" } }));
+    vi.stubGlobal("fetch", fetch);
+    const onEvent = vi.fn();
+    await expect(api.assistantChat(body, new AbortController().signal, onEvent)).rejects.toMatchObject({
+      code: "VALIDATION_ERROR", details: { backupRetryAvailable: true }
+    });
+    expect(onEvent).toHaveBeenCalledWith({ type: "status", phase: "fallback", round: 1 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("preserves JSON retry hints and sends an explicit backup selection only when requested", async () => {
+    const { api } = await import("./api");
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ code: "VALIDATION_ERROR", message: "主模型失败", details: { backupRetryAvailable: true } }), {
+      status: 400, headers: { "Content-Type": "application/json" }
+    })).mockResolvedValueOnce(new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(api.assistantChat(body, new AbortController().signal, () => {})).rejects.toMatchObject({ details: { backupRetryAvailable: true } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await expect(api.assistantChat({ ...body, useBackup: true }, new AbortController().signal, () => {})).resolves.toEqual(result);
+    expect(JSON.parse(fetch.mock.calls[0]![1].body)).not.toHaveProperty("useBackup");
+    expect(JSON.parse(fetch.mock.calls[1]![1].body)).toMatchObject({ ...body, useBackup: true });
+  });
+  it("sends promotion and recovery as explicit versioned administrator actions", async () => {
+    const { api } = await import("./api");
+    const fetch = vi.fn().mockImplementation(async () => new Response("{}", { headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+    const action = { propertyId: "property-test", expectedVersion: 8 };
+    await api.assistantPromoteBackup(action); await api.assistantRecoverPrimary(action);
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["/api/v1/assistant/promote-backup", "/api/v1/assistant/recover-primary"]);
+    for (const [, init] of fetch.mock.calls) {
+      expect(init.method).toBe("POST"); expect(init.credentials).toBe("include"); expect(JSON.parse(init.body)).toEqual(action);
+    }
+  });
+});

@@ -260,3 +260,20 @@ it("rejects a provider disconnect before the terminator without retrying", async
   response.end(frame({ content: "unfinished" }));
   await rejected; expect(request).toHaveBeenCalledOnce();
 });
+
+it.each(["onProgress", "onDelta"] as const)("does not attribute a failed %s application callback to the provider", async callback => {
+  const { input, response, req } = fakeProvider();
+  input[callback] = async () => { throw new Error("synthetic-private-database-or-client-detail"); };
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: callback === "onProgress" ? "AI_PROGRESS_FAILED" : "AI_DELIVERY_FAILED" });
+  await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce());
+  response.write(frame({ content: "answer" }));
+  await rejected; expect(req.destroy).toHaveBeenCalled();
+});
+
+it("classifies certificate rejection separately from retryable connection failures", async () => {
+  const { input, req } = fakeProvider();
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_TLS_FAILED" });
+  await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce());
+  req.emit("error", Object.assign(new Error("synthetic-private-certificate-detail"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }));
+  await rejected; expect(req.destroy).toHaveBeenCalled();
+});

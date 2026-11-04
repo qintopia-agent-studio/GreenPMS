@@ -2,10 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type Keyb
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ChevronRight, MessageSquare, Plus, Send, Settings, Sparkles, Square, X } from "lucide-react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { useWorkspace } from "../session";
 import { errorMessage } from "../uiBasic";
-import { assistantOrderActions, type AssistantChatReply, type AssistantEntry, type AssistantSettings, type AssistantQuestionFeedback } from "../../../../packages/contracts/src/assistant.ts";
+import { assistantOrderActions, type AssistantChatReply, type AssistantEntry, type AssistantSettings, type AssistantQuestionFeedback, type AssistantChatRequest } from "../../../../packages/contracts/src/assistant.ts";
 import { AssistantContext } from "./context";
 import { AssistantMessageContent } from "./AssistantMessageContent";
 import { AssistantFeedback } from "./AssistantFeedback";
@@ -20,12 +20,14 @@ export function entryPath(entry: AssistantEntry): string | undefined {
   if (entry.page === "members" && entry.memberId) return `/members?memberId=${encodeURIComponent(entry.memberId)}`;
   return paths[entry.page];
 }
+interface FailedQuestion { request: AssistantChatRequest; path: string; generation: number }
 interface Message { role: "user" | "assistant"; text: string; entries?: AssistantEntry[]; questionId?: string; feedback?: AssistantQuestionFeedback }
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const { propertyId } = useWorkspace(), location = useLocation(), navigate = useNavigate();
   const [open, setOpen] = useState(false), [settings, setSettings] = useState<AssistantSettings>();
   const [messages, setMessages] = useState<Message[]>([]), [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState<string>();
+  const [backupRetry, setBackupRetry] = useState<FailedQuestion>();
   const [partial, setPartial] = useState(""), [progress, setProgress] = useState("正在思考…"), [stopped, setStopped] = useState(false);
   const [conversationId, setConversationId] = useState<string>();
   const [guide, setGuide] = useState<AssistantEntry>(), [pending, setPending] = useState<AssistantEntry>();
@@ -142,8 +144,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     const timer = window.setTimeout(() => finishEntry("操作页面未能及时载入，请检查连接后重新打开。"), 15_000);
     return () => window.clearTimeout(timer);
   }, [pending]);
-  const stop = () => { controller.current?.abort(); };
-  const newConversation = () => { generation.current++; controller.current?.abort(); sending.current = false; setBusy(false); setPartial(""); setStopped(false); setConversationId(undefined); setMessages([]); setError(undefined); setGuide(undefined); setPending(undefined); refreshSettings(); };
+  const stop = () => { setBackupRetry(undefined); controller.current?.abort(); };
+  const newConversation = () => { generation.current++; controller.current?.abort(); sending.current = false; setBusy(false); setPartial(""); setStopped(false); setConversationId(undefined); setMessages([]); setError(undefined); setBackupRetry(undefined); setGuide(undefined); setPending(undefined); refreshSettings(); };
   function questionKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (mobile || event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
     // IME confirmation is not a send command; keyCode 229 covers Safari's composition boundary.
@@ -151,25 +153,32 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     event.preventDefault();
     if (!event.repeat) void send();
   }
-  async function send(event?: FormEvent, prompt?: string) {
-    event?.preventDefault(); const message = (prompt ?? draft).trim();
+  async function send(event?: FormEvent, prompt?: string, retry?: FailedQuestion) {
+    event?.preventDefault();
+    if (retry && (retry.generation !== generation.current || retry.request.propertyId !== propertyId)) return;
+    const message = (retry?.request.message ?? prompt ?? draft).trim();
     if (!message || busy || sending.current || !settings?.enabled) return;
     sending.current = true;
-    const ticket = generation.current, path = location.pathname;
+    const ticket = generation.current, path = retry?.path ?? location.pathname;
+    const request: AssistantChatRequest = retry ? { ...retry.request, useBackup: true } : { propertyId, message, source: prompt === undefined ? "USER" : "SUGGESTION", page: pageName, ...(orderId ? { orderId: decodeURIComponent(orderId) } : {}), ...(conversationId ? { conversationId } : {}) };
     const active = new AbortController(); controller.current = active;
     followResponse.current = true;
-    setBusy(true); setError(undefined); setDraft(""); setPartial(""); setStopped(false); setProgress("正在思考…");
-    let streamedText = "";
-    setMessages(current => [...current, { role: "user", text: message }]);
+    setBusy(true); setError(undefined); setBackupRetry(undefined);
+    setDraft(current => retry && current.trim() !== message ? current : "");
+    setPartial(""); setStopped(false); setProgress(retry ? "正在使用备用服务重新回答…" : "正在思考…");
+    let streamedText = "", usingBackup = Boolean(request.useBackup);
+    if (!retry) setMessages(current => [...current, { role: "user", text: message }]);
     try {
-      const result: AssistantChatReply = await api.assistantChat({ propertyId, message, source: prompt === undefined ? "USER" : "SUGGESTION", page: pageName, ...(orderId ? { orderId: decodeURIComponent(orderId) } : {}), ...(conversationId ? { conversationId } : {}) }, active.signal, event => {
+      const result: AssistantChatReply = await api.assistantChat(request, active.signal, event => {
         if (ticket !== generation.current || active.signal.aborted) return;
         if (event.type === "status") {
-          streamedText = ""; setPartial(""); setProgress(event.phase === "tool" ? "正在查询资料…" : "正在思考…");
+          if (event.phase === "fallback") usingBackup = true;
+          streamedText = ""; setPartial("");
+          setProgress(event.phase === "fallback" ? "主服务暂时不可用，正在使用备用服务…" : `${usingBackup ? "备用服务 · " : ""}${event.phase === "tool" ? "正在查询资料…" : "正在思考…"}`);
         } else if (event.type === "delta") {
           streamedText += event.text;
           if (streamedText.length > 12000) throw new Error("回答过长，请缩小问题范围后重试。");
-          setPartial(streamedText); setProgress("正在回答…");
+          setPartial(streamedText); setProgress(usingBackup ? "正在使用备用服务回答…" : "正在回答…");
         }
       });
       if (ticket !== generation.current) return;
@@ -179,7 +188,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       if (entry && currentPath.current === path) openEntry(entry);
       else if (entry) setError("你已切换页面，助手没有自动跳转。可点击回答中的入口继续。");
     } catch (e) { if (ticket === generation.current) {
-      if (active.signal.aborted) setStopped(true); else setError(errorMessage(e));
+      if (active.signal.aborted) setStopped(true); else {
+        setError(errorMessage(e));
+        if (!request.useBackup && e instanceof ApiError && e.status !== 401 && e.status !== 403 && e.details && typeof e.details === "object" && "backupRetryAvailable" in e.details && e.details.backupRetryAvailable === true) {
+          setBackupRetry({ request, path, generation: ticket });
+        }
+      }
       setDraft(current => current || message);
     } }
     finally { if (ticket === generation.current) { sending.current = false; setBusy(false); setPartial(""); } }
@@ -203,7 +217,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         {busy && partial ? <article className="assistant-message assistant-message-assistant assistant-message-partial"><span className="assistant-message-author">AI 助手 · 回答中</span><AssistantMessageContent text={partial} /></article> : null}
         {busy ? <p className="assistant-wait" role="status">{progress}</p> : null}
         {stopped ? <p className="assistant-wait" role="status">已停止生成，可以修改问题后重新发送。</p> : null}
-        {error ? <div className="assistant-error" role="alert">{error}</div> : null}
+        {error ? <div className="assistant-error" role="alert">{error}{backupRetry && !busy ? <div className="assistant-backup-retry"><button type="button" className="button button-secondary" onClick={() => void send(undefined, undefined, backupRetry)} disabled={!settings?.enabled}>用备用重新回答</button><p className="assistant-setting-hint">重新回答上一条失败的问题，保留其原有上下文；会产生新的模型调用。</p></div> : null}</div> : null}
       </div>
       <form className="assistant-composer" onSubmit={event => void send(event)}>
         <label className="sr-only" htmlFor="assistant-question">向 AI 助手提问</label>

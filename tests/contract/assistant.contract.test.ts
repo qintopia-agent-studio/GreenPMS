@@ -416,7 +416,7 @@ describe.sequential("AI assistant authenticated contract", () => {
       expect(result.statusCode, result.body).toBe(200);
     };
     mode = "reasoning-only"; reasoningCompletions = 0;
-    duringModel = () => save(change === "disabled" ? { enabled: false } : { model: "synthetic-new-model" });
+    duringModel = () => save(change === "disabled" ? { enabled: false } : { name: "合成配置版本更新" });
     try {
       // Legacy JSON clients receive no onDelta callback but must still stop promptly.
       const response = await chat();

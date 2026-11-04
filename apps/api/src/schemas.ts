@@ -270,6 +270,7 @@ const BackfillCompletedStayCollectionEffectSchema = Type.Union([
 // Avoid expanding this large diagnostic union through every nested receipt TypeScript type.
 export const ErrorDetailsSchema = Type.Unsafe<Record<string, unknown>>(Type.Union([
   strictObject({ rebuild_required: Type.Literal(true) }),
+  strictObject({ backupRetryAvailable: Type.Literal(true) }),
   strictObject({ roomCodes: Type.Array(ShortText), orderIds: Type.Array(Id) }),
   strictObject({ serviceDate: LocalDate, claimId: Id }),
   strictObject({ serviceDate: LocalDate, inventoryUnitId: Id }),
