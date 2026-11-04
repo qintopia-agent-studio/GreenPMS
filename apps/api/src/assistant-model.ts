@@ -58,19 +58,19 @@ export async function resolvePublicEndpoint(baseUrl: string, signal?: AbortSigna
   try {
     const addresses = await abortable(Promise.race([
       lookup(hostname, { all: true }),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(aiError("模型服务域名解析超时。")), 5000); })
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AssistantFailure("AI_DNS_TIMEOUT", "模型服务域名解析超时。")), 5000); })
     ]), signal);
     if (!addresses.length || addresses.some(({ address }) => !publicAddress(address))) throw aiError("模型服务必须使用公网地址，不能连接内网或本机服务。");
     return { url, address: addresses[0]! };
   } catch (error) {
     if (error instanceof DomainError) throw error;
-    throw aiError("无法解析模型服务地址，请检查 Base URL。");
+    throw new AssistantFailure("AI_DNS_FAILED", "无法解析模型服务地址，请检查 Base URL。");
   } finally { clearTimeout(timer); }
 }
 export type ModelMessage = { role: "system" | "user" | "assistant" | "tool"; content: string | null; reasoning_content?: string; tool_calls?: ModelToolCall[]; tool_call_id?: string };
 export type ModelToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
 export type ModelTool = { type: "function"; function: { name: string; description: string; parameters: object } };
-export interface ModelInput { baseUrl: string; apiKey: string; model: string; messages: ModelMessage[]; tools: ModelTool[]; toolChoice?: string; signal?: AbortSignal; onDelta?: (text: string) => Promise<void>; onProgress?: () => void | Promise<void> }
+export interface ModelInput { baseUrl: string; apiKey: string; model: string; messages: ModelMessage[]; tools: ModelTool[]; toolChoice?: string; maxTokens?: number; signal?: AbortSignal; onDelta?: (text: string) => Promise<void>; onProgress?: () => void | Promise<void> }
 export type ModelResponse = { content: string | null; reasoning_content?: string; tool_calls?: ModelToolCall[]; finishReason?: string };
 export type ModelTransport = (input: ModelInput) => Promise<ModelResponse>;
 
@@ -166,7 +166,7 @@ export const callModel: ModelTransport = async (input) => {
   const endpoint = await resolvePublicEndpoint(input.baseUrl, input.signal);
   // Collect the same provider stream even for callers that need only the final JSON reply.
   const body = JSON.stringify({ model: input.model, messages: input.messages, tools: input.tools, stream: true,
-    max_tokens: 2048, ...(input.toolChoice ? { tool_choice: { type: "function", function: { name: input.toolChoice } } } : {}) });
+    max_tokens: input.maxTokens ?? 2048, ...(input.toolChoice ? { tool_choice: { type: "function", function: { name: input.toolChoice } } } : {}) });
   try {
     return await new Promise<Awaited<ReturnType<ModelTransport>>>((resolve, reject) => {
       let settled = false, hasProgress = false, progressTimer: ReturnType<typeof setTimeout> | undefined;
@@ -194,10 +194,15 @@ export const callModel: ModelTransport = async (input) => {
           const previousProgress = stream.progress, delta = stream.push(text);
           // Headers, comments, empty deltas and usage-only frames do not prove model progress.
           if (stream.progress !== previousProgress) {
-            hasProgress = true; resetProgressDeadline(); await input.onProgress?.();
+            hasProgress = true; resetProgressDeadline();
+            try { await input.onProgress?.(); }
+            catch (error) { throw error instanceof DomainError ? error : new AssistantFailure("AI_PROGRESS_FAILED", "助手进度校验未完成，请稍后重试。"); }
           }
           if (settled) return;
-          if (delta) await input.onDelta?.(delta);
+          if (delta) {
+            try { await input.onDelta?.(delta); }
+            catch (error) { throw error instanceof DomainError ? error : new AssistantFailure("AI_DELIVERY_FAILED", "回答未能继续显示，请稍后重试。"); }
+          }
         };
         try {
           for await (const chunk of response) {
@@ -222,7 +227,8 @@ export const callModel: ModelTransport = async (input) => {
   } catch (error) {
     if (error instanceof DomainError) throw error;
     const code = (error as NodeJS.ErrnoException)?.code;
-    const diagnostic = ["ECONNRESET", "ECONNREFUSED", "ENETUNREACH", "ETIMEDOUT", "CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE"].includes(code ?? "") ? `AI_${code}` : "AI_MODEL_CONNECTION_FAILED";
-    throw new AssistantFailure(diagnostic, "模型服务连接失败，本次未自动重试。请稍后重试或联系管理员检查连接。");
+    const diagnostic = /CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/.test(code ?? "") ? "AI_TLS_FAILED"
+      : ["ECONNRESET", "ECONNREFUSED", "ENETUNREACH", "ETIMEDOUT"].includes(code ?? "") ? `AI_${code}` : "AI_MODEL_CONNECTION_FAILED";
+    throw new AssistantFailure(diagnostic, "模型服务连接失败，请稍后重试或联系管理员检查连接。");
   }
 };

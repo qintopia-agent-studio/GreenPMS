@@ -20,3 +20,10 @@ it("requires a final success and propagates a safe streamed failure", async () =
   await expect(readAssistantStream(new Response(event({ type: "error", code: "VALIDATION_ERROR", status: 400, message: "模型超时" })), value => seen.push(value))).rejects.toThrow("模型超时");
   expect(seen).toHaveLength(1);
 });
+it("delivers fallback status and a bounded manual-backup retry hint without accepting unknown stages", async () => {
+  const seen: AssistantStreamEvent[] = [];
+  await expect(readAssistantStream(new Response(event({ type: "status", phase: "fallback", round: 1 })
+    + event({ type: "error", code: "VALIDATION_ERROR", status: 400, message: "回答中断", backupRetryAvailable: true })), value => seen.push(value))).rejects.toThrow("回答中断");
+  expect(seen).toEqual([{ type: "status", phase: "fallback", round: 1 }, { type: "error", code: "VALIDATION_ERROR", status: 400, message: "回答中断", backupRetryAvailable: true }]);
+  await expect(readAssistantStream(new Response(event({ type: "status", phase: "unknown", round: 1 })), () => {})).rejects.toThrow("格式异常");
+});

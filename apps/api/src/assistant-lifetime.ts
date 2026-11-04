@@ -3,7 +3,7 @@ import { DomainError } from "@qintopia/contracts";
 import type { AssistantStreamEvent } from "../../../packages/contracts/src/assistant.ts";
 
 export class AssistantFailure extends DomainError {
-  constructor(readonly diagnostic: string, message: string) { super("VALIDATION_ERROR", message, 400); }
+  constructor(readonly diagnostic: string, message: string, details?: Record<string, unknown>) { super("VALIDATION_ERROR", message, 400, false, details); }
 }
 export function abortable<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return work;
@@ -66,7 +66,8 @@ export function assistantLifetime(request: FastifyRequest, reply: FastifyReply, 
     if (!terminal && !reply.raw.destroyed) {
       const safe = error instanceof DomainError ? error : new AssistantFailure("AI_REQUEST_FAILED", "助手暂时无法完成回答，请稍后重试。");
       terminal = true;
-      reply.raw.end(`data: ${JSON.stringify({ type: "error", code: safe.code, status: safe.statusCode, message: safe.message })}\n\n`);
+      reply.raw.end(`data: ${JSON.stringify({ type: "error", code: safe.code, status: safe.statusCode, message: safe.message,
+        ...(safe.details?.backupRetryAvailable === true ? { backupRetryAvailable: true } : {}) })}\n\n`);
       controller.abort(safe);
     }
     return true;
@@ -77,5 +78,6 @@ export function assistantLifetime(request: FastifyRequest, reply: FastifyReply, 
     if (!signal.aborted) controller.abort(new AssistantFailure("AI_CANCELLED", "本次回答已结束。"));
     request.raw.off("aborted", disconnect); reply.raw.off("close", disconnect);
   }
-  return { signal, check, progress, start, emit, fail, dispose, get streaming() { return streaming; } };
+  const cancel = (reason = new AssistantFailure("AI_CONFIG_CHANGED", "模型配置已变化，请新建对话后重试。")) => controller.abort(reason);
+  return { signal, check, progress, start, emit, fail, dispose, cancel, get streaming() { return streaming; } };
 }

@@ -14,6 +14,8 @@ import { ErrorResponse, Id } from "./schemas.ts";
 import { aiError, callModel, decryptKey, encryptKey, keyReady, normalizeBaseUrl, resolvePublicEndpoint, type ModelMessage, type ModelTool, type ModelTransport } from "./assistant-model.ts";
 import { beginAssistantQuestion, createAssistantQuestionProgress, finishAssistantQuestion, maintainAssistantQuestions } from "./assistant-question-records.ts";
 import { abortable, AssistantFailure, assistantLifetime } from "./assistant-lifetime.ts";
+import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerAvailable, providerCredentials, providerFault, providerSettings, recoveryCancelled, type ProviderSettingsRow } from "./assistant-providers.ts";
+import type { AssistantProviderRole } from "../../../packages/contracts/src/assistant.ts";
 
 function guestName(value: unknown): string {
   if (!value || typeof value !== "object") return "未记录";
@@ -22,10 +24,13 @@ function guestName(value: unknown): string {
 }
 const text = (maxLength = 120) => Type.String({ maxLength });
 const querySchema = Type.Object({ propertyId: Id }, { additionalProperties: false });
-const settingsSchema = Type.Object({ propertyId: Id, expectedVersion: Type.Integer({ minimum: 0 }), enabled: Type.Boolean(), baseUrl: Type.String({ minLength: 1, maxLength: 2048 }), model: Type.String({ minLength: 1, maxLength: 120, pattern: "\\S" }), apiKey: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, pattern: "^[^\\s]+$" })) }, { additionalProperties: false });
-const chatSchema = Type.Object({ propertyId: Id, message: Type.String({ minLength: 1, maxLength: 4000, pattern: "\\S" }), conversationId: Type.Optional(Id), page: text(200), orderId: Type.Optional(Id), source: Type.Optional(Type.Union([Type.Literal("USER"), Type.Literal("SUGGESTION"), Type.Literal("UNKNOWN")])) }, { additionalProperties: false });
+const settingsSchema = Type.Object({ propertyId: Id, expectedVersion: Type.Integer({ minimum: 0 }), enabled: Type.Boolean(), baseUrl: Type.String({ minLength: 1, maxLength: 2048 }), model: Type.String({ minLength: 1, maxLength: 120, pattern: "\\S" }), apiKey: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, pattern: "^[^\\s]+$" })), provider: Type.Optional(Type.Union([Type.Literal("primary"), Type.Literal("backup")])), name: Type.Optional(Type.String({ minLength: 1, maxLength: 80, pattern: "\\S" })), providerEnabled: Type.Optional(Type.Boolean()), testToken: Type.Optional(Type.String({ maxLength: 100 })) }, { additionalProperties: false });
+const chatSchema = Type.Object({ propertyId: Id, message: Type.String({ minLength: 1, maxLength: 4000, pattern: "\\S" }), conversationId: Type.Optional(Id), page: text(200), orderId: Type.Optional(Id), source: Type.Optional(Type.Union([Type.Literal("USER"), Type.Literal("SUGGESTION"), Type.Literal("UNKNOWN")])), useBackup: Type.Optional(Type.Boolean()) }, { additionalProperties: false });
 const failures = { 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 429: ErrorResponse, 500: ErrorResponse };
-const settingsResponse = Type.Object({ version: Type.Integer(), enabled: Type.Boolean(), baseUrl: Type.String(), model: Type.String(), hasKey: Type.Boolean(), keyReady: Type.Boolean(), canManage: Type.Boolean(), managementPropertyId: Type.Union([Id, Type.Null()]), updatedAt: Type.Union([Type.String(), Type.Null()]) });
+const providerResponse = Type.Object({ name: Type.String(), enabled: Type.Boolean(), baseUrl: Type.String(), model: Type.String(), hasKey: Type.Boolean(), testedAt: Type.Union([Type.String(), Type.Null()]) });
+const routingResponse = Type.Object({ state: Type.Union(["primary", "backup", "checking", "unavailable"].map(value => Type.Literal(value))), retryAfter: Type.Union([Type.String(), Type.Null()]), lastFailure: Type.Union([Type.String(), Type.Null()]), lastCheckedAt: Type.Union([Type.String(), Type.Null()]) });
+const settingsResponse = Type.Object({ version: Type.Integer(), enabled: Type.Boolean(), baseUrl: Type.String(), model: Type.String(), hasKey: Type.Boolean(), keyReady: Type.Boolean(), canManage: Type.Boolean(), managementPropertyId: Type.Union([Id, Type.Null()]), updatedAt: Type.Union([Type.String(), Type.Null()]), backupAvailable: Type.Boolean(), providers: Type.Optional(Type.Object({ primary: providerResponse, backup: providerResponse })), routing: Type.Optional(routingResponse) });
+const settingsActionSchema = Type.Object({ propertyId: Id, expectedVersion: Type.Integer({ minimum: 0 }) }, { additionalProperties: false });
 const entrySchema = Type.Object({ page: Type.Union(["inventory", "orders", "members", "today", "settings", "order"].map(v => Type.Literal(v))), label: Type.String(), steps: Type.Array(Type.String()), orderId: Type.Optional(Id), memberId: Type.Optional(Id), action: Type.Optional(Type.Union(assistantOrderActions.map(v => Type.Literal(v)))) }, { additionalProperties: false });
 const toolSchemas = {
   search_orders: Type.Object({ query: text(), status: Type.Optional(Type.Union(["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"].map(v => Type.Literal(v)))) }, { additionalProperties: false }),
@@ -73,59 +78,132 @@ async function adminSettings(db: Kysely<Database>, request: FastifyRequest, prop
     throw new DomainError("INSUFFICIENT_ACCESS", "仅模型配置所属门店的管理员可维护连接。", 403);
   return { principal, row };
 }
-async function settingsView(db: Kysely<Database>, request: FastifyRequest, propertyId: string): Promise<AssistantSettings> {
+async function settingsView(db: Kysely<Database>, request: FastifyRequest, propertyId: string, router: AssistantProviderRouter): Promise<AssistantSettings> {
   const principal = await currentUser(db, request, propertyId), row = await readSettings(db);
   const canManage = await isAdmin(db, principal, propertyId) && (!row || row.management_property_id === propertyId);
+  const routing = router.status(row);
   return { version: canManage ? row?.version ?? 0 : 0, enabled: row?.enabled ?? false, baseUrl: canManage ? row?.base_url ?? "" : "", model: canManage ? row?.model ?? "" : "",
-    hasKey: canManage && Boolean(row?.encrypted_key), keyReady: canManage && keyReady(), canManage, managementPropertyId: canManage ? row?.management_property_id ?? null : null, updatedAt: canManage ? row?.updated_at.toISOString() ?? null : null };
+    hasKey: canManage && Boolean(row?.encrypted_key), keyReady: canManage && keyReady(), canManage, managementPropertyId: canManage ? row?.management_property_id ?? null : null, updatedAt: canManage ? row?.updated_at.toISOString() ?? null : null,
+    backupAvailable: Boolean(row?.enabled && providerAvailable(row, "backup")),
+    ...(canManage ? { providers: { primary: providerSettings(row, "primary"), backup: providerSettings(row, "backup") }, routing } : {}) };
 }
 async function configuredInput(db: Kysely<Database>, request: FastifyRequest, body: AssistantSettingsInput, needsKey = false) {
   const { principal, row } = await adminSettings(db, request, body.propertyId);
   if ((row?.version ?? 0) !== body.expectedVersion) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "配置已被其他管理员更新，请重新载入后核对。", 409);
-  const baseUrl = normalizeBaseUrl(body.baseUrl), model = body.model.trim();
-  if (!model) throw aiError("请填写模型名称。");
-  if ((!row || row.base_url !== baseUrl) && !body.apiKey) throw aiError("首次配置或更换服务地址时，请填写对应的新 API Key。");
-  return { principal, row, baseUrl, model, apiKey: body.apiKey ?? (needsKey ? decryptKey(row!.encrypted_key) : "") };
+  const role = body.provider ?? "primary", provider = providerSettings(row, role);
+  const baseUrl = normalizeBaseUrl(body.baseUrl), model = body.model.trim(), name = body.name?.trim() ?? provider.name;
+  if (!model || !name) throw aiError("请填写供应商名称和模型名称。");
+  if ((!provider.hasKey || provider.baseUrl !== baseUrl) && !body.apiKey) throw aiError("首次配置或更换服务地址时，请填写对应的新 API Key。");
+  const encryptedKey = role === "primary" ? row?.encrypted_key : row?.backup_encrypted_key;
+  const apiKey = body.apiKey ?? (needsKey && encryptedKey ? decryptKey(encryptedKey) : "");
+  const proofKey = { kind: body.apiKey ? "input" : "stored", value: body.apiKey ?? encryptedKey ?? "" };
+  return { principal, row, role, name, providerEnabled: body.providerEnabled ?? provider.enabled, baseUrl, model, apiKey, proofKey };
+}
+function settingsError(error: unknown): never {
+  const message = (error as Error).message;
+  if (message === "AI_FORBIDDEN") throw new DomainError("INSUFFICIENT_ACCESS", "当前会话无权修改配置。", 403);
+  if (message === "AI_STALE") throw new DomainError("AGGREGATE_VERSION_CONFLICT", "配置已更新，请重新载入核对。", 409);
+  if (message === "AI_TEST_REQUIRED") throw aiError("启用或更换供应商前，请先测试当前连接并通过工具调用验证。");
+  if (message === "AI_PRIMARY_REQUIRED") throw aiError("请先保存主供应商配置，再设置备用供应商。");
+  if (message === "AI_KEY_REQUIRED") throw aiError("更换服务地址时，请填写对应的新 API Key。");
+  throw aiError("配置保存未完成，请重新载入核对后重试。");
 }
 interface Conversation { subjectId: string; credentialId: string; propertyId: string; version: number; messages: ModelMessage[]; expiresAt: number; busy: boolean }
 
 export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, transport: ModelTransport = callModel) {
   const conversations = new Map<string, Conversation>();
   const activeSubjects = new Set<string>();
+  const activeLifetimes = new Set<ReturnType<typeof assistantLifetime>>();
+  const router = new AssistantProviderRouter(), tests = createProviderTestReceipts();
+  const invalidate = async () => {
+    conversations.clear(); tests.clear();
+    for (const lifetime of activeLifetimes) lifetime.cancel();
+    router.sync(await readSettings(db));
+  };
+  const proofContext = (input: Awaited<ReturnType<typeof configuredInput>>, body: AssistantSettingsInput) => ({
+    actor: input.principal.subjectId, session: input.principal.credentialId, property: body.propertyId,
+    version: body.expectedVersion, role: input.role, baseUrl: input.baseUrl, model: input.model, key: input.proofKey
+  });
+  const runRecovery = (settings: ProviderSettingsRow, signal: AbortSignal, checkAdmin?: () => Promise<unknown>) => {
+    return new Promise<void>((resolve, reject) => {
+      const controller = new AbortController();
+      const cancelled = () => controller.abort(signal.reason);
+      signal.addEventListener("abort", cancelled, { once: true });
+      if (signal.aborted) cancelled();
+      let checking = false;
+      const verify = async () => {
+        const current = await abortable(readSettings(db), controller.signal);
+        if (!current?.enabled || current.version !== settings.version || !providerAvailable(current, "primary"))
+          throw new AssistantFailure("AI_CONFIG_CHANGED", "模型配置已变化。");
+        if (checkAdmin) await abortable(checkAdmin(), controller.signal);
+        controller.signal.throwIfAborted();
+      };
+      const watch = setInterval(() => {
+        if (checking || controller.signal.aborted) return;
+        checking = true;
+        void verify().catch(error => controller.abort(error)).finally(() => { checking = false; });
+      }, 1000);
+      watch.unref();
+      const start = async () => {
+        await verify();
+        const result = await abortable(transport({ ...providerCredentials(settings, "primary"), ...connectionTestInput(),
+          signal: controller.signal, onDelta: async () => {}, onProgress: async () => { controller.signal.throwIfAborted(); }
+        }), controller.signal);
+        assertConnectionTest(result); await verify();
+      };
+      void start().then(() => { app.log.info({ code: "AI_PRIMARY_RECOVERED", version: settings.version }, "Assistant primary recovery check completed"); resolve(); }, error => {
+        app.log.warn({ code: providerFault(error) ? error.diagnostic : recoveryCancelled(error) ? "AI_RECOVERY_CANCELLED" : "AI_RECOVERY_FAILED", version: settings.version }, "Assistant primary recovery check did not complete"); reject(error);
+      }).finally(() => { clearInterval(watch); signal.removeEventListener("abort", cancelled); controller.abort(); });
+    });
+  };
   const guard = (schema: TSchema) => () => (data: unknown) => Value.Check(schema, data) ? { value: data } : { error: new Error("请核对必填字段和格式。") };
-  app.get("/api/v1/assistant/settings", { schema: { tags: ["auth"], querystring: querySchema, response: { 200: settingsResponse, ...failures } } }, async request => settingsView(db, request, (request.query as { propertyId: string }).propertyId));
+  app.get("/api/v1/assistant/settings", { schema: { tags: ["auth"], querystring: querySchema, response: { 200: settingsResponse, ...failures } } }, async request => settingsView(db, request, (request.query as { propertyId: string }).propertyId, router));
   app.put("/api/v1/assistant/settings", { validatorCompiler: guard(settingsSchema), config: { rateLimit: { max: 10, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsSchema, response: { 200: settingsResponse, ...failures } } }, async request => {
     const body = request.body as AssistantSettingsInput, input = await configuredInput(db, request, body);
-    if (body.enabled && !keyReady()) throw aiError("服务端密钥保护尚未配置，暂不能启用助手。");
-    if (body.enabled || body.apiKey || input.row?.base_url !== input.baseUrl) await resolvePublicEndpoint(input.baseUrl);
+    const previous = providerSettings(input.row, input.role);
+    const connectionChanged = previous.baseUrl !== input.baseUrl || previous.model !== input.model || Boolean(body.apiKey);
+    if ((connectionChanged || body.enabled && input.providerEnabled) && !keyReady()) throw aiError("服务端密钥保护尚未配置，暂不能启用或更换供应商。");
+    if (connectionChanged || body.enabled && input.providerEnabled && (!input.row?.enabled || !previous.enabled)) await resolvePublicEndpoint(input.baseUrl);
     const encrypted = body.apiKey ? encryptKey(body.apiKey) : null;
+    const tested = tests.matches(proofContext(input, body), body.testToken);
     try {
-      await sql`SELECT qintopia_save_ai_settings(${input.principal.subjectId}, ${input.principal.credentialId}, ${body.propertyId}, ${body.expectedVersion}, ${body.enabled}, ${input.baseUrl}, ${input.model}, ${encrypted})`.execute(db);
-    } catch (error) {
-      const message = (error as Error).message;
-      if (message === "AI_FORBIDDEN") throw new DomainError("INSUFFICIENT_ACCESS", "当前会话无权修改配置。", 403);
-      if (message === "AI_STALE") throw new DomainError("AGGREGATE_VERSION_CONFLICT", "配置已更新，请重新载入后核对。", 409);
-      throw aiError("配置保存未完成，请重新载入核对后重试。");
-    }
-    conversations.clear(); return settingsView(db, request, body.propertyId);
+      await sql`SELECT qintopia_save_ai_provider_settings(${input.principal.subjectId}, ${input.principal.credentialId}, ${body.propertyId}, ${body.expectedVersion}, ${body.enabled}, ${input.role}, ${input.name}, ${input.providerEnabled}, ${input.baseUrl}, ${input.model}, ${encrypted}, ${tested})`.execute(db);
+    } catch (error) { settingsError(error); }
+    await invalidate(); return settingsView(db, request, body.propertyId, router);
   });
-  app.post("/api/v1/assistant/test", { validatorCompiler: guard(settingsSchema), config: { rateLimit: { max: 5, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsSchema, response: { 200: Type.Object({ message: Type.String() }), ...failures } } }, async (request, reply) => {
-    const input = await configuredInput(db, request, request.body as AssistantSettingsInput, true);
-    const lifetime = assistantLifetime(request, reply);
+  app.post("/api/v1/assistant/test", { validatorCompiler: guard(settingsSchema), config: { rateLimit: { max: 5, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsSchema, response: { 200: Type.Object({ message: Type.String(), testToken: Type.String() }), ...failures } } }, async (request, reply) => {
+    const body = request.body as AssistantSettingsInput;
+    const input = await configuredInput(db, request, body, true);
+    const lifetime = assistantLifetime(request, reply); activeLifetimes.add(lifetime);
     let lastAccessCheck = Date.now();
-    const onProgress = async () => {
-      lifetime.progress();
-      if (Date.now() - lastAccessCheck >= 1000) {
-        await abortable(adminSettings(db, request, (request.body as AssistantSettingsInput).propertyId), lifetime.signal);
-        lifetime.check(); lastAccessCheck = Date.now();
-      }
+    const verify = async () => {
+      const current = await abortable(adminSettings(db, request, body.propertyId), lifetime.signal);
+      if ((current.row?.version ?? 0) !== body.expectedVersion) throw aiError("模型配置已变化，请重新载入后测试。");
+      lifetime.check(); lastAccessCheck = Date.now();
     };
-    let result;
-    try { result = await abortable(transport({ ...input, signal: lifetime.signal, onProgress, onDelta: async () => {}, messages: [{ role: "user", content: "Call connection_check with ok=true." }], tools: [{ type: "function", function: { name: "connection_check", description: "Connection test", parameters: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } } }], toolChoice: "connection_check" }), lifetime.signal); }
-    finally { lifetime.dispose(); }
-    if (result.tool_calls?.length !== 1 || result.tool_calls[0]?.function.name !== "connection_check" || result.tool_calls[0].function.arguments.replace(/\s/g, "") !== '{"ok":true}') throw aiError("连接已响应，但模型未正确返回工具调用；请使用支持 function tools 的模型。");
-    await adminSettings(db, request, (request.body as AssistantSettingsInput).propertyId);
-    return { message: "连接与工具调用测试通过。测试不会保存配置。" };
+    try {
+      const result = await abortable(transport({ ...input, ...connectionTestInput(), signal: lifetime.signal,
+        onDelta: async () => {}, onProgress: async () => { lifetime.progress(); if (Date.now() - lastAccessCheck >= 1000) await verify(); }
+      }), lifetime.signal);
+      assertConnectionTest(result); await verify();
+      return { message: "连接与工具调用测试通过。测试不会保存配置。", testToken: tests.issue(proofContext(input, body)) };
+    } finally { activeLifetimes.delete(lifetime); lifetime.dispose(); }
+  });
+  app.post("/api/v1/assistant/promote-backup", { validatorCompiler: guard(settingsActionSchema), config: { rateLimit: { max: 10, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsActionSchema, response: { 200: settingsResponse, ...failures } } }, async request => {
+    const body = request.body as { propertyId: string; expectedVersion: number };
+    const { principal } = await adminSettings(db, request, body.propertyId);
+    try { await sql`SELECT qintopia_promote_ai_backup(${principal.subjectId}, ${principal.credentialId}, ${body.propertyId}, ${body.expectedVersion})`.execute(db); }
+    catch (error) { settingsError(error); }
+    await invalidate(); return settingsView(db, request, body.propertyId, router);
+  });
+  app.post("/api/v1/assistant/recover-primary", { validatorCompiler: guard(settingsActionSchema), config: { rateLimit: { max: 5, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsActionSchema, response: { 200: Type.Object({ message: Type.String(), settings: settingsResponse }), ...failures } } }, async request => {
+    const body = request.body as { propertyId: string; expectedVersion: number };
+    const { row } = await adminSettings(db, request, body.propertyId);
+    if (!row || row.version !== body.expectedVersion) throw new DomainError("AGGREGATE_VERSION_CONFLICT", "配置已更新，请重新载入核对。", 409);
+    if (!row.enabled || !providerAvailable(row, "primary")) throw aiError("主供应商尚未启用，请先配置并启用。");
+    const success = await router.probe(row, signal => runRecovery(row, signal, () => adminSettings(db, request, body.propertyId)), true);
+    await adminSettings(db, request, body.propertyId);
+    return { message: success ? "主供应商检查通过，后续新提问优先使用主供应商。" : "主供应商尚未恢复，将继续按当前路由处理；10分钟后有新提问时再检查。", settings: await settingsView(db, request, body.propertyId, router) };
   });
   app.post("/api/v1/assistant/questions/:questionId/feedback", {
     config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
@@ -149,7 +227,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     const startedAt = Date.now(), id = body.conversationId ?? randomUUID(), toolsUsed = new Set<string>();
     const knownConversation = conversations.get(id);
     const recordConversation = !body.conversationId || knownConversation?.subjectId === principal.subjectId && knownConversation.propertyId === body.propertyId && knownConversation.credentialId === principal.credentialId ? id : randomUUID();
-    const lifetime = assistantLifetime(request, reply);
+    const lifetime = assistantLifetime(request, reply); activeLifetimes.add(lifetime);
     let questionProgress: ReturnType<typeof createAssistantQuestionProgress> | undefined;
     const progress = () => { lifetime.progress(); questionProgress?.touch(); };
     const wait = async <T>(work: Promise<T>) => {
@@ -165,7 +243,8 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     questionProgress = createAssistantQuestionProgress(db, app.log, questionId, principal);
     const settings = await wait(readSettings(db));
     if (!settings?.enabled) { recordedError = "ASSISTANT_DISABLED"; throw aiError("AI 助手尚未启用，请管理员在“设置 → AI 助手”配置连接。"); }
-    const apiKey = decryptKey(settings.encrypted_key);
+    let selectedProvider: AssistantProviderRole = router.select(settings, body.useBackup);
+    let hasVisibleOutput = false, hasExecutedTool = false;
     const now = Date.now();
     for (const [id, conversation] of conversations) if (conversation.expiresAt < now && !conversation.busy) conversations.delete(id);
     let conversation = conversations.get(id);
@@ -230,7 +309,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
             if (!match.members.length) throw new DomainError("NOT_FOUND", "当前门店未找到该会员。", 404);
           }
           const labels = { inventory: "房态", orders: "订单", members: "会员", today: "工作台", settings: "AI 助手设置" };
-          const steps = { inventory: ["先选择日期范围，按房型或房号筛选。", "点击住宿记录查看订单；选择空闲房间或床位和日期开始安排住宿。"], orders: ["使用搜索和状态筛选找到订单。", "打开订单后，核对资料并选择需要办理的操作。"], members: ["按姓名、昵称或手机号搜索会员，打开档案。", "在档案中核对会员合同、权益和相关订单，再选择所需操作。"], today: ["查看今天需要处理的住宿事项。", "进入对应订单，按系统提示办理。"], settings: ["填写服务 API 根地址、API Key 和支持工具调用的模型名称。", "先测试连接，再保存并启用。更换服务地址必须提供对应的新 Key。"] };
+          const steps = { inventory: ["先选择日期范围，按房型或房号筛选。", "点击住宿记录查看订单；选择空闲房间或床位和日期开始安排住宿。"], orders: ["使用搜索和状态筛选找到订单。", "打开订单后，核对资料并选择需要办理的操作。"], members: ["按姓名、昵称或手机号搜索会员，打开档案。", "在档案中核对会员合同、权益和相关订单，再选择所需操作。"], today: ["查看今天需要处理的住宿事项。", "进入对应订单，按系统提示办理。"], settings: ["分别填写主用、备用供应商的地址、密钥和模型，测试连接通过后保存并启用。", "点击备用卡片的“设为主用”可互换优先级；配置变更会结束旧会话，需要新建对话。主故障后可立即检查恢复。"] };
           entry = { page, label: labels[page], steps: steps[page], ...(args.memberId ? { memberId: args.memberId } : {}) };
         }
         entries.push(entry); return { openedEntry: entry, businessSubmitted: false };
@@ -240,6 +319,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     conversation.busy = true; activeSubjects.add(principal.subjectId);
     try {
       lifetime.start();
+      if (router.needsProbe(settings)) void router.probe(settings, signal => runRecovery(settings, signal));
       const today = await wait(propertyLocalToday(db, body.propertyId));
       const messages: ModelMessage[] = [{ role: "system", content: buildAssistantSystemPrompt({
         today, page: body.page, ...(body.orderId ? { orderId: body.orderId } : {}), paymentAllocationEnabled: paymentAllocationEnabled()
@@ -247,26 +327,49 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       let calls = 0;
       for (let round = 0; round < 4; round++) {
         await freshPrincipal();
-        await lifetime.emit({ type: "status", phase: "thinking", round: round + 1 });
+        await lifetime.emit({ type: "status", phase: selectedProvider === "backup" ? "fallback" : "thinking", round: round + 1 });
         const modelStarted = Date.now();
         let firstDeltaMs: number | undefined;
         let response;
+        const attempt = new AbortController();
+        const cancelAttempt = () => attempt.abort(lifetime.signal.reason);
+        lifetime.signal.addEventListener("abort", cancelAttempt, { once: true });
+        if (lifetime.signal.aborted) cancelAttempt();
         try {
-          response = await wait(transport({ baseUrl: settings.base_url, model: settings.model, apiKey, messages, tools: assistantTools, signal: lifetime.signal,
+          response = await wait(transport({ ...providerCredentials(settings, selectedProvider), messages, tools: assistantTools, signal: attempt.signal,
             onProgress: async () => {
-              progress();
+              attempt.signal.throwIfAborted(); progress();
               // Reasoning/tool-only streams and legacy JSON callers also need live authorization.
               if (Date.now() - lastAccessCheck >= 1000) await freshPrincipal();
+              attempt.signal.throwIfAborted();
             },
             ...(lifetime.streaming ? { onDelta: async (text: string) => {
-              firstDeltaMs ??= Date.now() - modelStarted;
-              await freshPrincipal();
+              attempt.signal.throwIfAborted(); firstDeltaMs ??= Date.now() - modelStarted;
+              await freshPrincipal(); attempt.signal.throwIfAborted();
+              if (text) hasVisibleOutput = true;
               await lifetime.emit({ type: "delta", text, round: round + 1 });
             } } : {}) }));
-          request.log.info({ code: "AI_MODEL_COMPLETED", round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs, finishReason: response.finishReason }, "Assistant model request completed");
+          request.log.info({ code: "AI_MODEL_COMPLETED", provider: selectedProvider, configVersion: settings.version, round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs, finishReason: response.finishReason }, "Assistant model request completed");
         } catch (error) {
-          request.log.warn({ code: error instanceof AssistantFailure ? error.diagnostic : "AI_MODEL_FAILED", round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs }, "Assistant model request failed");
+          // Stop every producer/callback before deciding whether a second provider may run.
+          attempt.abort(error); lifetime.check();
+          request.log.warn({ code: error instanceof AssistantFailure ? error.diagnostic : "AI_MODEL_FAILED", provider: selectedProvider, configVersion: settings.version, round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs }, "Assistant model request failed");
+          if (selectedProvider === "primary" && providerFault(error)) {
+            await freshPrincipal(); router.failure(settings.version, error);
+            const backup = providerAvailable(settings, "backup");
+            if (backup && !hasVisibleOutput && !hasExecutedTool && round < 3) {
+              selectedProvider = "backup";
+              // A bounded provider hand-off is completed work, not a periodic keepalive.
+              progress();
+              request.log.info({ code: "AI_PROVIDER_FALLBACK", reason: error.diagnostic, configVersion: settings.version }, "Assistant switched to backup provider");
+              continue;
+            }
+            if (backup) throw new AssistantFailure(error.diagnostic, error.message, { backupRetryAvailable: true });
+          }
           throw error;
+        } finally {
+          lifetime.signal.removeEventListener("abort", cancelAttempt);
+          attempt.abort(new AssistantFailure("AI_ATTEMPT_FINISHED", "模型请求已结束。"));
         }
         if (!response.tool_calls?.length) {
           await freshPrincipal();
@@ -286,6 +389,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
           await freshPrincipal();
           await lifetime.emit({ type: "status", phase: "tool", round: round + 1 });
           const toolStarted = Date.now();
+          hasExecutedTool = true;
           const result = await wait(runTool(tool.function.name, args));
           lifetime.check();
           request.log.info({ code: "AI_TOOL_COMPLETED", tool: tool.function.name, round: round + 1, durationMs: Date.now() - toolStarted }, "Assistant tool completed");
@@ -304,7 +408,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       throw error;
     } finally {
       questionProgress?.dispose();
-      lifetime.dispose();
+      activeLifetimes.delete(lifetime); lifetime.dispose();
       request.log.info({ code: "AI_QUESTION_FINISHED", outcome: recordedOutcome, failure: recordedError, durationMs: Date.now() - startedAt }, "Assistant question finished");
       // Telemetry must not hold the response open after cancellation or an inactivity timeout.
       if (questionId) await abortable(finishAssistantQuestion(db, app.log, questionId, principal, recordedOutcome, recordedError, toolsUsed, startedAt), AbortSignal.timeout(2000)).catch(() => {
@@ -320,5 +424,5 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     return maintenanceRun;
   };
   app.addHook("onReady", async () => { await maintain(); maintenance = setInterval(() => void maintain(), 60 * 60 * 1000); maintenance.unref(); });
-  app.addHook("onClose", async () => { if (maintenance) clearInterval(maintenance); await maintenanceRun; conversations.clear(); });
+  app.addHook("onClose", async () => { if (maintenance) clearInterval(maintenance); for (const lifetime of activeLifetimes) lifetime.cancel(new AssistantFailure("AI_CANCELLED", "助手服务已关闭。")); await router.close(); tests.clear(); await maintenanceRun; conversations.clear(); });
 }

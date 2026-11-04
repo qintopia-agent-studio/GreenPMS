@@ -100,6 +100,13 @@
 .assistant-settings-form .assistant-settings-actions { margin: 0; padding: 0 20px 12px; }
 .assistant-settings-form .detail-section > .assistant-setting-hint { padding: 0 20px 18px; margin: 0; }
 .assistant-settings-form .detail-section > .assistant-notice { margin: 16px 20px 0; }
+.assistant-service-body { padding: 20px; }
+.assistant-service-body > p { line-height: 1.7; }
+.assistant-provider-card { margin-top: 20px; min-width: 0; }
+.assistant-settings-form .assistant-provider-card > fieldset { padding: 20px; }
+.assistant-settings-form .assistant-provider-card input:not([type="checkbox"]) { min-width: 0; width: 100%; }
+.assistant-provider-card fieldset > .assistant-setting-hint { margin: 0; font-weight: 400; }
+.assistant-backup-retry { margin-top: 10px; }
 .settings-page:has(.assistant-settings-page) .settings-tabs { flex-wrap: wrap; }
 .settings-page:has(.assistant-settings-page) .settings-tabs .settings-link { flex-shrink: 0; gap: 8px; }
 @media (max-width: 480px) {
