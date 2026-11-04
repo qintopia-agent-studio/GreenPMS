@@ -78,6 +78,18 @@ describe.sequential("AI assistant authenticated contract", () => {
     const response = await app.inject({ method: "POST", url: "/api/v1/assistant/test", cookies: cookies(admin), payload: settingsBody() }); expect(response.statusCode, response.body).toBe(200);
     expect(await owner.selectFrom("ai_model_settings").selectAll().execute()).toEqual([]);
   });
+  it("cancels a reasoning-only connection test when the administrator logs out", async () => {
+    const login = await app.inject({ method: "POST", url: "/api/v1/auth/login", payload: { username: "admin", password: "demo-pass-2026" } });
+    const temporary = login.cookies.find(c => c.name === "qintopia_session")!.value;
+    mode = "reasoning-only"; reasoningCompletions = 0;
+    duringModel = async () => { await app.inject({ method: "POST", url: "/api/v1/auth/logout", cookies: cookies(temporary) }); };
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/assistant/test", cookies: cookies(temporary), payload: settingsBody() });
+      expect(response.statusCode, response.body).toBe(401);
+      expect(reasoningCompletions).toBe(0);
+      expect(await owner.selectFrom("ai_model_settings").selectAll().execute()).toEqual([]);
+    } finally { mode = "guide"; duringModel = undefined; }
+  });
   it("encrypts secrets, masks responses and denies direct runtime writes", async () => {
     const response = await app.inject({ method: "PUT", url: "/api/v1/assistant/settings", cookies: cookies(admin), payload: settingsBody() }); expect(response.statusCode, response.body).toBe(200); expect(response.body).not.toContain("synthetic-provider-key"); expect(response.json().version).toBe(1);
     const row = await owner.selectFrom("ai_model_settings").selectAll().executeTakeFirstOrThrow(); expect(row.encrypted_key).not.toContain("synthetic-provider-key");

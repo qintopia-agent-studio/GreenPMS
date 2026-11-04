@@ -112,8 +112,16 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
   app.post("/api/v1/assistant/test", { validatorCompiler: guard(settingsSchema), config: { rateLimit: { max: 5, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsSchema, response: { 200: Type.Object({ message: Type.String() }), ...failures } } }, async (request, reply) => {
     const input = await configuredInput(db, request, request.body as AssistantSettingsInput, true);
     const lifetime = assistantLifetime(request, reply);
+    let lastAccessCheck = Date.now();
+    const onProgress = async () => {
+      lifetime.progress();
+      if (Date.now() - lastAccessCheck >= 1000) {
+        await abortable(adminSettings(db, request, (request.body as AssistantSettingsInput).propertyId), lifetime.signal);
+        lifetime.check(); lastAccessCheck = Date.now();
+      }
+    };
     let result;
-    try { result = await abortable(transport({ ...input, signal: lifetime.signal, onProgress: lifetime.progress, onDelta: async () => {}, messages: [{ role: "user", content: "Call connection_check with ok=true." }], tools: [{ type: "function", function: { name: "connection_check", description: "Connection test", parameters: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } } }], toolChoice: "connection_check" }), lifetime.signal); }
+    try { result = await abortable(transport({ ...input, signal: lifetime.signal, onProgress, onDelta: async () => {}, messages: [{ role: "user", content: "Call connection_check with ok=true." }], tools: [{ type: "function", function: { name: "connection_check", description: "Connection test", parameters: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } } }], toolChoice: "connection_check" }), lifetime.signal); }
     finally { lifetime.dispose(); }
     if (result.tool_calls?.length !== 1 || result.tool_calls[0]?.function.name !== "connection_check" || result.tool_calls[0].function.arguments.replace(/\s/g, "") !== '{"ok":true}') throw aiError("连接已响应，但模型未正确返回工具调用；请使用支持 function tools 的模型。");
     await adminSettings(db, request, (request.body as AssistantSettingsInput).propertyId);
