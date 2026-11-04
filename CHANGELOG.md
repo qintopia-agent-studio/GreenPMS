@@ -2,6 +2,18 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.18.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.11...v1.18.0) (2026-11-04)
+
+
+### Features
+
+* **assistant:** add primary and backup model providers ([#129](https://github.com/qintopia-agent-studio/GreenPMS/issues/129)) ([e2ab9c3](https://github.com/qintopia-agent-studio/GreenPMS/commit/e2ab9c3c430e2f8bd0045f9f3fdd17fee6d219fb))
+
+
+### Bug Fixes
+
+* **release:** verify containerd archive identity through descriptors ([#127](https://github.com/qintopia-agent-studio/GreenPMS/issues/127)) ([3713ad9](https://github.com/qintopia-agent-studio/GreenPMS/commit/3713ad9c973d064b52a956f5f58f98d1d9107a46))
+
 ## [1.17.11](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.17.10...v1.17.11) (2026-11-04)
 
 
