@@ -115,6 +115,8 @@ Retention 支持 `dry-run`，输出保留、保护、跳过、候选和待删除
 7. 在锁仍保持期间返回健康 receipt。Actions 校验 receipt 后写入 `deployed.json`，运行 retention，最后让服务器根据 receipt 清理旧 image ID。
 8. 所有成功和失败路径通过 trap 删除 archive、解压内容和下载临时目录。异常中断留下 transaction journal，由 recovery timer 在下一次持锁恢复。
 
+打包端也区分这两种身份：传统 Docker store 的 inspect ID 可直接等于归档 config digest；containerd store 的 inspect ID 可能指向 OCI manifest/index，须从 daemon descriptor 到归档中的 manifest、config 和 layers 逐级验证摘要与大小，确认唯一的 `linux/amd64` 应用后，才把 config digest 写入发布 manifest。BuildKit 附带的证明必须指向该应用并通过内容校验。目前接受单一归档根 descriptor 及其直接 manifest 或单层 index；额外根、嵌套 index 和未知旁支均拒绝。遇到身份、平台或内容不一致仍拒绝打包，不能把归档自报的 config digest 直接当作可信构建身份。
+
 服务器只保留当前运行 image 和一个快速回退 image，具体按唯一 image ID 判断。app 与 worker 必须引用同一个 current image；任一容器仍引用旧 image 时清理会拒绝删除。生产 `.env`、COS reader credentials、state、audit 和数据库仍在 release 外部；生产服务器不保存源码构建目录、镜像 archive 或 BuildKit cache。
 
 ## 6. 回退
