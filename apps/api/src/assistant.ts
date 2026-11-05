@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as retryDelay } from "node:timers/promises";
 import { buildAssistantSystemPrompt } from "./assistant-prompt.ts";
 import { paymentAllocationEnabled } from "../../../packages/db/src/payment-allocation.ts";
 import { Type, type TSchema } from "@sinclair/typebox";
@@ -14,7 +15,8 @@ import { ErrorResponse, Id } from "./schemas.ts";
 import { aiError, callModel, decryptKey, encryptKey, keyReady, normalizeBaseUrl, resolvePublicEndpoint, type ModelMessage, type ModelTool, type ModelTransport } from "./assistant-model.ts";
 import { beginAssistantQuestion, createAssistantQuestionProgress, finishAssistantQuestion, maintainAssistantQuestions } from "./assistant-question-records.ts";
 import { abortable, AssistantFailure, assistantLifetime } from "./assistant-lifetime.ts";
-import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerAvailable, providerCredentials, providerFault, providerSettings, recoveryCancelled, selectProviderSnapshot, type ProviderSettingsRow } from "./assistant-providers.ts";
+import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerAvailable, providerCredentials, providerFault, providerRetryable, providerSettings, recoveryCancelled, selectProviderSnapshot, type ProviderSettingsRow } from "./assistant-providers.ts";
+import { modelFailureDiagnostic } from "./assistant-model-diagnostics.ts";
 import type { AssistantProviderRole } from "../../../packages/contracts/src/assistant.ts";
 
 function guestName(value: unknown): string {
@@ -152,7 +154,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
         assertConnectionTest(result); await verify();
       };
       void start().then(() => { app.log.info({ code: "AI_PRIMARY_RECOVERED", version: settings.version }, "Assistant primary recovery check completed"); resolve(); }, error => {
-        app.log.warn({ code: providerFault(error) ? error.diagnostic : recoveryCancelled(error) ? "AI_RECOVERY_CANCELLED" : "AI_RECOVERY_FAILED", version: settings.version }, "Assistant primary recovery check did not complete"); reject(error);
+        app.log.warn({ code: providerFault(error) ? error.diagnostic : recoveryCancelled(error) ? "AI_RECOVERY_CANCELLED" : "AI_RECOVERY_FAILED", version: settings.version, providerDiagnostic: modelFailureDiagnostic(error) }, "Assistant primary recovery check did not complete"); reject(error);
       }).finally(() => { clearInterval(watch); signal.removeEventListener("abort", cancelled); controller.abort(); });
     });
   };
@@ -187,6 +189,9 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       }), lifetime.signal);
       assertConnectionTest(result); await verify();
       return { message: "连接与工具调用测试通过。测试不会保存配置。", testToken: tests.issue(proofContext(input, body)) };
+    } catch (error) {
+      request.log.warn({ code: error instanceof AssistantFailure ? error.diagnostic : "AI_CONNECTION_TEST_FAILED", provider: input.role, configVersion: body.expectedVersion, providerDiagnostic: modelFailureDiagnostic(error) }, "Assistant connection test did not complete");
+      throw error;
     } finally { activeLifetimes.delete(lifetime); lifetime.dispose(); }
   });
   app.post("/api/v1/assistant/promote-backup", { validatorCompiler: guard(settingsActionSchema), config: { rateLimit: { max: 10, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsActionSchema, response: { 200: settingsResponse, ...failures } } }, async request => {
@@ -249,7 +254,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     // later tool rounds or one eligible fallback, while priorities may change.
     const settings = selected.settings;
     let selectedProvider: AssistantProviderRole = selected.provider;
-    let hasVisibleOutput = false, hasExecutedTool = false;
+    let retriedProvider = false;
     const now = Date.now();
     for (const [id, conversation] of conversations) if (conversation.expiresAt < now && !conversation.busy) conversations.delete(id);
     let conversation = conversations.get(id);
@@ -329,6 +334,9 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       const messages: ModelMessage[] = [{ role: "system", content: buildAssistantSystemPrompt({
         today, page: body.page, ...(body.orderId ? { orderId: body.orderId } : {}), paymentAllocationEnabled: paymentAllocationEnabled()
       }) }, ...conversation.messages, { role: "user", content: body.message }];
+      // Only successful earlier conversation turns survive a provider hand-off.
+      // Failed drafts, reasoning, tool messages and pending entries are local to this question.
+      const originalMessages = messages.slice();
       let calls = 0;
       for (let round = 0; round < 4; round++) {
         await freshPrincipal();
@@ -351,25 +359,38 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
             ...(lifetime.streaming ? { onDelta: async (text: string) => {
               attempt.signal.throwIfAborted(); firstDeltaMs ??= Date.now() - modelStarted;
               await freshPrincipal(); attempt.signal.throwIfAborted();
-              if (text) hasVisibleOutput = true;
               await lifetime.emit({ type: "delta", text, round: round + 1 });
             } } : {}) }));
           request.log.info({ code: "AI_MODEL_COMPLETED", provider: selectedProvider, configVersion: settings.version, round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs, finishReason: response.finishReason }, "Assistant model request completed");
         } catch (error) {
           // Stop every producer/callback before deciding whether a second provider may run.
           attempt.abort(error); lifetime.check();
-          request.log.warn({ code: error instanceof AssistantFailure ? error.diagnostic : "AI_MODEL_FAILED", provider: selectedProvider, configVersion: settings.version, round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs }, "Assistant model request failed");
-          if (selectedProvider === "primary" && providerFault(error)) {
-            await freshPrincipal(); router.failure(settings.version, error);
-            const backup = providerAvailable(settings, "backup");
-            if (backup && !hasVisibleOutput && !hasExecutedTool && round < 3) {
-              selectedProvider = "backup";
-              // A bounded provider hand-off is completed work, not a periodic keepalive.
-              progress();
-              request.log.info({ code: "AI_PROVIDER_FALLBACK", reason: error.diagnostic, configVersion: settings.version }, "Assistant switched to backup provider");
+          request.log.warn({ code: error instanceof AssistantFailure ? error.diagnostic : "AI_MODEL_FAILED", provider: selectedProvider, configVersion: settings.version, round: round + 1, durationMs: Date.now() - modelStarted, firstDeltaMs, providerDiagnostic: modelFailureDiagnostic(error) }, "Assistant model request failed");
+          if (providerFault(error)) {
+            await freshPrincipal();
+            if (!retriedProvider && providerRetryable(error) && round < 3) {
+              retriedProvider = true;
+              request.log.info({ code: "AI_PROVIDER_RETRY", provider: selectedProvider, reason: error.diagnostic, configVersion: settings.version }, "Assistant retrying a transient model failure");
+              // Retry only this model request; completed read-only tools are not repeated.
+              // Cancellation aborts both this short delay and the entire question.
+              await abortable(retryDelay(250, undefined, { signal: lifetime.signal }), lifetime.signal);
               continue;
             }
-            if (backup) throw new AssistantFailure(error.diagnostic, error.message, { backupRetryAvailable: true });
+            if (selectedProvider === "primary") {
+              router.failure(settings.version, error);
+              const backup = providerAvailable(settings, "backup");
+              if (backup && round < 3) {
+                selectedProvider = "backup"; retriedProvider = true;
+                messages.splice(0, messages.length, ...originalMessages);
+                entries.length = 0;
+                // No business writes exist in the tool whitelist. Start this question
+                // afresh on backup without resetting model/tool budgets or opening stale entries.
+                progress();
+                request.log.info({ code: "AI_PROVIDER_FALLBACK", reason: error.diagnostic, configVersion: settings.version }, "Assistant switched to backup provider");
+                continue;
+              }
+              if (backup) throw new AssistantFailure(error.diagnostic, error.message, { backupRetryAvailable: true });
+            }
           }
           throw error;
         } finally {
@@ -394,7 +415,6 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
           await freshPrincipal();
           await lifetime.emit({ type: "status", phase: "tool", round: round + 1 });
           const toolStarted = Date.now();
-          hasExecutedTool = true;
           const result = await wait(runTool(tool.function.name, args));
           lifetime.check();
           request.log.info({ code: "AI_TOOL_COMPLETED", tool: tool.function.name, round: round + 1, durationMs: Date.now() - toolStarted }, "Assistant tool completed");

@@ -72,7 +72,9 @@ describe("versioned employee operating knowledge", () => {
   ];
   scenarios.push({ question: "模型还在慢慢回答，超过一分钟会被停止吗？", ids: ["assistant-help"], facts: ["首响等待60秒", "连续60秒无有效进展才超时", "文字、思考、工具增量均可续期", "保活心跳不算", "持续响应无总时限", "停止即取消", "权限失效不触发备用"] });
   scenarios.push({ question: "把备用设为主用会停用旧主、让我重新对话吗？", ids: ["assistant-help"], facts: ["仅已启用的完整连接", "保留双方启用状态", "保留对话与上下文", "当前回答继续", "后续问题按新顺序", "保存连接配置仍使旧对话失效"] });
-  scenarios.push({ question: "备用供应商怎么设置，主恢复后什么时候切回？", ids: ["assistant-help"], facts: ["主用/备用两张卡", "改连接须重测", "设为主用", "无需重填Key", "使旧对话失效", "未显示文字、未执行工具", "最多自动切备用一次", "用备用重新回答", "10分钟", "无人提问不探测", "不发送业务资料", "不让用户等待", "立即检查恢复", "不改主备身份", "不能凭知识断言当前供应商"] });
+  scenarios.push({ question: "备用供应商怎么设置，主恢复后什么时候切回？", ids: ["assistant-help"], facts: ["主用/备用两张卡", "改连接须重测", "设为主用", "无需重填Key", "使旧对话失效", "最多自动切备用一次", "用备用重新回答", "10分钟", "无人提问不探测", "不发送业务资料", "不让用户等待", "立即检查恢复", "不改主备身份", "不能凭知识断言当前供应商"] });
+  scenarios.push({ question: "已经查到订单或显示半截回答后失败，还要手动切备用吗？", ids: ["assistant-help"], facts: ["每问最多重试当前供应商一次", "复用已完成查询", "最多自动切备用一次", "从原问题与历史上下文重答", "清除失败草稿与暂存入口", "不拼接主的中间回答", "切备用后失败不循环", "累计4次模型/6次工具预算不重置", "普通界面仅思考/查询/回答", "最终失败才报错"] });
+  scenarios.push({ question: "权限失效或供应商额度不足时也会反复调用吗？", ids: ["assistant-help"], facts: ["鉴权/额度故障可直接备用", "参数/内容过滤、安全、权限、保存配置、取消不重试", "停止、断线、退出或权限失效不触发备用"] });
   it.each(scenarios)("supplies required evidence for: $question", ({ ids, facts }) => {
     const evidence = assistantKnowledgeTopics.filter(topic => ids.includes(topic.id)).map(topic => topic.content).join("\n");
     const prompt = buildAssistantSystemPrompt(context);
@@ -109,6 +111,10 @@ describe("versioned employee operating knowledge", () => {
     expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(45_000);
     expect(prompt.length).toBeLessThan(18_000);
     expect(prompt).not.toContain("docs/implementation/");
+    for (const paymentAllocationEnabled of [true, false]) {
+      const orderPrompt = buildAssistantSystemPrompt({ ...context, orderId: "00000000-0000-4000-8000-000000000001", paymentAllocationEnabled });
+      expect(Buffer.byteLength(orderPrompt, "utf8")).toBeLessThan(45_000);
+    }
   });
 });
 

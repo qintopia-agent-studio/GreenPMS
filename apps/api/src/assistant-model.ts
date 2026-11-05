@@ -5,6 +5,8 @@ import { isIP } from "node:net";
 import { DomainError } from "@qintopia/contracts";
 import { SseDecoder } from "../../../packages/contracts/src/sse.ts";
 import { abortable, AssistantFailure } from "./assistant-lifetime.ts";
+import { diagnosedModelFailure, upstreamModelFailure, type ModelDiagnosticContext } from "./assistant-model-diagnostics.ts";
+export { modelFailureDiagnostic } from "./assistant-model-diagnostics.ts";
 
 export const aiError = (message: string) => new DomainError("VALIDATION_ERROR", message, 400);
 export function encryptionKey(): Buffer {
@@ -75,25 +77,29 @@ export type ModelResponse = { content: string | null; reasoning_content?: string
 export type ModelTransport = (input: ModelInput) => Promise<ModelResponse>;
 
 const MAX_MODEL_TEXT = 12000;
-function diagnosticPart(value: unknown): string {
-  const safe = String(value).replace(/[^a-z0-9_]+/gi, "_").toUpperCase().replace(/^_+|_+$/g, "").slice(0, 48);
-  return safe || "UNKNOWN";
+type ProtocolReason = "JSON" | "SSE" | "CHOICES" | "DELTA" | "CONTENT" | "REASONING_CONTENT" | "TOOL_CALLS" | "CONTENT_TYPE" | "UTF8" | "AFTER_DONE" | "EMPTY" | "LIMIT";
+const invalidResponse = (reason: ProtocolReason) => diagnosedModelFailure(`AI_INVALID_RESPONSE_${reason}`, "模型返回了不完整或不兼容的内容，未能完成本次回答。",
+  { category: "protocol", reason: `响应结构校验失败：${reason}。` });
+function invalidFinish(finish: unknown): AssistantFailure {
+  // Never incorporate an arbitrary upstream finish value into logs or an Error.
+  const reason = typeof finish === "string" && ["length", "content_filter", "aborted", "insufficient_system_resource"].includes(finish) ? finish.toUpperCase() : finish == null ? "MISSING" : "OTHER";
+  return diagnosedModelFailure(`AI_INVALID_RESPONSE_FINISH_${reason}`, "模型返回了不完整的回答，未能正常完成。",
+    { category: reason === "CONTENT_FILTER" ? "content_filter" : reason === "LENGTH" ? "context_limit" : "protocol", reason: `响应结束状态未通过校验：${reason}。` });
 }
-const invalidResponse = (reason?: string) => new AssistantFailure(reason ? `AI_INVALID_RESPONSE_${diagnosticPart(reason)}` : "AI_INVALID_RESPONSE", "模型返回了不完整或不兼容的内容，请确认服务支持流式 Chat Completions 和工具调用。");
 function validateMessage(message: { content: string | null; reasoning_content?: unknown; tool_calls?: ModelToolCall[] }, finish: unknown): ModelResponse {
-  if (!["stop", "tool_calls"].includes(String(finish))) throw invalidResponse(`FINISH_${String(finish)}`);
-  if (message.content !== null && typeof message.content !== "string") throw invalidResponse();
+  if (!["stop", "tool_calls"].includes(String(finish))) throw invalidFinish(finish);
+  if (message.content !== null && typeof message.content !== "string") throw invalidResponse("CONTENT");
   if (message.reasoning_content !== undefined && message.reasoning_content !== null && typeof message.reasoning_content !== "string") throw invalidResponse("REASONING_CONTENT");
-  if (message.tool_calls !== undefined && !Array.isArray(message.tool_calls)) throw invalidResponse();
-  if ((message.content?.length ?? 0) > MAX_MODEL_TEXT || (message.reasoning_content?.length ?? 0) > MAX_MODEL_TEXT || (message.tool_calls?.length ?? 0) > 6) throw invalidResponse();
+  if (message.tool_calls !== undefined && !Array.isArray(message.tool_calls)) throw invalidResponse("TOOL_CALLS");
+  if ((message.content?.length ?? 0) > MAX_MODEL_TEXT || (message.reasoning_content?.length ?? 0) > MAX_MODEL_TEXT || (message.tool_calls?.length ?? 0) > 6) throw invalidResponse("LIMIT");
   const ids = new Set<string>();
   for (const tool of message.tool_calls ?? []) {
     if (!tool || tool.type !== "function" || typeof tool.id !== "string" || !tool.id || tool.id.length > 200 || typeof tool.function?.name !== "string" || !tool.function.name || tool.function.name.length > 200
-      || typeof tool.function.arguments !== "string" || tool.function.arguments.length > 6000) throw invalidResponse();
-    if (ids.has(tool.id)) throw invalidResponse();
+      || typeof tool.function.arguments !== "string" || tool.function.arguments.length > 6000) throw invalidResponse("TOOL_CALLS");
+    if (ids.has(tool.id)) throw invalidResponse("TOOL_CALLS");
     ids.add(tool.id);
   }
-  if (!message.content?.trim() && !message.tool_calls?.length) throw invalidResponse();
+  if (!message.content?.trim() && !message.tool_calls?.length) throw invalidResponse("EMPTY");
   return { content: message.content, ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}), ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}), finishReason: String(finish) };
 }
 
@@ -106,19 +112,24 @@ export class ModelStreamDecoder {
   private finish: unknown;
   private done = false;
   private progressRevision = 0;
+  constructor(private diagnosticContext?: ModelDiagnosticContext, private requestId?: unknown) {}
   get complete() { return this.done; }
   get progress() { return this.progressRevision; }
   push(text: string): string {
     let delta = "";
-    for (const data of this.frames.push(text)) {
-      if (this.done) throw invalidResponse();
+    let frames: string[];
+    try { frames = this.frames.push(text); } catch { throw invalidResponse("SSE"); }
+    for (const data of frames) {
+      if (this.done) throw invalidResponse("AFTER_DONE");
       if (data === "[DONE]") { this.done = true; continue; }
       let parsed;
-      try { parsed = JSON.parse(data); } catch { throw invalidResponse(); }
-      if (!parsed || parsed.error || !Array.isArray(parsed.choices)) throw invalidResponse();
+      try { parsed = JSON.parse(data); } catch { throw invalidResponse("JSON"); }
+      if (parsed?.error != null) throw upstreamModelFailure(parsed, this.diagnosticContext, undefined, this.requestId);
+      if (!parsed || !Array.isArray(parsed.choices)) throw invalidResponse("CHOICES");
       if (!parsed.choices.length) continue; // optional usage-only chunk
       const choice = parsed.choices[0];
-      if (parsed.choices.length !== 1 || !choice || choice.index !== 0 || this.finish || !choice.delta || typeof choice.delta !== "object" || Array.isArray(choice.delta)) throw invalidResponse();
+      if (parsed.choices.length !== 1 || !choice || choice.index !== 0 || this.finish) throw invalidResponse("CHOICES");
+      if (!choice.delta || typeof choice.delta !== "object" || Array.isArray(choice.delta)) throw invalidResponse("DELTA");
       const part = choice.delta;
       let progressed = false;
       if (part.reasoning_content != null) {
@@ -128,27 +139,27 @@ export class ModelStreamDecoder {
         progressed ||= part.reasoning_content.length > 0;
       }
       if (part.content != null) {
-        if (typeof part.content !== "string") throw invalidResponse();
+        if (typeof part.content !== "string") throw invalidResponse("CONTENT");
         this.content += part.content; delta += part.content;
-        if (this.content.length > MAX_MODEL_TEXT) throw invalidResponse();
+        if (this.content.length > MAX_MODEL_TEXT) throw invalidResponse("LIMIT");
         progressed ||= part.content.length > 0;
       }
       if (part.tool_calls !== undefined) {
-        if (!Array.isArray(part.tool_calls) || part.tool_calls.length > 6) throw invalidResponse();
+        if (!Array.isArray(part.tool_calls) || part.tool_calls.length > 6) throw invalidResponse("TOOL_CALLS");
         for (const item of part.tool_calls) {
-          if (!item || !Number.isInteger(item.index) || item.index < 0 || item.index > 5 || item.type && item.type !== "function") throw invalidResponse();
+          if (!item || !Number.isInteger(item.index) || item.index < 0 || item.index > 5 || item.type && item.type !== "function") throw invalidResponse("TOOL_CALLS");
           const tool = this.tools.get(item.index) ?? { id: "", type: "function", function: { name: "", arguments: "" } };
-          for (const value of [item.id, item.function?.name, item.function?.arguments]) if (value !== undefined && typeof value !== "string") throw invalidResponse();
+          for (const value of [item.id, item.function?.name, item.function?.arguments]) if (value !== undefined && typeof value !== "string") throw invalidResponse("TOOL_CALLS");
           tool.id += item.id ?? "";
           tool.function.name += item.function?.name ?? "";
           tool.function.arguments += item.function?.arguments ?? "";
-          if (tool.id.length > 200 || tool.function.name.length > 200 || tool.function.arguments.length > 6000) throw invalidResponse();
+          if (tool.id.length > 200 || tool.function.name.length > 200 || tool.function.arguments.length > 6000) throw invalidResponse("TOOL_CALLS");
           this.tools.set(item.index, tool);
           progressed ||= Boolean(item.id || item.function?.name || item.function?.arguments);
         }
       }
       if (choice.finish_reason != null) {
-        if (!["stop", "tool_calls"].includes(choice.finish_reason)) throw invalidResponse(`FINISH_${choice.finish_reason}`);
+        if (!["stop", "tool_calls"].includes(choice.finish_reason)) throw invalidFinish(choice.finish_reason);
         this.finish = choice.finish_reason;
       }
       if (progressed) this.progressRevision++;
@@ -156,7 +167,7 @@ export class ModelStreamDecoder {
     return delta;
   }
   result() {
-    if (!this.done) throw invalidResponse();
+    if (!this.done) throw diagnosedModelFailure("AI_STREAM_INCOMPLETE", "模型响应流提前结束，回答不完整，请重试。", { category: "incomplete_stream", reason: "响应流结束前未收到[DONE]标记。" });
     const tool_calls = [...this.tools.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
     return validateMessage({ content: this.content || null, ...(this.reasoning ? { reasoning_content: this.reasoning } : {}), ...(tool_calls.length ? { tool_calls } : {}) }, this.finish);
   }
@@ -186,10 +197,30 @@ export const callModel: ModelTransport = async (input) => {
         lookup: (_hostname, _options, callback) => callback(null, endpoint.address.address, endpoint.address.family),
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${input.apiKey}`, "Content-Length": Buffer.byteLength(body) }
       }, async (response) => {
-        if (response.statusCode !== 200) { finish(new AssistantFailure(`AI_HTTP_${response.statusCode ?? 0}`, `模型服务返回 HTTP ${response.statusCode ?? "未知"}，请检查模型、凭证或稍后重试。`)); response.destroy(); return; }
-        if (!response.headers["content-type"]?.includes("text/event-stream")) { finish(invalidResponse()); response.destroy(); return; }
+        const requestId = response.headers["x-request-id"] ?? response.headers["request-id"] ?? response.headers["x-correlation-id"];
+        if (response.statusCode !== 200) {
+          // Read only a bounded error envelope. A stalled/error page must not
+          // consume the model timeout, and no raw body is put on the Error.
+          const chunks: Buffer[] = []; let bytes = 0, oversized = false;
+          const bodyTimer = setTimeout(() => response.destroy(), 2000);
+          try {
+            for await (const chunk of response) {
+              bytes += chunk.length;
+              if (bytes > 16_384) { oversized = true; break; }
+              chunks.push(Buffer.from(chunk));
+            }
+          } catch { /* The HTTP status remains authoritative when the body is cut short. */ }
+          finally { clearTimeout(bodyTimer); response.destroy(); }
+          let envelope: unknown;
+          if (!oversized) { try { envelope = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { /* Non-JSON bodies are never retained. */ } }
+          finish(upstreamModelFailure(envelope, input, response.statusCode ?? 0, requestId)); return;
+        }
+        if (!response.headers["content-type"]?.includes("text/event-stream")) { finish(invalidResponse("CONTENT_TYPE")); response.destroy(); return; }
         let size = 0;
-        const decoder = new TextDecoder("utf-8", { fatal: true }), stream = new ModelStreamDecoder();
+        const decoder = new TextDecoder("utf-8", { fatal: true }), stream = new ModelStreamDecoder(input, requestId);
+        const utf8 = (chunk?: Uint8Array, streaming = false) => {
+          try { return decoder.decode(chunk, { stream: streaming }); } catch { throw invalidResponse("UTF8"); }
+        };
         const decode = async (text: string) => {
           const previousProgress = stream.progress, delta = stream.push(text);
           // Headers, comments, empty deltas and usage-only frames do not prove model progress.
@@ -209,12 +240,12 @@ export const callModel: ModelTransport = async (input) => {
             if (settled) return;
             size += chunk.length;
             if (size > 1_000_000) throw new AssistantFailure("AI_RESPONSE_TOO_LARGE", "模型响应过大，请缩小问题范围后重试。");
-            await decode(decoder.decode(chunk, { stream: true }));
+            await decode(utf8(chunk, true));
             if (settled) return;
             // The protocol terminator is authoritative; a proxy may keep its socket open.
             if (stream.complete) { finish(undefined, stream.result()); response.destroy(); return; }
           }
-          await decode(decoder.decode());
+          await decode(utf8());
           finish(undefined, stream.result());
         } catch (error) { finish(error); }
       });

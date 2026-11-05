@@ -45,6 +45,128 @@ async function openAssistant(page: Page) {
   await expect(page.getByTestId("ai-assistant-panel")).toBeVisible();
 }
 
+async function syntheticChatStream(page: Page, respond: (response: ServerResponse, index: number) => void) {
+  const received: Array<Record<string, unknown>> = [];
+  const responses: ServerResponse[] = [];
+  let cancelled = 0;
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    received.push(JSON.parse(Buffer.concat(chunks).toString())); responses.push(response);
+    response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
+      "Access-Control-Allow-Origin": new URL(page.url()).origin, "Access-Control-Allow-Credentials": "true" });
+    response.on("close", () => { if (!response.writableEnded) cancelled++; });
+    respond(response, received.length);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/chat`;
+  await page.route("**/api/v1/assistant/chat", route => route.continue({ url: endpoint }));
+  return { received, responses, get cancelled() { return cancelled; }, async close() {
+    for (const response of responses) response.end();
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+  } };
+}
+
+test("automatic recovery replaces each failed draft, preserves the original context and opens only the final entry", async ({ page }) => {
+  const state = await fixture(page);
+  const stream = await syntheticChatStream(page, (response, index) => {
+    if (index === 2) response.write(frame({ type: "status", phase: "thinking", round: 1 }));
+    else response.end(frame({ type: "done", result: { conversationId: "automatic-recovery-context", text: index === 1 ? "此前成功的对话" : "恢复后继续原有对话", entries: [] } }));
+  });
+  const navigations: string[] = [];
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) navigations.push(new URL(frame.url()).pathname); });
+  try {
+    await page.goto("/dashboard"); await openAssistant(page);
+    const panel = page.getByTestId("ai-assistant-panel"), input = page.getByLabel("向 AI 助手提问");
+    await input.fill("先建立成功对话"); await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(panel.getByText("此前成功的对话", { exact: true })).toBeVisible();
+    await input.fill("查询订单后继续解释取消入口"); await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect.poll(() => stream.received.length).toBe(2);
+    const response = stream.responses[1]!;
+    response.write(frame({ type: "delta", text: "第一段失败草稿", round: 1 }));
+    await expect(panel.getByText("第一段失败草稿", { exact: true })).toBeVisible();
+    response.write(frame({ type: "status", phase: "thinking", round: 2 }));
+    await expect(panel.locator(".assistant-message-partial")).toHaveCount(0);
+    await expect(panel.getByRole("status")).toHaveText("正在思考…");
+    response.write(frame({ type: "delta", text: "同主重试失败草稿", round: 2 }));
+    await expect(panel.getByText("同主重试失败草稿", { exact: true })).toBeVisible();
+    response.write(frame({ type: "status", phase: "fallback", round: 3 }));
+    await expect(panel.locator(".assistant-message-partial")).toHaveCount(0);
+    await expect(panel.getByRole("status")).toHaveText("正在思考…");
+    await expect(panel.getByRole("alert")).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "用备用重新回答", exact: true })).toHaveCount(0);
+    await expect(panel.getByText(/已切换|备用服务|主服务暂时不可用/)).toHaveCount(0);
+    await expect(page).toHaveURL(/\/dashboard$/);
+    expect(navigations.filter(path => path === "/settings/ai")).toHaveLength(0);
+    await input.fill("下一条尚未发送的草稿");
+    response.write(frame({ type: "delta", text: "恢复后的完整回答", round: 3 }));
+    await expect(panel.getByText("恢复后的完整回答", { exact: true })).toBeVisible();
+    response.end(frame({ type: "done", result: { conversationId: "automatic-recovery-context", text: "恢复后的完整回答", entries: [
+      { page: "settings", label: "AI 助手设置", steps: ["核对设置后再决定是否修改。"] }
+    ] } }));
+    await expect(page).toHaveURL(/\/settings\/ai$/);
+    await expect(panel.getByRole("button", { name: "打开AI 助手设置", exact: true })).toHaveCount(1);
+    await expect(panel.getByRole("button", { name: "停止生成", exact: true })).toHaveCount(0);
+    await expect(panel.locator(".assistant-message-assistant")).toHaveCount(2);
+    await expect(panel.getByText("第一段失败草稿", { exact: true })).toHaveCount(0);
+    await expect(panel.getByText("同主重试失败草稿", { exact: true })).toHaveCount(0);
+    await expect(panel.getByRole("alert")).toHaveCount(0);
+    await expect(input).toHaveValue("下一条尚未发送的草稿");
+    expect(navigations.filter(path => path === "/settings/ai")).toHaveLength(1);
+    expect(stream.received).toHaveLength(2);
+    expect(stream.received[1]).toMatchObject({ propertyId: "ui-a", conversationId: "automatic-recovery-context", message: "查询订单后继续解释取消入口" });
+    expect(stream.received[1]).not.toHaveProperty("useBackup");
+    await page.screenshot({ path: test.info().outputPath("assistant-automatic-recovery.png") });
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(panel.getByText("恢复后继续原有对话", { exact: true })).toBeVisible();
+    expect(stream.received[2]).toMatchObject({ conversationId: "automatic-recovery-context", message: "下一条尚未发送的草稿", page: "设置" });
+    expect(stream.cancelled).toBe(0); expect(state.base.unexpected).toEqual([]);
+  } finally { await stream.close(); }
+});
+
+for (const interruption of ["stop", "property", "logout"] as const) {
+  test(`automatic recovery rejects late output after ${interruption}`, async ({ page, isMobile }) => {
+    // The existing mobile layout has no visible property picker. Exercise the
+    // actual desktop picker, rather than forcing an interaction with hidden UI.
+    test.skip(interruption === "property" && isMobile, "The property picker is desktop-only; stop/logout are covered on both viewports.");
+    await fixture(page);
+    const stream = await syntheticChatStream(page, response => {
+      response.write(frame({ type: "status", phase: "fallback", round: 3 }));
+      response.write(frame({ type: "delta", text: "恢复中尚未完成的草稿", round: 3 }));
+    });
+    try {
+      await page.goto("/settings/ai"); await openAssistant(page);
+      await page.getByLabel("向 AI 助手提问").fill("中止恢复的问题");
+      await page.getByRole("button", { name: "发送", exact: true }).click();
+      await expect(page.getByText("恢复中尚未完成的草稿", { exact: true })).toBeVisible();
+      if (interruption === "stop") {
+        await page.getByRole("button", { name: "停止生成", exact: true }).click();
+        await expect(page.getByText("已停止生成，可以修改问题后重新发送。", { exact: true })).toBeVisible();
+      } else {
+        await page.getByRole("button", { name: "关闭 AI 助手", exact: true }).click();
+        if (interruption === "property") {
+          await page.getByTestId("property-select").selectOption("ui-b");
+          await openAssistant(page);
+        } else {
+          await page.getByRole("button", { name: "退出登录", exact: true }).filter({ visible: true }).click();
+          await expect(page.getByTestId("login-submit")).toBeVisible();
+        }
+      }
+      await expect.poll(() => stream.cancelled).toBe(1);
+      stream.responses[0]!.end(frame({ type: "done", result: { conversationId: "late-recovery", text: "不应显示的迟到恢复结果", entries: [
+        { page: "settings", label: "迟到入口", steps: [] }
+      ] } }));
+      await expect(page.getByText("恢复中尚未完成的草稿", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("不应显示的迟到恢复结果", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "打开迟到入口", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "用备用重新回答", exact: true })).toHaveCount(0);
+      expect(stream.received).toHaveLength(1);
+      if (interruption === "property") await expect(page.getByLabel("向 AI 助手提问")).toHaveValue("");
+      if (interruption === "stop") await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+    } finally { await stream.close(); }
+  });
+}
+
 test("provider cards bind test receipts to connection changes and promote saved tested backup", async ({ page }) => {
   const state = await fixture(page);
   await page.goto("/settings/ai");

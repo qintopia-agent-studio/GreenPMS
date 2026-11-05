@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { request } from "node:https";
-import { callModel, ModelStreamDecoder, type ModelInput } from "./assistant-model.ts";
+import { callModel, modelFailureDiagnostic, ModelStreamDecoder, type ModelInput } from "./assistant-model.ts";
 import { AssistantFailure } from "./assistant-lifetime.ts";
 vi.mock("node:dns/promises", () => ({ lookup: vi.fn(async () => [{ address: "8.8.8.8", family: 4 }]) }));
 vi.mock("node:https", () => ({ request: vi.fn() }));
@@ -43,7 +43,7 @@ describe("provider stream contract", () => {
     for (const delta of [{ content: "a".repeat(12001) }, { tool_calls: [{ index: 6 }] }, { tool_calls: [{ index: 0, type: "custom" }] }, { tool_calls: [{ index: 0, function: { arguments: "a".repeat(6001) } }] }]) {
       expect(() => new ModelStreamDecoder().push(frame(delta))).toThrow("不完整");
     }
-    expect(() => new ModelStreamDecoder().push('data: {"error":{"message":"private-provider-error"}}\n\n')).toThrow("不完整");
+    expect(() => new ModelStreamDecoder().push('data: {"error":{"message":"private-provider-error"}}\n\n')).toThrow("报告异常");
   });
 });
 
@@ -255,7 +255,7 @@ it("awaits asynchronous progress checks and never emits text after access is den
 it("rejects a provider disconnect before the terminator without retrying", async () => {
   const { input, response, req } = fakeProvider();
   const result = callModel(input);
-  const rejected = expect(result).rejects.toMatchObject({ diagnostic: "AI_INVALID_RESPONSE" });
+  const rejected = expect(result).rejects.toMatchObject({ diagnostic: "AI_STREAM_INCOMPLETE" });
   await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce());
   response.end(frame({ content: "unfinished" }));
   await rejected; expect(request).toHaveBeenCalledOnce();
@@ -276,4 +276,76 @@ it("classifies certificate rejection separately from retryable connection failur
   await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce());
   req.emit("error", Object.assign(new Error("synthetic-private-certificate-detail"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }));
   await rejected; expect(req.destroy).toHaveBeenCalled();
+});
+
+it("reports a stream error separately and stops without accepting trailing text as success", async () => {
+  const { input, response, req } = fakeProvider();
+  const upstreamId = "req_abcdef0123456789abcdef0123456789";
+  Object.assign(response.headers, { "x-request-id": upstreamId });
+  const result = callModel(input).catch(error => error as AssistantFailure);
+  await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce());
+  response.write(frame({ role: "assistant" }) + 'data: {"error":{"type":"upstream_error","message":"synthetic-private-key"}}\n\n'
+    + frame({ content: "must not be treated as successful" }, "stop") + done);
+  const error = await result as AssistantFailure;
+  expect(error.diagnostic).toBe("AI_UPSTREAM_STREAM_ERROR");
+  expect(modelFailureDiagnostic(error)).toMatchObject({ category: "upstream", requestId: upstreamId });
+  expect(JSON.stringify([error, modelFailureDiagnostic(error)])).not.toContain(input.apiKey);
+  expect(input.onDelta).not.toHaveBeenCalled();
+  expect(req.destroy).toHaveBeenCalledOnce();
+});
+
+it("classifies bounded non-200 JSON errors without exposing their body or request echo", async () => {
+  const { input, response, req } = fakeProvider();
+  response.statusCode = 429;
+  response.headers["content-type"] = "application/json";
+  const result = callModel(input).catch(error => error as AssistantFailure);
+  await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce());
+  response.end(JSON.stringify({ error: { code: "insufficient_quota", message: input.apiKey } }));
+  const error = await result as AssistantFailure;
+  expect(error.diagnostic).toBe("AI_HTTP_429");
+  expect(modelFailureDiagnostic(error)).toMatchObject({ category: "quota", httpStatus: 429, upstreamCode: "insufficient_quota" });
+  expect(JSON.stringify([error, modelFailureDiagnostic(error)])).not.toContain(input.apiKey);
+  expect(req.destroy).toHaveBeenCalledOnce();
+});
+
+it("does not wait for a stalled HTTP error body beyond two seconds", async () => {
+  vi.useFakeTimers();
+  const { input, response, req } = fakeProvider(); response.statusCode = 503;
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_HTTP_503" });
+  await vi.advanceTimersByTimeAsync(1999); expect(req.destroy).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1); await rejected;
+  expect(req.destroy).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it("bounds HTTP error bodies and classifies non-JSON bodies without retaining them", async () => {
+  const { input, response, req } = fakeProvider(); response.statusCode = 502;
+  const result = callModel(input).catch(error => error as AssistantFailure);
+  await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce());
+  response.write("private-error-body".repeat(2000));
+  const error = await result as AssistantFailure;
+  expect(error.diagnostic).toBe("AI_HTTP_502");
+  expect(modelFailureDiagnostic(error)).toEqual({ category: "upstream", reason: expect.any(String), httpStatus: 502 });
+  expect(req.destroy).toHaveBeenCalledOnce();
+});
+
+it.each([
+  ["data: {invalid}\n\n", "AI_INVALID_RESPONSE_JSON"],
+  ['data: {"choices":{}}\n\n', "AI_INVALID_RESPONSE_CHOICES"],
+  [frame({ tool_calls: [{ index: 7 }] }), "AI_INVALID_RESPONSE_TOOL_CALLS"],
+  ["data: " + "a".repeat(256_001), "AI_INVALID_RESPONSE_SSE"],
+  [frame({}, "private-unknown-finish-value"), "AI_INVALID_RESPONSE_FINISH_OTHER"]
+])("classifies malformed stream metadata without logging payload (%s)", (wire, code) => {
+  try { new ModelStreamDecoder().push(wire); throw new Error("expected rejection"); }
+  catch (error) {
+    expect(error).toMatchObject({ diagnostic: code });
+    expect(modelFailureDiagnostic(error)?.category).toBe("protocol");
+    expect(JSON.stringify([error, modelFailureDiagnostic(error)])).not.toContain("private-unknown-finish-value");
+  }
+});
+
+it("classifies invalid UTF-8 as a protocol failure rather than a network failure", async () => {
+  const { input, response, req } = fakeProvider();
+  const rejected = expect(callModel(input)).rejects.toMatchObject({ diagnostic: "AI_INVALID_RESPONSE_UTF8" });
+  await vi.waitFor(() => expect(req.end).toHaveBeenCalledOnce()); response.end(Buffer.from([0xff]));
+  await rejected; expect(req.destroy).toHaveBeenCalledOnce();
 });

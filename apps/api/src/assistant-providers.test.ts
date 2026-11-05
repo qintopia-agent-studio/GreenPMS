@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DomainError } from "@qintopia/contracts";
 import { abortable, AssistantFailure } from "./assistant-lifetime.ts";
-import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerFault, selectProviderSnapshot, type ProviderSettingsRow } from "./assistant-providers.ts";
+import { upstreamModelFailure } from "./assistant-model-diagnostics.ts";
+import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerFault, providerRetryable, selectProviderSnapshot, type ProviderSettingsRow } from "./assistant-providers.ts";
 const row = (extra = {}): ProviderSettingsRow => ({ scope_id: "installation", management_property_id: "p", version: 1, conversation_version: 1, enabled: true,
   base_url: "https://primary.example/v1", model: "primary", encrypted_key: "opaque", updated_by: "a", updated_at: new Date(),
   provider_name: "Primary", provider_enabled: true, provider_tested_at: null,
@@ -9,6 +10,32 @@ const row = (extra = {}): ProviderSettingsRow => ({ scope_id: "installation", ma
 const failed = () => new AssistantFailure("AI_HTTP_503", "provider unavailable");
 afterEach(() => vi.useRealTimers());
 describe("assistant primary/backup recovery", () => {
+  it("uses private upstream classification without retrying explicit request errors or PMS denials", () => {
+    const quota = upstreamModelFailure({ error: { code: "insufficient_quota" } }, undefined, 429);
+    expect(providerFault(quota)).toBe(true); expect(providerRetryable(quota)).toBe(false);
+    const invalid = upstreamModelFailure({ error: { type: "invalid_request_error", code: "unsupported_parameter", message: "The parameter rate_limit is not supported." } }, undefined, 503);
+    expect(providerFault(invalid)).toBe(false); expect(providerRetryable(invalid)).toBe(false);
+    const denied = upstreamModelFailure({ error: { code: "permission_denied" } }, undefined, 403);
+    expect(providerFault(denied)).toBe(true); expect(providerRetryable(denied)).toBe(false);
+    const filtered = upstreamModelFailure({ error: { code: "content_policy_violation" } }, undefined, 403);
+    expect(providerFault(filtered)).toBe(false);
+    expect(providerFault(new DomainError("INSUFFICIENT_ACCESS", "PMS denied", 403))).toBe(false);
+    expect(providerFault(new AssistantFailure("AI_HTTP_403", "unclassified"))).toBe(false);
+  });
+  it("separates retryable transport and stream failures from credentials, quota and invalid requests", () => {
+    for (const code of ["AI_HTTP_429", "AI_HTTP_503", "AI_MODEL_IDLE_TIMEOUT", "AI_DNS_FAILED", "AI_ECONNRESET", "AI_UPSTREAM_STREAM_ERROR", "AI_UPSTREAM_RATE_LIMITED", "AI_STREAM_INCOMPLETE"]) {
+      const error = new AssistantFailure(code, "safe");
+      expect(providerFault(error), code).toBe(true); expect(providerRetryable(error), code).toBe(true);
+    }
+    for (const code of ["AI_HTTP_401", "AI_HTTP_402", "AI_UPSTREAM_AUTH_FAILED", "AI_UPSTREAM_QUOTA_EXCEEDED", "AI_INVALID_RESPONSE_JSON", "AI_INVALID_RESPONSE_TOOL_CALLS"]) {
+      const error = new AssistantFailure(code, "safe");
+      expect(providerFault(error), code).toBe(true); expect(providerRetryable(error), code).toBe(false);
+    }
+    for (const code of ["AI_UPSTREAM_INVALID_REQUEST", "AI_UPSTREAM_CONTEXT_LIMIT", "AI_UPSTREAM_CONTENT_FILTER", "AI_INVALID_RESPONSE_FINISH_LENGTH", "AI_TLS_FAILED", "AI_CANCELLED", "AI_PROGRESS_FAILED", "AI_HTTP_400"]) {
+      const error = new AssistantFailure(code, "safe");
+      expect(providerFault(error), code).toBe(false); expect(providerRetryable(error), code).toBe(false);
+    }
+  });
   it("routes new questions through backup for ten minutes, without creating a scheduled probe", async () => {
     vi.useFakeTimers(); const router = new AssistantProviderRouter(), settings = row();
     expect(router.select(settings)).toBe("primary"); router.failure(1, failed());
