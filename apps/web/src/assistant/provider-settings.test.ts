@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantSettings } from "../../../../packages/contracts/src/assistant.ts";
-import { canEnableAssistant, canEnableProvider, connectionChanged, providerDirty, providerDraft, providerPayload, providerSettings } from "./provider-settings";
+import { canEnableAssistant, canEnableProvider, canPromoteProvider, connectionChanged, providerDirty, providerDraft, providerPayload, providerSettings } from "./provider-settings";
 
 const settings: AssistantSettings = { version: 7, enabled: true, canManage: true, keyReady: true, managementPropertyId: "property-a", updatedAt: null,
   baseUrl: "https://primary.example/v1", model: "primary-model", hasKey: true,
@@ -14,19 +14,36 @@ describe("provider form connection test boundaries", () => {
   it("keeps an unchanged existing primary usable without pretending it has passed a test", () => {
     const primary = providerSettings(settings, "primary"), draft = providerDraft(primary);
     expect(primary.testedAt).toBeNull();
-    expect(canEnableProvider(draft, primary, "primary")).toBe(true);
-    expect(canEnableProvider({ ...draft, name: "新名称" }, primary, "primary")).toBe(true);
-    expect(canEnableProvider({ ...draft, model: "changed-model" }, primary, "primary")).toBe(false);
-    expect(canEnableProvider({ ...draft, baseUrl: "https://another.example/v1" }, primary, "primary")).toBe(false);
-    expect(canEnableProvider({ ...draft, apiKey: "replacement" }, primary, "primary")).toBe(false);
+    expect(canEnableProvider(draft, primary)).toBe(true);
+    expect(canEnableProvider({ ...draft, name: "新名称" }, primary)).toBe(true);
+    expect(canEnableProvider({ ...draft, model: "changed-model" }, primary)).toBe(false);
+    expect(canEnableProvider({ ...draft, baseUrl: "https://another.example/v1" }, primary)).toBe(false);
+    expect(canEnableProvider({ ...draft, apiKey: "replacement" }, primary)).toBe(false);
   });
   it("requires a successful current connection test before enabling an untested backup", () => {
     const backup = providerSettings(settings, "backup"), draft = providerDraft(backup);
-    expect(canEnableProvider(draft, backup, "backup")).toBe(false);
-    expect(canEnableProvider({ ...draft, testToken: "server-bound-proof", enabled: true }, backup, "backup")).toBe(true);
+    expect(canEnableProvider(draft, backup)).toBe(false);
+    expect(canEnableProvider({ ...draft, testToken: "server-bound-proof", enabled: true }, backup)).toBe(true);
     const tested = { ...backup, testedAt: "2026-11-05T00:00:00Z" };
-    expect(canEnableProvider(draft, tested, "backup")).toBe(true);
-    expect(canEnableProvider({ ...draft, model: "another" }, tested, "backup")).toBe(false);
+    expect(canEnableProvider(draft, tested)).toBe(true);
+    expect(canEnableProvider({ ...draft, model: "another" }, tested)).toBe(false);
+  });
+  it("keeps a migrated enabled connection usable in either role without inventing a test", () => {
+    const enabledBackup = { ...providerSettings(settings, "primary"), name: "已降为备用的原主供应商" };
+    const draft = providerDraft(enabledBackup);
+    expect(canEnableProvider(draft, enabledBackup)).toBe(true);
+    expect(canPromoteProvider(enabledBackup)).toBe(true);
+    expect(enabledBackup.testedAt).toBeNull();
+    expect(canEnableProvider({ ...draft, model: "changed" }, enabledBackup)).toBe(false);
+    expect(canEnableProvider(draft, { ...enabledBackup, enabled: false })).toBe(false);
+  });
+  it("requires an enabled complete saved connection for promotion, independent of historical test timestamps", () => {
+    const provider = providerSettings(settings, "primary");
+    expect(canPromoteProvider(provider)).toBe(true);
+    expect(canPromoteProvider({ ...provider, enabled: false })).toBe(false);
+    expect(canPromoteProvider({ ...provider, hasKey: false })).toBe(false);
+    expect(canPromoteProvider({ ...provider, baseUrl: " " })).toBe(false);
+    expect(canPromoteProvider({ ...provider, model: "" })).toBe(false);
   });
   it("binds a single-card save to the current configuration version and never borrows the other provider's key", () => {
     const draft = { ...providerDraft(providerSettings(settings, "backup")), enabled: true, testToken: "proof" };

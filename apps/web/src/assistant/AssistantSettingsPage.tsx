@@ -5,7 +5,7 @@ import { useWorkspace } from "../session";
 import { errorMessage, LoadingBlock } from "../uiBasic";
 import { useAssistant } from "./context";
 import type { AssistantProviderRole, AssistantSettings } from "../../../../packages/contracts/src/assistant.ts";
-import { canEnableAssistant, canEnableProvider, connectionChanged, providerDirty, providerDraft, providerPayload, providerSettings, providerTitles, type ProviderDraft } from "./provider-settings";
+import { canEnableAssistant, canEnableProvider, canPromoteProvider, connectionChanged, providerDirty, providerDraft, providerPayload, providerSettings, providerTitles, type ProviderDraft } from "./provider-settings";
 
 const roles: AssistantProviderRole[] = ["primary", "backup"];
 const emptyDrafts = (): Record<AssistantProviderRole, ProviderDraft> => ({
@@ -75,8 +75,7 @@ function ScopedAssistantSettings({ propertyId }: { propertyId: string }) {
     const result = await api.assistantPromoteBackup({ propertyId, expectedVersion: saved.version });
     if (!mounted.current) return;
     accept(result); assistant?.refreshSettings();
-    const backup = providerSettings(result, "backup");
-    setNotice(`主备身份已互换，请新建对话。${backup.hasKey && !backup.enabled && !backup.testedAt ? "原主配置已保留，作为备用需测试并启用。" : "原主供应商已成为备用。"}`);
+    setNotice("主备优先级已互换，双方启用状态和已有对话保持不变。正在生成的回答继续完成，后续问题优先使用新的主供应商。");
   });
   const recover = () => perform("recover", async () => {
     if (!saved) return;
@@ -108,7 +107,7 @@ function ScopedAssistantSettings({ propertyId }: { propertyId: string }) {
       </section>
       {!saved.keyReady ? <div className="assistant-notice" role="status">服务端密钥保护尚未就绪，请联系部署人员配置后再保存供应商连接。其他系统功能可以正常使用。</div> : null}
       {roles.map(role => {
-        const current = providerSettings(saved, role), draft = drafts[role], tested = canEnableProvider(draft, current, role);
+        const current = providerSettings(saved, role), draft = drafts[role], tested = canEnableProvider(draft, current);
         const changed = connectionChanged(draft, current);
         const validFields = Boolean(draft.name.trim() && draft.baseUrl.trim() && draft.model.trim() && (draft.apiKey || current.hasKey));
         const needsNewKey = draft.baseUrl.trim().replace(/\/+$/, "") !== current.baseUrl && !draft.apiKey;
@@ -122,12 +121,12 @@ function ScopedAssistantSettings({ propertyId }: { propertyId: string }) {
             <label>API Key<input aria-label={role === "primary" ? "API Key" : "备用 API Key"} type="password" value={draft.apiKey} onChange={event => update(role, "apiKey", event.target.value)} placeholder={current.hasKey ? "留空保留这家供应商已保存的密钥" : "填写这家供应商的 API Key 或访问 Token"} autoComplete="new-password" maxLength={4096} /><small>{needsNewKey && current.hasKey ? "地址已改变，必须填写新地址对应的 Key 并重新测试。" : "密钥加密保存在服务端，保存后不显示原文。"}</small></label>
             <label>模型名称<input aria-label={role === "primary" ? "模型名称" : "备用模型名称"} required value={draft.model} onChange={event => update(role, "model", event.target.value)} placeholder="服务商提供的模型标识" maxLength={120} autoComplete="off" /></label>
             <label className="assistant-enable"><input type="checkbox" aria-label={`启用${providerTitles[role]}`} checked={draft.enabled} disabled={!draft.enabled && !tested} onChange={event => update(role, "enabled", event.target.checked)} />启用此供应商</label>
-            <p className="assistant-setting-hint">{draft.testToken ? "本次连接测试通过，请保存配置。" : changed ? "连接已修改，启用前请重新测试。" : current.testedAt ? `已保存的连接测试通过：${localTime(current.testedAt)}` : role === "primary" && current.enabled && current.hasKey ? "现有主供应商保持可用；更改连接后须重新测试。" : "请先测试连接，再启用并保存。"}</p>
+            <p className="assistant-setting-hint">{draft.testToken ? "本次连接测试通过，请保存配置。" : changed ? "连接已修改，启用前请重新测试。" : current.testedAt ? `已保存的连接测试通过：${localTime(current.testedAt)}` : current.enabled && current.hasKey ? "现有连接保持启用；更改连接或停用后重新启用须测试。" : "请先测试连接，再启用并保存。"}</p>
           </fieldset>
           <div className="assistant-settings-actions"><button type="button" className="button button-secondary" disabled={Boolean(busy) || !saved.keyReady || !validFields || needsNewKey} onClick={() => void testProvider(role)}><PlugZap size={17} />{busy === `test-${role}` ? "正在测试…" : "测试连接"}</button><button type="submit" className="button button-primary" disabled={Boolean(busy) || !canSave || !saved.keyReady && !onlyDisabling}><Save size={17} />保存配置</button>
-            {role === "backup" ? <button type="button" className="button button-secondary" onClick={() => void promote()} disabled={Boolean(busy) || Boolean(dirty) || !current.enabled || !current.testedAt || !saved.keyReady}><ArrowUpDown size={17} />设为主用</button> : null}
+            {role === "backup" ? <button type="button" className="button button-secondary" onClick={() => void promote()} disabled={Boolean(busy) || Boolean(dirty) || !canPromoteProvider(current) || !saved.keyReady}><ArrowUpDown size={17} />设为主用</button> : null}
           </div>
-          <p className="assistant-setting-hint">{role === "backup" ? "设为主用会互换两家的长期优先顺序，原配置下的对话失效，正在生成的回答停止；请先保存未保存的配置。" : "保存配置会使原配置下的对话失效，正在生成的回答停止。"}</p>
+          <p className="assistant-setting-hint">{role === "backup" ? "设为主用仅互换优先顺序，保留已有对话，不打断当前回答，后续问题生效；请先保存未保存的配置。保存配置仍会使原配置下的对话失效。" : "保存配置会使原配置下的对话失效，正在生成的回答停止。"}</p>
         </form>;
       })}
       <p className="assistant-setting-hint">测试连接和恢复检查会发送简短的合成请求，不发送业务资料，费用按服务商规则计算。自动切换与恢复不会改变主备身份，也不会打断已在备用上生成的回答。</p>

@@ -13,7 +13,7 @@ import { runtimeDatabaseUrlForTesting } from "../helpers/runtime-database.ts";
 vi.mock("node:dns/promises", () => ({ lookup: vi.fn(async () => [{ address: "8.8.8.8", family: 4 }]) }));
 const url = process.env.ASSISTANT_TEST_DATABASE_URL ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_ai_contract";
 let owner: Kysely<Database>, runtime: Kysely<Database>, app: FastifyInstance, admin: string, staff: string;
-let mode = "healthy", sequence = 10, primarySignal: AbortSignal | undefined, releaseProbe: (() => void) | undefined;
+let mode = "healthy", sequence = 10, primarySignal: AbortSignal | undefined, releaseProbe: (() => void) | undefined, releaseAnswer: (() => void) | undefined;
 const calls: ModelInput[] = [];
 const fail = () => new AssistantFailure("AI_HTTP_503", "模型服务暂时不可用。");
 const transport: ModelTransport = async input => {
@@ -26,6 +26,12 @@ const transport: ModelTransport = async input => {
   if (input.model === "primary") {
     primarySignal = input.signal;
     if (mode === "primary-waits") return new Promise((_, reject) => { input.signal!.addEventListener("abort", () => reject(input.signal!.reason), { once: true }); });
+    if (mode === "primary-tool-hold" && input.messages.at(-1)?.role !== "tool") {
+      await input.onDelta?.("primary正在查询");
+      await new Promise<void>(resolve => { releaseAnswer = resolve; });
+      await input.onProgress?.();
+      return { content: null, tool_calls: [{ id: "find", type: "function", function: { name: "search_orders", arguments: '{"query":""}' } }] };
+    }
     if (mode === "primary-fails") { await input.onProgress?.(); throw fail(); }
     if (mode === "primary-partial") { await input.onDelta?.("未完成的主回答"); throw fail(); }
     if (mode === "primary-after-tool") {
@@ -69,12 +75,12 @@ beforeEach(async () => {
   await app.close(); await owner.deleteFrom("ai_model_settings").execute();
   runtime = createDatabase(runtimeDatabaseUrlForTesting(url));
   app = await buildServer(runtime, { assistantTransport: transport });
-  mode = "healthy"; primarySignal = undefined; releaseProbe = undefined;
+  mode = "healthy"; primarySignal = undefined; releaseProbe = undefined; releaseAnswer = undefined;
   vi.mocked(lookup).mockResolvedValue([{ address: "8.8.8.8", family: 4 }] as never);
   await testedSave("primary", 0); await testedSave("backup", 1); calls.length = 0;
 });
 afterEach(() => { vi.restoreAllMocks(); });
-afterAll(async () => { releaseProbe?.(); await app?.close(); await runtime?.destroy(); await owner?.destroy(); vi.unstubAllEnvs(); });
+afterAll(async () => { releaseProbe?.(); releaseAnswer?.(); await app?.close(); await runtime?.destroy(); await owner?.destroy(); vi.unstubAllEnvs(); });
 
 describe.sequential("assistant provider failover API", () => {
   it("exposes independent tested provider cards only to the managing administrator", async () => {
@@ -141,12 +147,65 @@ describe.sequential("assistant provider failover API", () => {
     const recovered = await action("recover-primary"); expect(recovered.statusCode, recovered.body).toBe(200); expect(recovered.json().settings.routing.state).toBe("primary");
     expect((await get()).json().version).toBe(2);
   });
-  it("promotes the tested backup atomically, preserves both credentials, and cancels old requests", async () => {
-    mode = "primary-waits"; const pending = chat(); await vi.waitFor(() => expect(primarySignal).toBeDefined());
+  it("preserves the active streamed answer, later tool rounds, and conversation when priorities swap", async () => {
+    const first = await chat({ message: "第一条上下文" }); expect(first.statusCode, first.body).toBe(200);
+    const conversationId = first.json().conversationId;
+    calls.length = 0; mode = "primary-tool-hold";
+    const pending = chat({ conversationId, message: "第二条需要查询" }, true); await vi.waitFor(() => expect(releaseAnswer).toBeTypeOf("function"));
     const swapped = await action("promote-backup"); expect(swapped.statusCode, swapped.body).toBe(200);
-    expect(swapped.json()).toMatchObject({ version: 3, providers: { primary: { model: "backup", name: "稳定备用", hasKey: true }, backup: { model: "primary", name: "便宜主服务", hasKey: true } } });
-    expect(primarySignal?.aborted).toBe(true); const interrupted = await pending; expect(interrupted.statusCode).toBe(400); expect(interrupted.body).toContain("配置已变化");
-    mode = "healthy"; calls.length = 0; expect((await chat()).json().text).toBe("backup完整回答"); expect(calls[0]!.apiKey).toBe("synthetic-backup-key");
+    expect(swapped.json()).toMatchObject({ version: 3, providers: { primary: { model: "backup", name: "稳定备用", hasKey: true, enabled: true }, backup: { model: "primary", name: "便宜主服务", hasKey: true, enabled: true } } });
+    expect(primarySignal?.aborted).toBe(false); releaseAnswer!();
+    const completed = await pending; expect(completed.statusCode, completed.body).toBe(200);
+    expect(completed.body).toContain('"type":"done"'); expect(completed.body).toContain("primary完整回答"); expect(completed.body).not.toContain('"type":"error"');
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary"]);
+    expect(calls.every(c => c.baseUrl === "https://primary.example/v1" && c.apiKey === "synthetic-primary-key")).toBe(true);
+    expect(calls[1]!.messages.some(m => m.role === "tool")).toBe(true);
+    mode = "healthy"; calls.length = 0;
+    const next = await chat({ conversationId, message: "第三条继续上下文" }); expect(next.statusCode, next.body).toBe(200);
+    expect(next.json()).toMatchObject({ conversationId, text: "backup完整回答" }); expect(calls[0]!.apiKey).toBe("synthetic-backup-key");
+    expect(calls[0]!.messages.filter(m => m.role === "user").map(m => m.content)).toEqual(["第一条上下文", "第二条需要查询", "第三条继续上下文"]);
+  });
+  it("keeps enabled legacy providers usable through both swap directions without inventing test history", async () => {
+    await owner.updateTable("ai_model_settings").set({ provider_tested_at: null }).execute();
+    const original = await chat(); const conversationId = original.json().conversationId;
+    const first = await action("promote-backup"); expect(first.statusCode, first.body).toBe(200);
+    expect(first.json().providers.backup).toMatchObject({ model: "primary", enabled: true, testedAt: null });
+    expect(first.json().backupAvailable).toBe(true);
+    expect((await chat({ conversationId, useBackup: true })).json().text).toBe("primary完整回答");
+    const second = await action("promote-backup"); expect(second.statusCode, second.body).toBe(200);
+    expect(second.json().providers.primary).toMatchObject({ model: "primary", enabled: true, testedAt: null });
+    expect(second.json().providers.backup).toMatchObject({ model: "backup", enabled: true });
+    expect((await chat({ conversationId })).json()).toMatchObject({ conversationId, text: "primary完整回答" });
+  });
+  it("still cancels active questions and expires conversations after a real configuration save", async () => {
+    const first = await chat(); const conversationId = first.json().conversationId;
+    primarySignal = undefined; mode = "primary-waits";
+    const pending = chat({ conversationId }); await vi.waitFor(() => expect(primarySignal).toBeDefined());
+    const signal = calls.at(-1)!.signal;
+    const body = draft("primary", 2, { name: "更新配置" }); delete (body as { apiKey?: string }).apiKey;
+    const saved = await save(body); expect(saved.statusCode, saved.body).toBe(200);
+    expect(signal?.aborted).toBe(true); const interrupted = await pending;
+    expect(interrupted.statusCode).toBe(400); expect(interrupted.body).toContain("配置已变化");
+    mode = "healthy"; const stale = await chat({ conversationId }); expect(stale.statusCode).toBe(400); expect(stale.body).toContain("对话已过期");
+    expect((await chat()).statusCode).toBe(200);
+  });
+  it("lets an active connection test finish after a swap but rejects its stale proof", async () => {
+    mode = "probe-hold"; const pending = test(draft("primary", 2));
+    await vi.waitFor(() => expect(releaseProbe).toBeTypeOf("function"));
+    const signal = calls.at(-1)!.signal;
+    const swapped = await action("promote-backup"); expect(swapped.statusCode, swapped.body).toBe(200);
+    expect(signal?.aborted).toBe(false); releaseProbe!();
+    const stale = await pending; expect(stale.statusCode).toBe(400); expect(stale.body).toContain("配置已变化");
+    expect(stale.json()).not.toHaveProperty("testToken");
+  });
+  it("cancels an obsolete background recovery probe when priorities swap", async () => {
+    mode = "primary-fails"; await chat(); mode = "probe-hold";
+    const pending = action("recover-primary"); await vi.waitFor(() => expect(releaseProbe).toBeTypeOf("function"));
+    const signal = calls.at(-1)!.signal;
+    const swapped = await action("promote-backup"); expect(swapped.statusCode, swapped.body).toBe(200);
+    expect(signal?.aborted).toBe(true); expect((await pending).statusCode).toBe(200);
+    releaseProbe!(); expect((await get()).json().routing.state).toBe("primary");
+    mode = "healthy"; expect((await chat()).json().text).toBe("backup完整回答");
   });
   it("can disable a provider without DNS or decryption, preserving the other provider", async () => {
     vi.mocked(lookup).mockRejectedValue(new Error("synthetic DNS outage"));

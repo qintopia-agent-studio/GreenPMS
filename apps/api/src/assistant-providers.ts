@@ -21,7 +21,9 @@ export function providerSettings(row: ProviderSettingsRow | undefined, role: Ass
 }
 export function providerAvailable(row: ProviderSettingsRow | undefined, role: AssistantProviderRole): boolean {
   const value = providerSettings(row, role);
-  return value.enabled && value.hasKey && Boolean(value.baseUrl && value.model) && (role === "primary" || Boolean(value.testedAt));
+  // Enabling/changing a connection is guarded by the database save function. A
+  // grandfathered, enabled connection remains usable after either priority swap.
+  return value.enabled && value.hasKey && Boolean(value.baseUrl && value.model);
 }
 export function providerCredentials(row: ProviderSettingsRow, role: AssistantProviderRole) {
   const provider = providerSettings(row, role);
@@ -75,6 +77,20 @@ export function createProviderTestReceipts() {
   };
 }
 
+/** A priority swap may overtake the initial read without invalidating this
+ * conversation. Reload its latest priority, but never cross a real save. */
+export async function selectProviderSnapshot(router: AssistantProviderRouter, initial: ProviderSettingsRow,
+  readLatest: () => Promise<ProviderSettingsRow | undefined>, useBackup = false) {
+  let settings = initial;
+  while (!router.sync(settings)) {
+    const current = await readLatest();
+    if (!current?.enabled || current.conversation_version !== initial.conversation_version)
+      throw new AssistantFailure("AI_CONFIG_CHANGED", "模型配置已变化，请新建对话后重试。");
+    settings = current;
+  }
+  return { settings, provider: router.select(settings, useBackup) };
+}
+
 /** One installation/one API process, matching the existing in-memory conversations.
  * No scheduler or paid probe runs while nobody asks a question. */
 export class AssistantProviderRouter {
@@ -99,7 +115,7 @@ export class AssistantProviderRouter {
     if (!this.sync(row)) throw new AssistantFailure("AI_CONFIG_CHANGED", "模型配置已变化，请新建对话后重试。");
     if (!row.enabled || this.closed) throw aiError("AI 助手尚未启用。");
     if (useBackup) {
-      if (!providerAvailable(row, "backup")) throw aiError("备用供应商尚未启用或未通过测试，请联系管理员。");
+      if (!providerAvailable(row, "backup")) throw aiError("备用供应商尚未启用或配置不完整，请联系管理员。");
       return "backup";
     }
     if (providerAvailable(row, "primary") && (this.retryAt === null || !providerAvailable(row, "backup"))) return "primary";

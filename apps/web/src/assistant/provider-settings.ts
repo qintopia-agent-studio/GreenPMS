@@ -18,12 +18,15 @@ export function connectionChanged(draft: ProviderDraft, saved: AssistantProvider
 export function providerDirty(draft: ProviderDraft, saved: AssistantProviderSettings) {
   return connectionChanged(draft, saved) || draft.name.trim() !== saved.name || draft.enabled !== saved.enabled;
 }
-export function canEnableProvider(draft: ProviderDraft, saved: AssistantProviderSettings, role: AssistantProviderRole) {
+export function canEnableProvider(draft: ProviderDraft, saved: AssistantProviderSettings) {
   if (draft.testToken) return true;
   if (connectionChanged(draft, saved) || !saved.hasKey) return false;
-  // Preserve the already-running primary through the additive migration without
-  // inventing a historical successful test. A new or changed connection still needs one.
-  return Boolean(saved.testedAt) || role === "primary" && saved.enabled;
+  // An already-enabled connection remains usable when its priority changes;
+  // this does not invent a historical test for a migrated provider.
+  return Boolean(saved.testedAt) || saved.enabled;
+}
+export function canPromoteProvider(provider: AssistantProviderSettings) {
+  return provider.enabled && provider.hasKey && Boolean(provider.baseUrl.trim() && provider.model.trim());
 }
 export function canEnableAssistant(settings: AssistantSettings) {
   const enabled = (["primary", "backup"] as const).map(role => providerSettings(settings, role)).filter(provider => provider.enabled);

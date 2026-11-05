@@ -100,7 +100,8 @@ export const currentMigrationNames = [
   "076_multi_room_sequence_membership_upgrade.sql",
   "077_owner_historical_payment_reprice.sql",
   "078_ai_question_progress.sql",
-  "079_ai_provider_failover.sql"
+  "079_ai_provider_failover.sql",
+  "080_ai_provider_priority_swap.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -206,8 +207,8 @@ export async function databaseReady(
     const providerSettings = await sql<{ ready: boolean }>`
       SELECT NOT EXISTS (
         SELECT 1 FROM (VALUES
-          ('qintopia_save_ai_provider_settings(text,text,text,integer,boolean,text,text,boolean,text,text,text,boolean)', '9e24546fe6dec0c3b80ae1030b1d26876978404e326c7e4140eb0e8a96c075fd'),
-          ('qintopia_promote_ai_backup(text,text,text,integer)', '31c80b3f40e6c2005b15296bbb200ef5fd231830dcf57bbefc35bb672617d462'),
+          ('qintopia_save_ai_provider_settings(text,text,text,integer,boolean,text,text,boolean,text,text,text,boolean)', '8456a15e35debc8e413092a11970e721f588505c2d7b438f8c7d1b3ffdb9f8b1'),
+          ('qintopia_promote_ai_backup(text,text,text,integer)', '227df7495e85c5c49473e87f631da10223bd430dfcb1ca581a7964c993c3ac82'),
           ('qintopia_save_ai_settings(text,text,text,integer,boolean,text,text,text)', '4d12c1ff8deca22c8190a6ec031745026caa91c03aa6b28c94d775d438834774')
         ) AS expected(signature, body_hash)
         WHERE NOT COALESCE((
@@ -225,6 +226,7 @@ export async function databaseReady(
         ), false)
       ) AND NOT EXISTS (
         SELECT 1 FROM (VALUES
+          ('conversation_version', 'integer', true),
           ('provider_name', 'text', true), ('provider_enabled', 'boolean', true), ('provider_tested_at', 'timestamp with time zone', false),
           ('backup_name', 'text', true), ('backup_enabled', 'boolean', true), ('backup_base_url', 'text', true),
           ('backup_model', 'text', true), ('backup_encrypted_key', 'text', true), ('backup_tested_at', 'timestamp with time zone', false)
@@ -236,11 +238,13 @@ export async function databaseReady(
         SELECT 1 FROM (VALUES
           ('ai_provider_names_valid', '2fdce48e9843d7b366fb7c92b94f4150d2e08bed0fbc861268fba9208c90089b'),
           ('ai_backup_configuration_valid', '22c2ac5b2d76b25df1ac1b5dd74286181151c75e84333e6b7ebd99e7e9a028ff'),
-          ('ai_enabled_backup_tested', '71a59d2584ac99c516be17d4cf08229883e79b7a9b8f1ae556efcea571ae1c1a')
+          ('ai_conversation_version_valid', '19372f9ac42b5344aec3ca3e284936b0b6bfd653d8c8b1d52ad55eac859fdd49')
         ) AS expected(name, definition_hash)
         WHERE NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass('ai_model_settings')
           AND c.conname = expected.name AND c.convalidated
           AND encode(sha256(convert_to(pg_get_constraintdef(c.oid, false), 'UTF8')), 'hex') = expected.definition_hash)
+      ) AND NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('ai_model_settings') AND conname = 'ai_enabled_backup_tested'
       ) AND NOT EXISTS (
         SELECT 1 FROM (VALUES ('provider_role', 'text'), ('operation', 'text'), ('provider_name', 'text'),
           ('provider_enabled', 'boolean'), ('test_passed', 'boolean')) AS expected(name, kind)

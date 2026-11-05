@@ -14,7 +14,7 @@ import { ErrorResponse, Id } from "./schemas.ts";
 import { aiError, callModel, decryptKey, encryptKey, keyReady, normalizeBaseUrl, resolvePublicEndpoint, type ModelMessage, type ModelTool, type ModelTransport } from "./assistant-model.ts";
 import { beginAssistantQuestion, createAssistantQuestionProgress, finishAssistantQuestion, maintainAssistantQuestions } from "./assistant-question-records.ts";
 import { abortable, AssistantFailure, assistantLifetime } from "./assistant-lifetime.ts";
-import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerAvailable, providerCredentials, providerFault, providerSettings, recoveryCancelled, type ProviderSettingsRow } from "./assistant-providers.ts";
+import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerAvailable, providerCredentials, providerFault, providerSettings, recoveryCancelled, selectProviderSnapshot, type ProviderSettingsRow } from "./assistant-providers.ts";
 import type { AssistantProviderRole } from "../../../packages/contracts/src/assistant.ts";
 
 function guestName(value: unknown): string {
@@ -108,7 +108,7 @@ function settingsError(error: unknown): never {
   if (message === "AI_KEY_REQUIRED") throw aiError("更换服务地址时，请填写对应的新 API Key。");
   throw aiError("配置保存未完成，请重新载入核对后重试。");
 }
-interface Conversation { subjectId: string; credentialId: string; propertyId: string; version: number; messages: ModelMessage[]; expiresAt: number; busy: boolean }
+interface Conversation { subjectId: string; credentialId: string; propertyId: string; conversationVersion: number; messages: ModelMessage[]; expiresAt: number; busy: boolean }
 
 export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, transport: ModelTransport = callModel) {
   const conversations = new Map<string, Conversation>();
@@ -194,7 +194,8 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     const { principal } = await adminSettings(db, request, body.propertyId);
     try { await sql`SELECT qintopia_promote_ai_backup(${principal.subjectId}, ${principal.credentialId}, ${body.propertyId}, ${body.expectedVersion})`.execute(db); }
     catch (error) { settingsError(error); }
-    await invalidate(); return settingsView(db, request, body.propertyId, router);
+    tests.clear(); router.sync(await readSettings(db));
+    return settingsView(db, request, body.propertyId, router);
   });
   app.post("/api/v1/assistant/recover-primary", { validatorCompiler: guard(settingsActionSchema), config: { rateLimit: { max: 5, timeWindow: "1 minute" } }, schema: { tags: ["auth"], body: settingsActionSchema, response: { 200: Type.Object({ message: Type.String(), settings: settingsResponse }), ...failures } } }, async request => {
     const body = request.body as { propertyId: string; expectedVersion: number };
@@ -241,18 +242,22 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
     try {
     questionId = await wait(questionRecord);
     questionProgress = createAssistantQuestionProgress(db, app.log, questionId, principal);
-    const settings = await wait(readSettings(db));
-    if (!settings?.enabled) { recordedError = "ASSISTANT_DISABLED"; throw aiError("AI 助手尚未启用，请管理员在“设置 → AI 助手”配置连接。"); }
-    let selectedProvider: AssistantProviderRole = router.select(settings, body.useBackup);
+    const initialSettings = await wait(readSettings(db));
+    if (!initialSettings?.enabled) { recordedError = "ASSISTANT_DISABLED"; throw aiError("AI 助手尚未启用，请管理员在“设置 → AI 助手”配置连接。"); }
+    const selected = await wait(selectProviderSnapshot(router, initialSettings, () => wait(readSettings(db)), body.useBackup));
+    // Keep both connections as the question's immutable snapshot, including
+    // later tool rounds or one eligible fallback, while priorities may change.
+    const settings = selected.settings;
+    let selectedProvider: AssistantProviderRole = selected.provider;
     let hasVisibleOutput = false, hasExecutedTool = false;
     const now = Date.now();
     for (const [id, conversation] of conversations) if (conversation.expiresAt < now && !conversation.busy) conversations.delete(id);
     let conversation = conversations.get(id);
-    if (body.conversationId && (!conversation || conversation.subjectId !== principal.subjectId || conversation.credentialId !== principal.credentialId || conversation.propertyId !== body.propertyId || conversation.version !== settings.version)) throw aiError("对话已过期或工作区已变化，请新建对话。");
+    if (body.conversationId && (!conversation || conversation.subjectId !== principal.subjectId || conversation.credentialId !== principal.credentialId || conversation.propertyId !== body.propertyId || conversation.conversationVersion !== settings.conversation_version)) throw aiError("对话已过期或工作区已变化，请新建对话。");
     if (activeSubjects.has(principal.subjectId) || conversation?.busy) throw new DomainError("RATE_LIMITED", "上一条消息仍在处理，请稍候。", 429);
     if (!conversation) {
       if (conversations.size >= 200) throw new DomainError("RATE_LIMITED", "助手当前繁忙，请稍后重试。", 429);
-      conversation = { subjectId: principal.subjectId, credentialId: principal.credentialId, propertyId: body.propertyId, version: settings.version, messages: [], expiresAt: now + 900_000, busy: false };
+      conversation = { subjectId: principal.subjectId, credentialId: principal.credentialId, propertyId: body.propertyId, conversationVersion: settings.conversation_version, messages: [], expiresAt: now + 900_000, busy: false };
       conversations.set(id, conversation);
     }
     const entries: AssistantEntry[] = [];
@@ -262,7 +267,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       const fresh = await wait(currentUser(db, request, body.propertyId));
       if (fresh.subjectId !== principal.subjectId || fresh.credentialId !== principal.credentialId) throw new DomainError("INSUFFICIENT_ACCESS", "登录身份已变化。", 403);
       const current = await wait(readSettings(db));
-      if (!current?.enabled || current.version !== settings.version) throw aiError("模型配置已变化，请新建对话后重试。");
+      if (!current?.enabled || current.conversation_version !== settings.conversation_version) throw aiError("模型配置已变化，请新建对话后重试。");
       lifetime.check(); lastAccessCheck = Date.now(); return fresh;
     };
     const orderView = async (orderId: string) => {
@@ -309,7 +314,7 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
             if (!match.members.length) throw new DomainError("NOT_FOUND", "当前门店未找到该会员。", 404);
           }
           const labels = { inventory: "房态", orders: "订单", members: "会员", today: "工作台", settings: "AI 助手设置" };
-          const steps = { inventory: ["先选择日期范围，按房型或房号筛选。", "点击住宿记录查看订单；选择空闲房间或床位和日期开始安排住宿。"], orders: ["使用搜索和状态筛选找到订单。", "打开订单后，核对资料并选择需要办理的操作。"], members: ["按姓名、昵称或手机号搜索会员，打开档案。", "在档案中核对会员合同、权益和相关订单，再选择所需操作。"], today: ["查看今天需要处理的住宿事项。", "进入对应订单，按系统提示办理。"], settings: ["分别填写主用、备用供应商的地址、密钥和模型，测试连接通过后保存并启用。", "点击备用卡片的“设为主用”可互换优先级；配置变更会结束旧会话，需要新建对话。主故障后可立即检查恢复。"] };
+          const steps = { inventory: ["先选择日期范围，按房型或房号筛选。", "点击住宿记录查看订单；选择空闲房间或床位和日期开始安排住宿。"], orders: ["使用搜索和状态筛选找到订单。", "打开订单后，核对资料并选择需要办理的操作。"], members: ["按姓名、昵称或手机号搜索会员，打开档案。", "在档案中核对会员合同、权益和相关订单，再选择所需操作。"], today: ["查看今天需要处理的住宿事项。", "进入对应订单，按系统提示办理。"], settings: ["分别填写主用、备用供应商的地址、密钥和模型，测试连接通过后保存并启用。", "点击备用卡片的“设为主用”可互换优先级，保留双方启用状态和对话；当前回答继续，下一条消息按新优先级处理。保存配置仍需新建对话。主故障后可立即检查恢复。"] };
           entry = { page, label: labels[page], steps: steps[page], ...(args.memberId ? { memberId: args.memberId } : {}) };
         }
         entries.push(entry); return { openedEntry: entry, businessSubmitted: false };
