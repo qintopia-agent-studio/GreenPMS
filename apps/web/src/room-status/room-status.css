@@ -425,6 +425,20 @@
   min-width: 0;
 }
 
+.room-status-horizontal-scrollbar {
+  position: fixed;
+  bottom: 0;
+  z-index: 18;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-gutter: stable;
+  background: var(--surface);
+}
+
+.room-status-horizontal-scrollbar-track {
+  height: 1px;
+}
+
 .room-status-grid-header-scroll,
 .room-status-grid-body {
   --room-status-resource-width: 238px;

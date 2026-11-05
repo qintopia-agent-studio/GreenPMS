@@ -19,6 +19,7 @@ import {
   Layers3,
   SearchX
 } from "lucide-react";
+import { RoomStatusHorizontalScrollbar } from "./RoomStatusHorizontalScrollbar";
 import type {
   RoomStatusAvailabilitySummaryDto,
   RoomStatusBedOccupancyDto,
@@ -1793,6 +1794,7 @@ export function RoomStatusGrid({
           </div>
         </div>
 
+      <RoomStatusHorizontalScrollbar scrollRef={scrollRef} />
       {board.page.totalPages > 1 ? (
         <footer className="room-status-grid-footer">
           <div aria-label={`房间分页，当前第 ${board.page.index + 1} / ${board.page.totalPages} 页`}>
