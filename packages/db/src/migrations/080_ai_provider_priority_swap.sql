@@ -165,4 +165,3 @@ END;
 $$;
 REVOKE ALL ON FUNCTION qintopia_promote_ai_backup(text,text,text,integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION qintopia_promote_ai_backup(text,text,text,integer) TO qintopia_runtime;
-
