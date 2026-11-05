@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DomainError } from "@qintopia/contracts";
 import { abortable, AssistantFailure } from "./assistant-lifetime.ts";
-import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerFault, type ProviderSettingsRow } from "./assistant-providers.ts";
-const row = (extra = {}): ProviderSettingsRow => ({ scope_id: "installation", management_property_id: "p", version: 1, enabled: true,
+import { AssistantProviderRouter, assertConnectionTest, connectionTestInput, createProviderTestReceipts, providerFault, selectProviderSnapshot, type ProviderSettingsRow } from "./assistant-providers.ts";
+const row = (extra = {}): ProviderSettingsRow => ({ scope_id: "installation", management_property_id: "p", version: 1, conversation_version: 1, enabled: true,
   base_url: "https://primary.example/v1", model: "primary", encrypted_key: "opaque", updated_by: "a", updated_at: new Date(),
   provider_name: "Primary", provider_enabled: true, provider_tested_at: null,
   backup_name: "Backup", backup_enabled: true, backup_base_url: "https://backup.example/v1", backup_model: "backup", backup_encrypted_key: "opaque-backup", backup_tested_at: new Date(), ...extra });
@@ -50,6 +50,18 @@ describe("assistant primary/backup recovery", () => {
     expect(await router.probe(old, async () => {}, true)).toBe(false);
     expect(router.select(current)).toBe("backup");
   });
+  it("reloads an overtaken priority snapshot without resetting the newer route or conversation", async () => {
+    const router = new AssistantProviderRouter(), old = row(), current = row({ version: 2 });
+    router.select(current); router.failure(2, failed());
+    const readLatest = vi.fn(async () => current);
+    expect(await selectProviderSnapshot(router, old, readLatest)).toEqual({ settings: current, provider: "backup" });
+    expect(readLatest).toHaveBeenCalledOnce(); expect(router.status(current).lastFailure).toBe("AI_HTTP_503");
+  });
+  it("does not cross a configuration save while refreshing an overtaken priority snapshot", async () => {
+    const router = new AssistantProviderRouter(), old = row(), saved = row({ version: 2, conversation_version: 2 });
+    router.sync(saved);
+    await expect(selectProviderSnapshot(router, old, async () => saved)).rejects.toThrow("配置已变化");
+  });
   it("delays another recovery check after TLS or safety rejection without making them fallback faults", async () => {
     vi.useFakeTimers(); const router = new AssistantProviderRouter(), settings = row();
     router.select(settings); router.failure(1, failed()); await vi.advanceTimersByTimeAsync(600_000);
@@ -70,10 +82,16 @@ describe("assistant primary/backup recovery", () => {
     await Promise.resolve(); router.failure(1, failed()); complete(); expect(await pending).toBe(false);
     expect(router.select(settings)).toBe("backup");
   });
-  it("never routes to disabled or untested backup and ignores cancellation/access faults", () => {
+  it("keeps enabled legacy connections available in either slot after a priority swap", () => {
     const router = new AssistantProviderRouter(), settings = row({ backup_tested_at: null });
+    expect(router.select(settings, true)).toBe("backup");
+    router.failure(1, failed()); expect(router.select(settings)).toBe("backup");
+  });
+  it("never routes to disabled or incomplete backup and ignores cancellation/access faults", () => {
+    const router = new AssistantProviderRouter(), settings = row({ backup_enabled: false });
     router.select(settings); router.failure(1, failed()); expect(router.select(settings)).toBe("primary");
     expect(() => router.select(settings, true)).toThrow("备用");
+    expect(() => router.select(row({ version: 2, backup_encrypted_key: "" }), true)).toThrow("备用");
     for (const error of [new DomainError("INSUFFICIENT_ACCESS", "denied", 403), new AssistantFailure("AI_CANCELLED", "stop"), new AssistantFailure("AI_TLS_FAILED", "TLS"), new AssistantFailure("AI_HTTP_400", "request"), new AssistantFailure("AI_PROGRESS_FAILED", "database"), new AssistantFailure("AI_INVALID_RESPONSE_FINISH_CONTENT_FILTER", "filtered")]) expect(providerFault(error)).toBe(false);
     for (const code of ["AI_HTTP_401", "AI_HTTP_429", "AI_HTTP_503", "AI_DNS_TIMEOUT", "AI_MODEL_IDLE_TIMEOUT", "AI_ECONNRESET"]) expect(providerFault(new AssistantFailure(code, "safe"))).toBe(true);
   });

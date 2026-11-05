@@ -15,6 +15,7 @@ export interface Database {
   retained_fund_entries: { id: string; retained_fund_id: string; kind: "USE" | "REFUND" | "RELEASE"; amount_minor: number; target_order_id: NullableInsert<string>; source_out_fact_id: NullableInsert<string>; target_in_fact_id: NullableInsert<string>; refund_fact_id: NullableInsert<string>; authorization_note: string; command_id: string; created_at: GeneratedTimestamp };
   ai_model_settings: {
     scope_id: string; management_property_id: string; version: number; enabled: boolean;
+    conversation_version: ColumnType<number, number | undefined, number>;
     base_url: string; model: string; encrypted_key: string; updated_by: string; updated_at: GeneratedTimestamp;
     provider_name: ColumnType<string, string | undefined, string>;
     provider_enabled: ColumnType<boolean, boolean | undefined, boolean>;

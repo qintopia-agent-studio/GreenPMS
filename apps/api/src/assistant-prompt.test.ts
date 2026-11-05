@@ -70,6 +70,7 @@ describe("versioned employee operating knowledge", () => {
     { question: "如何改房型价格、工作人员权限和外部密钥？", ids: ["catalog", "accounts-tokens"], facts: ["设置→房型与价格", "设置→账号管理", "设置→智能体与外部访问", "不能因新增功能自动给旧Token增加能力"] }
   ];
   scenarios.push({ question: "模型还在慢慢回答，超过一分钟会被停止吗？", ids: ["assistant-help"], facts: ["首响等待60秒", "连续60秒无有效进展才超时", "文字、思考、工具增量均可续期", "保活心跳不算", "持续响应无总时限", "停止即取消", "权限失效不触发备用"] });
+  scenarios.push({ question: "把备用设为主用会停用旧主、让我重新对话吗？", ids: ["assistant-help"], facts: ["仅已启用的完整连接", "保留双方启用状态", "保留对话与上下文", "当前回答继续", "后续问题按新顺序", "保存连接配置仍使旧对话失效"] });
   scenarios.push({ question: "备用供应商怎么设置，主恢复后什么时候切回？", ids: ["assistant-help"], facts: ["主用/备用两张卡", "改连接须重测", "设为主用", "无需重填Key", "使旧对话失效", "未显示文字、未执行工具", "最多自动切备用一次", "用备用重新回答", "10分钟", "无人提问不探测", "不发送业务资料", "不让用户等待", "立即检查恢复", "不改主备身份", "不能凭知识断言当前供应商"] });
   it.each(scenarios)("supplies required evidence for: $question", ({ ids, facts }) => {
     const evidence = assistantKnowledgeTopics.filter(topic => ids.includes(topic.id)).map(topic => topic.content).join("\n");

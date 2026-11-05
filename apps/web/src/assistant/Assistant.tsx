@@ -53,6 +53,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   ];
   const refreshSettings = () => {
     const ticket = generation.current;
+    // The settings CAS version also changes for a priority-only swap. Refresh
+    // capabilities without clearing context, drafts or the in-flight response.
     void api.assistantSettings(propertyId).then(value => { if (generation.current === ticket) setSettings(value); }).catch(e => { if (generation.current === ticket) setError(errorMessage(e)); });
   };
   useEffect(() => { refreshSettings(); return () => { generation.current++; controller.current?.abort(); }; }, [propertyId]);
@@ -165,20 +167,19 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     followResponse.current = true;
     setBusy(true); setError(undefined); setBackupRetry(undefined);
     setDraft(current => retry && current.trim() !== message ? current : "");
-    setPartial(""); setStopped(false); setProgress(retry ? "正在使用备用服务重新回答…" : "正在思考…");
-    let streamedText = "", usingBackup = Boolean(request.useBackup);
+    setPartial(""); setStopped(false); setProgress("正在思考…");
+    let streamedText = "";
     if (!retry) setMessages(current => [...current, { role: "user", text: message }]);
     try {
       const result: AssistantChatReply = await api.assistantChat(request, active.signal, event => {
         if (ticket !== generation.current || active.signal.aborted) return;
         if (event.type === "status") {
-          if (event.phase === "fallback") usingBackup = true;
           streamedText = ""; setPartial("");
-          setProgress(event.phase === "fallback" ? "主服务暂时不可用，正在使用备用服务…" : `${usingBackup ? "备用服务 · " : ""}${event.phase === "tool" ? "正在查询资料…" : "正在思考…"}`);
+          setProgress(event.phase === "tool" ? "正在查询资料…" : "正在思考…");
         } else if (event.type === "delta") {
           streamedText += event.text;
           if (streamedText.length > 12000) throw new Error("回答过长，请缩小问题范围后重试。");
-          setPartial(streamedText); setProgress(usingBackup ? "正在使用备用服务回答…" : "正在回答…");
+          setPartial(streamedText); setProgress("正在回答…");
         }
       });
       if (ticket !== generation.current) return;
