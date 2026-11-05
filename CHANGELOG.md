@@ -2,6 +2,14 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.18.2](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.18.1...v1.18.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **room-status:** 排除历史入住统计中的未入住预订 ([#134](https://github.com/qintopia-agent-studio/GreenPMS/issues/134)) ([5717516](https://github.com/qintopia-agent-studio/GreenPMS/commit/571751633153555a6d06da1000e735fbf265c5c3))
+* **room-status:** 让横向滚动条在屏幕底端可见 ([#132](https://github.com/qintopia-agent-studio/GreenPMS/issues/132)) ([0ff2d2f](https://github.com/qintopia-agent-studio/GreenPMS/commit/0ff2d2feb59a783e14b9695bb18f07f6d1323b26))
+
 ## [1.18.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.18.0...v1.18.1) (2026-11-05)
 
 
