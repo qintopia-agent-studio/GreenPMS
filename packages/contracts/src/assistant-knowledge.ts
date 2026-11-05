@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-05.2";
+export const assistantKnowledgeRevision = "2026-11-05.3";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -49,9 +49,10 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   },
   {
     id: "room-status", title: "房态查询与同日退房交接", commands: [],
-    sources: ["docs/implementation/channel-refund-readback.md", "docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房态稳定性欠款与状态显示-实施规格.md", "apps/web/src/room-status/RoomStatusGrid.tsx", "apps/web/src/pages/InventoryPage.tsx", "packages/db/src/departure-day-stays.ts"],
+    sources: ["docs/implementation/channel-refund-readback.md", "docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房态稳定性欠款与状态显示-实施规格.md", "待开发项/房态30天连续时间轴与超长住宿开发规格.md", "apps/web/src/room-status/RoomStatusGrid.tsx", "apps/web/src/pages/InventoryPage.tsx", "packages/db/src/departure-day-stays.ts"],
     content: `后台约15秒检查房态，办理后及时更新，不清空填写内容。网络暂时失败可查看旧画面、继续填写，办理仍需服务端重新核对；新日期未载入时，旧画面不能用于新日期办理。翻月校验失败不会无限自动重试，可以返回今天、其他日期或主动重试。历史资料待核对时只读；权限失效不能绕过，结果未知应查询原回执，不重复提交。
 房态页按日期、房型和房号筛选，点击住宿看订单，选择空闲日期安排住宿。从工作台等页面回房态保留浏览位置，不自动打开订单详情；主动打开或在完整订单页点击“返回房态”才展开对应订单。长住宿可跨日历显示区间；助手可用性工具一次最多查31晚，不是系统预订上限。
+桌面房态日历可用屏幕最底端的横向滚动条左右浏览日期，无需先滚到房间列表底部；上下浏览房源仍使用整页滚动。
 住宿夜含入住日、不含离店日。前客当天应退未退，当晚可被后客预订，不代表后客现在可以入住；必须先让前客正式办理退房，再办理后客入住。不得为预订延长前客库存或撤销真实入住。
 未知、部分加载、失败不代表空房、零欠款或已结清，应刷新核对异常。维修、整房床位互斥、在住交接仍以服务端核对为准。
 渠道全退应结为0，完整退款与计价依据可核对的已退房住宿仍显示已结单，不因合法全退禁用其他订单；缺失或矛盾资料仍须核对。`
