@@ -15,6 +15,7 @@ const url = process.env.ASSISTANT_TEST_DATABASE_URL ?? "postgres://qintopia:qint
 let owner: Kysely<Database>, runtime: Kysely<Database>, app: FastifyInstance, admin: string, staff: string;
 let mode = "healthy", sequence = 10, primarySignal: AbortSignal | undefined, releaseProbe: (() => void) | undefined, releaseAnswer: (() => void) | undefined;
 const calls: ModelInput[] = [];
+let beforeFailure: (() => Promise<void>) | undefined;
 const fail = () => new AssistantFailure("AI_HTTP_503", "模型服务暂时不可用。");
 const transport: ModelTransport = async input => {
   calls.push({ ...input, messages: structuredClone(input.messages) });
@@ -25,6 +26,26 @@ const transport: ModelTransport = async input => {
   }
   if (input.model === "primary") {
     primarySignal = input.signal;
+    if (beforeFailure) { const action = beforeFailure; beforeFailure = undefined; await action(); throw fail(); }
+    const primaryCalls = calls.filter(c => c.model === "primary" && !c.toolChoice).length;
+    if (mode === "primary-recovers" && primaryCalls === 1) throw fail();
+    if (mode.startsWith("fault:")) throw new AssistantFailure(mode.slice(6), "安全合成错误");
+    if (mode === "primary-after-tool-recovers") {
+      if (input.messages.at(-1)?.role !== "tool") return { content: null, tool_calls: [{ id: "find", type: "function", function: { name: "search_orders", arguments: '{"query":""}' } }] };
+      if (primaryCalls === 2) throw fail();
+    }
+    if (mode === "primary-pending-entry") {
+      if (input.messages.at(-1)?.role === "tool") throw fail();
+      return { content: null, tool_calls: [{ id: "entry", type: "function", function: { name: "open_entry", arguments: '{"page":"members"}' } }] };
+    }
+    if (mode === "model-budget") {
+      if (primaryCalls === 4) throw fail();
+      return { content: null, tool_calls: [{ id: `find-${primaryCalls}`, type: "function", function: { name: "search_orders", arguments: '{"query":""}' } }] };
+    }
+    if (mode === "tool-budget") {
+      if (primaryCalls > 1) throw fail();
+      return { content: null, tool_calls: Array.from({ length: 6 }, (_, i) => ({ id: `find-${i}`, type: "function" as const, function: { name: "search_orders", arguments: '{"query":""}' } })) };
+    }
     if (mode === "primary-waits") return new Promise((_, reject) => { input.signal!.addEventListener("abort", () => reject(input.signal!.reason), { once: true }); });
     if (mode === "primary-tool-hold" && input.messages.at(-1)?.role !== "tool") {
       await input.onDelta?.("primary正在查询");
@@ -34,12 +55,15 @@ const transport: ModelTransport = async input => {
     }
     if (mode === "primary-fails") { await input.onProgress?.(); throw fail(); }
     if (mode === "primary-partial") { await input.onDelta?.("未完成的主回答"); throw fail(); }
-    if (mode === "primary-after-tool") {
+    if (mode === "primary-after-tool" || mode === "primary-after-tool-backup-needs-tool") {
       if (input.messages.at(-1)?.role === "tool") throw fail();
       return { content: null, tool_calls: [{ id: "find", type: "function", function: { name: "search_orders", arguments: '{"query":""}' } }] };
     }
     if (mode === "application-error") throw new AssistantFailure("AI_PROGRESS_FAILED", "内部进度查询未完成。");
   }
+  if (input.model === "backup" && mode === "primary-after-tool-backup-needs-tool") return { content: null, tool_calls: [{ id: "backup-find", type: "function", function: { name: "search_orders", arguments: '{"query":""}' } }] };
+  if (input.model === "backup" && mode === "tool-budget") return { content: null, tool_calls: [{ id: "extra", type: "function", function: { name: "search_orders", arguments: '{"query":""}' } }] };
+  if (input.model === "backup" && mode === "backup-recovers" && calls.filter(c => c.model === "backup" && !c.toolChoice).length === 1) throw fail();
   if (input.model === "backup" && mode === "both-fail") throw fail();
   if (input.model === "primary" && mode === "both-fail") throw fail();
   await input.onDelta?.(`${input.model}完整回答`);
@@ -75,7 +99,7 @@ beforeEach(async () => {
   await app.close(); await owner.deleteFrom("ai_model_settings").execute();
   runtime = createDatabase(runtimeDatabaseUrlForTesting(url));
   app = await buildServer(runtime, { assistantTransport: transport });
-  mode = "healthy"; primarySignal = undefined; releaseProbe = undefined; releaseAnswer = undefined;
+  mode = "healthy"; beforeFailure = undefined; primarySignal = undefined; releaseProbe = undefined; releaseAnswer = undefined;
   vi.mocked(lookup).mockResolvedValue([{ address: "8.8.8.8", family: 4 }] as never);
   await testedSave("primary", 0); await testedSave("backup", 1); calls.length = 0;
 });
@@ -101,28 +125,118 @@ describe.sequential("assistant provider failover API", () => {
     expect((await save({ ...body, expectedVersion: 3, testToken: tested.json().testToken })).statusCode).toBe(400);
     expect((await get()).json().providers.backup.model).toBe("changed");
   });
-  it("automatically falls back once before visible output and aborts the failed attempt", async () => {
+  it("retries primary once before falling back and aborts each failed attempt", async () => {
     mode = "primary-fails";
     const response = await chat({}, true); expect(response.statusCode).toBe(200);
     expect(response.body).toContain('"phase":"fallback"'); expect(response.body).toContain("backup完整回答");
-    expect(calls.map(c => c.model)).toEqual(["primary", "backup"]); expect(primarySignal?.aborted).toBe(true);
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary", "backup"]); expect(primarySignal?.aborted).toBe(true);
     expect((await get()).json().routing).toMatchObject({ state: "backup", lastFailure: "AI_HTTP_503" });
     calls.length = 0; const second = await chat(); expect(second.json().text).toBe("backup完整回答"); expect(calls.map(c => c.model)).toEqual(["backup"]);
   });
-  it("does not automatically mix an already visible answer, and offers explicit backup regeneration", async () => {
-    mode = "primary-partial"; const failed = await chat({}, true);
-    expect(failed.body).toContain("未完成的主回答"); expect(failed.body).toContain('"backupRetryAvailable":true');
-    expect(failed.body).not.toContain('"type":"done"'); expect(calls.map(c => c.model)).toEqual(["primary"]);
-    calls.length = 0; const retried = await chat({ useBackup: true }); expect(retried.json().text).toBe("backup完整回答"); expect(calls.map(c => c.model)).toEqual(["backup"]);
+  it("replaces an already visible draft through automatic recovery without an error terminal", async () => {
+    mode = "primary-partial"; const response = await chat({}, true);
+    expect(response.body).toContain("未完成的主回答"); expect(response.body).toContain('"phase":"fallback"');
+    expect(response.body).not.toContain('"type":"error"'); expect(response.body).not.toContain('"backupRetryAvailable"');
+    const events = response.body.split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
+    expect(events.filter(e => e.type === "done")).toHaveLength(1);
+    expect(events.at(-1).result.text).toBe("backup完整回答");
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary", "backup"]);
+    expect(calls[2]!.messages.filter(m => m.role === "assistant")).toEqual([]);
+  });
+  it("automatically regenerates after a completed query and preserves original question context", async () => {
+    const previous = await chat({ message: "此前成功的问题" }); const conversationId = previous.json().conversationId;
+    calls.length = 0; mode = "primary-after-tool";
+    const response = await chat({ conversationId, message: "当前要重做的问题", page: "订单详情", orderId: "synthetic-context-order" });
+    expect(response.statusCode, response.body).toBe(200); expect(response.json().text).toBe("backup完整回答");
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary", "primary", "backup"]);
+    expect(calls[1]!.messages.some(m => m.role === "tool")).toBe(true);
+    expect(calls[2]!.messages).toEqual(calls[1]!.messages);
+    expect(calls[3]!.messages).toEqual(calls[0]!.messages);
+    expect(calls[3]!.messages[0]!.content).toContain("synthetic-context-order");
+    expect(calls[3]!.messages.filter(m => m.role === "user").map(m => m.content)).toEqual(["此前成功的问题", "当前要重做的问题"]);
+    expect(calls[3]!.messages.some(m => m.role === "tool")).toBe(false);
+  });
+  it("recovers on the same primary without putting later questions into backup cooldown", async () => {
+    mode = "primary-recovers";
+    const response = await chat(); expect(response.statusCode, response.body).toBe(200); expect(response.json().text).toBe("primary完整回答");
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary"]);
+    expect((await get()).json().routing).toMatchObject({ state: "primary", lastFailure: null });
+  });
+  it("reuses completed tool results when retrying only a failed model round", async () => {
+    mode = "primary-after-tool-recovers";
+    const response = await chat(); expect(response.statusCode, response.body).toBe(200);
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary", "primary"]);
+    expect(calls[2]!.messages).toEqual(calls[1]!.messages);
+    expect(calls[2]!.messages.filter(m => m.role === "tool")).toHaveLength(1);
+  });
+  it("discards a primary's pending navigation entry before regenerating on backup", async () => {
+    mode = "primary-pending-entry";
+    const response = await chat(); expect(response.statusCode, response.body).toBe(200);
+    expect(response.json()).toMatchObject({ text: "backup完整回答", entries: [] });
+    expect(calls.at(-1)!.messages.some(m => m.role === "tool")).toBe(false);
+  });
+  it("keeps the four model request budget and only offers manual backup after it is exhausted", async () => {
+    mode = "model-budget";
+    const response = await chat(); expect(response.statusCode, response.body).toBe(400);
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary", "primary", "primary"]);
+    expect(response.json().details).toMatchObject({ backupRetryAvailable: true });
+  });
+  it("reports an unfinished answer when the last allowed backup round still needs a tool", async () => {
+    mode = "primary-after-tool-backup-needs-tool";
+    const response = await chat({}, true);
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary", "primary", "backup"]);
+    expect(response.body).toContain('"type":"error"');
+    expect(response.body).not.toContain('"type":"done"');
+    expect(response.body).not.toContain('"entries"');
+    expect(response.body).toContain("本轮查询未能完成");
+    mode = "healthy"; calls.length = 0;
+    const next = await chat(); expect(next.statusCode).toBe(200);
     expect(calls[0]!.messages.filter(m => m.role === "assistant")).toEqual([]);
   });
-  it("does not restart automatically after a completed tool even when no text was shown", async () => {
-    mode = "primary-after-tool"; const response = await chat(); expect(response.statusCode, response.body).toBe(400);
-    expect(response.json().details, response.body + " calls=" + calls.map(c => c.model).join(",")).toMatchObject({ backupRetryAvailable: true }); expect(calls.map(c => c.model)).toEqual(["primary", "primary"]);
-    expect(calls[1]!.messages.some(m => m.role === "tool")).toBe(true);
+  it("does not reset the six tool budget on automatic backup regeneration", async () => {
+    mode = "tool-budget";
+    const response = await chat(); expect(response.statusCode, response.body).toBe(400);
+    expect(response.json().message).toContain("查询步骤过多");
+    expect(calls.map(c => c.model)).toEqual(["primary", "primary", "primary", "backup"]);
+  });
+  it.each(["AI_HTTP_401", "AI_UPSTREAM_AUTH_FAILED", "AI_UPSTREAM_QUOTA_EXCEEDED"])("switches directly to backup without repeating an unrecoverable primary fault: %s", async code => {
+    mode = `fault:${code}`;
+    const response = await chat(); expect(response.statusCode, response.body).toBe(200);
+    expect(calls.map(c => c.model)).toEqual(["primary", "backup"]);
+  });
+  it.each(["AI_UPSTREAM_INVALID_REQUEST", "AI_UPSTREAM_CONTEXT_LIMIT", "AI_UPSTREAM_CONTENT_FILTER", "AI_TLS_FAILED", "AI_PROGRESS_FAILED"])("never retries or switches for a request, safety or application fault: %s", async code => {
+    mode = `fault:${code}`;
+    const response = await chat(); expect(response.statusCode).toBe(400);
+    expect(calls.map(c => c.model)).toEqual(["primary"]);
+    expect((await get()).json().routing.state).toBe("primary");
+  });
+  it("allows one retry when a question starts on the backup, without switching back to primary", async () => {
+    mode = "primary-fails"; await chat(); calls.length = 0; mode = "backup-recovers";
+    const response = await chat(); expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().text).toBe("backup完整回答"); expect(calls.map(c => c.model)).toEqual(["backup", "backup"]);
+  });
+  it("revalidates login after a failed attempt and never retries after logout", async () => {
+    const login = await app.inject({ method: "POST", url: "/api/v1/auth/login", remoteAddress: peer(), payload: { username: "operator", password: "demo-pass-2026" } });
+    const temporary = login.cookies.find(c => c.name === "qintopia_session")!.value;
+    beforeFailure = async () => { await app.inject({ method: "POST", url: "/api/v1/auth/logout", cookies: cookie(temporary) }); };
+    const response = await app.inject({ method: "POST", url: "/api/v1/assistant/chat", remoteAddress: peer(), cookies: cookie(temporary),
+      payload: { propertyId: demo.propertyId, message: "撤权后不可自动重试", page: "房态" } });
+    expect(response.statusCode).toBe(401); expect(calls.map(c => c.model)).toEqual(["primary"]);
+  });
+  it("cancels during the short retry delay and makes no further model request", async () => {
+    mode = "primary-fails";
+    const address = await app.listen({ port: 0, host: "127.0.0.1" }), controller = new AbortController();
+    const response = await fetch(`${address}/api/v1/assistant/chat`, { method: "POST", signal: controller.signal,
+      headers: { Cookie: `qintopia_session=${staff}`, Accept: "text/event-stream", "Content-Type": "application/json" },
+      body: JSON.stringify({ propertyId: demo.propertyId, message: "停止恢复", page: "房态" }) });
+    expect(response.status).toBe(200); await vi.waitFor(() => expect(calls).toHaveLength(1));
+    controller.abort();
+    await new Promise(resolve => setTimeout(resolve, 350));
+    expect(calls.map(c => c.model)).toEqual(["primary"]);
+    mode = "healthy"; expect((await chat()).statusCode).toBe(200);
   });
   it("does not loop back to primary when backup fails, or misclassify application failures", async () => {
-    mode = "both-fail"; const failed = await chat(); expect(failed.statusCode).toBe(400); expect(calls.map(c => c.model)).toEqual(["primary", "backup"]);
+    mode = "both-fail"; const failed = await chat(); expect(failed.statusCode).toBe(400); expect(calls.map(c => c.model)).toEqual(["primary", "primary", "backup"]);
     expect(failed.json().details?.backupRetryAvailable).not.toBe(true);
     mode = "healthy"; await action("recover-primary"); calls.length = 0;
     mode = "application-error"; expect((await chat()).statusCode).toBe(400); expect(calls.map(c => c.model)).toEqual(["primary"]);

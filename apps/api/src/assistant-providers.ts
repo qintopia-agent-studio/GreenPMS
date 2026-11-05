@@ -5,6 +5,7 @@ import { DomainError } from "@qintopia/contracts";
 import type { AssistantProviderRole, AssistantProviderSettings, AssistantRoutingStatus } from "../../../packages/contracts/src/assistant.ts";
 import { aiError, decryptKey, type ModelInput, type ModelResponse } from "./assistant-model.ts";
 import { abortable, AssistantFailure } from "./assistant-lifetime.ts";
+import { modelFailureDiagnostic } from "./assistant-model-diagnostics.ts";
 
 export type ProviderSettingsRow = Selectable<Database["ai_model_settings"]>;
 export const PROVIDER_RECOVERY_DELAY_MS = 10 * 60_000;
@@ -33,8 +34,21 @@ export function providerCredentials(row: ProviderSettingsRow, role: AssistantPro
 // Only faults attributable to a provider may change routing. In particular, PMS access,
 // cancellation, malformed requests, SSRF guards and certificate failures are never retried.
 export function providerFault(error: unknown): error is AssistantFailure {
-  return error instanceof AssistantFailure && /^(AI_HTTP_(401|402|429|500|502|503|504)|AI_MODEL_(FIRST_RESPONSE_TIMEOUT|IDLE_TIMEOUT|CONNECTION_FAILED)|AI_(DNS_TIMEOUT|DNS_FAILED|ECONNRESET|ECONNREFUSED|ENETUNREACH|ETIMEDOUT)|AI_INVALID_RESPONSE(?:_[A-Z0-9_]+)?)$/.test(error.diagnostic)
+  const category = modelFailureDiagnostic(error)?.category;
+  if (["invalid_request", "context_limit", "content_filter"].includes(category ?? "")) return false;
+  // Only the transport's private diagnostic can qualify an HTTP 403 as a
+  // provider credential fault; ordinary PMS authorization failures never do.
+  if (error instanceof AssistantFailure && error.diagnostic === "AI_HTTP_403" && category === "authentication") return true;
+  return error instanceof AssistantFailure && /^(AI_HTTP_(401|402|429|500|502|503|504)|AI_MODEL_(FIRST_RESPONSE_TIMEOUT|IDLE_TIMEOUT|CONNECTION_FAILED)|AI_(DNS_TIMEOUT|DNS_FAILED|ECONNRESET|ECONNREFUSED|ENETUNREACH|ETIMEDOUT)|AI_UPSTREAM_(STREAM_ERROR|RATE_LIMITED|AUTH_FAILED|QUOTA_EXCEEDED)|AI_STREAM_INCOMPLETE|AI_INVALID_RESPONSE(?:_[A-Z0-9_]+)?)$/.test(error.diagnostic)
     && !/AI_INVALID_RESPONSE_FINISH_(CONTENT_FILTER|LENGTH)/.test(error.diagnostic);
+}
+/** Retry a transient failure once; credentials, quota and incompatible protocol
+ * may use another provider, but repeating the same request cannot repair them. */
+export function providerRetryable(error: unknown): error is AssistantFailure {
+  if (!providerFault(error)) return false;
+  const category = modelFailureDiagnostic(error)?.category;
+  if (["authentication", "quota", "protocol"].includes(category ?? "")) return false;
+  return /^(AI_HTTP_(429|500|502|503|504)|AI_MODEL_(FIRST_RESPONSE_TIMEOUT|IDLE_TIMEOUT|CONNECTION_FAILED)|AI_(DNS_TIMEOUT|DNS_FAILED|ECONNRESET|ECONNREFUSED|ENETUNREACH|ETIMEDOUT)|AI_UPSTREAM_(STREAM_ERROR|RATE_LIMITED)|AI_STREAM_INCOMPLETE)$/.test(error.diagnostic);
 }
 export function connectionTestInput(): Pick<ModelInput, "messages" | "tools" | "toolChoice" | "maxTokens"> {
   return { messages: [{ role: "user", content: "Call connection_check with ok=true." }],
