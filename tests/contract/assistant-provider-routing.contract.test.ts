@@ -182,16 +182,26 @@ describe.sequential("assistant provider failover API", () => {
     expect(response.json().details).toMatchObject({ backupRetryAvailable: true });
   });
   it("reports an unfinished answer when the last allowed backup round still needs a tool", async () => {
+    const previous = await chat({ message: "此前成功的问题" });
+    expect(previous.statusCode, previous.body).toBe(200);
+    const { conversationId, text: previousAnswer } = previous.json();
+    calls.length = 0;
     mode = "primary-after-tool-backup-needs-tool";
-    const response = await chat({}, true);
+    const response = await chat({ conversationId, message: "预算耗尽而失败的问题" }, true);
     expect(calls.map(c => c.model)).toEqual(["primary", "primary", "primary", "backup"]);
     expect(response.body).toContain('"type":"error"');
     expect(response.body).not.toContain('"type":"done"');
     expect(response.body).not.toContain('"entries"');
     expect(response.body).toContain("本轮查询未能完成");
     mode = "healthy"; calls.length = 0;
-    const next = await chat(); expect(next.statusCode).toBe(200);
-    expect(calls[0]!.messages.filter(m => m.role === "assistant")).toEqual([]);
+    const next = await chat({ conversationId, message: "失败后的后续问题" });
+    expect(next.statusCode, next.body).toBe(200);
+    expect(next.json().conversationId).toBe(conversationId);
+    expect(calls[0]!.messages.filter(m => m.role !== "system")).toEqual([
+      { role: "user", content: "此前成功的问题" },
+      { role: "assistant", content: previousAnswer },
+      { role: "user", content: "失败后的后续问题" }
+    ]);
   });
   it("does not reset the six tool budget on automatic backup regeneration", async () => {
     mode = "tool-budget";
