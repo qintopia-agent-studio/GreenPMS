@@ -21,6 +21,13 @@
    its inactive parent and the page resume scrolling when the list closes. */
 .external-payment-modal > .modal-shell > .modal-body { overscroll-behavior: contain; }
 .external-payment-modal > .modal-shell > .modal-header { flex-shrink: 0; }
+.external-payment-refund-context { color: #79501e; }
+.external-payment-refund-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 10px 8px; }
+.reconciliation-refunds { display: grid; gap: 12px; }
+.reconciliation-refund-row { display: grid; gap: 10px; min-width: 0; padding: 12px; border: 1px solid #d5dfd9; border-radius: 8px; }
+.reconciliation-refund-row legend { padding: 0 6px; font-weight: 600; }
+.reconciliation-refund-row > label { display: grid; gap: 6px; }
+.reconciliation-refund-row > button { justify-self: start; }
 body:has(.external-payment-modal[open]),
 .modal-body:has(.external-payment-modal[open]) { overflow: hidden; }
 @media (max-width: 600px) { .external-payment-filters { grid-template-columns: 1fr; } }

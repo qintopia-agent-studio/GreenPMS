@@ -39,6 +39,25 @@ export async function loadDashboardMoney(trx: Transaction<Database>, propertyId:
     f.currency, f.net_effect_minor::text AS "netMinor", f.fact_type AS kind, c.command_type AS "commandType", 'STAY' AS family,
     EXISTS(SELECT 1 FROM stay_collection_membership_transfers t WHERE t.property_id=${propertyId} AND t.source_reversal_fact_id=f.fact_id) AS "linkedTransfer",
     false AS "transferSource", false AS "reclassifiedReversal", false AS "replacementCollection", false AS "correctsFact", false AS "deletionCorrection",
+    (f.fact_type='COLLECTION' AND c.command_type='RECORD_REFUND' AND c.state='APPLIED' AND EXISTS(
+      SELECT 1 FROM command_receipts receipt WHERE receipt.command_id=f.command_id
+        AND receipt.business_committed AND receipt.execution_status='EXECUTED'
+        AND receipt.result->>'operation'='RECONCILE_WECOM_REFUNDS'
+        AND receipt.result->>'sourceFactId'=f.fact_id AND receipt.result->>'orderId'=f.order_id
+        AND receipt.result->'source'->>'externalPaymentBillId'=f.external_payment_bill_id
+        AND receipt.result->'source'->'amountMinor'=to_jsonb(f.amount_minor)
+        AND receipt.result->'collectedMinor'=to_jsonb(f.amount_minor)
+        AND receipt.fact_refs @> jsonb_build_array(f.fact_id)
+        AND jsonb_typeof(receipt.result->'refundFactIds')='array'
+        AND jsonb_typeof(receipt.result->'refunds')='array'
+        AND receipt.result->'refundedMinor'=(SELECT to_jsonb(sum(r.amount_minor)) FROM collection_facts r
+          WHERE r.command_id=f.command_id AND r.references_fact_id=f.fact_id AND r.fact_type='REFUND'
+            AND r.order_id=f.order_id AND r.currency=f.currency AND r.method='WECOM')
+        AND (SELECT count(*) FROM collection_facts r WHERE r.command_id=f.command_id
+          AND r.references_fact_id=f.fact_id AND r.fact_type='REFUND' AND r.order_id=f.order_id
+          AND receipt.result->'refundFactIds' @> jsonb_build_array(r.fact_id))
+          = jsonb_array_length(CASE WHEN jsonb_typeof(receipt.result->'refunds')='array' THEN receipt.result->'refunds' ELSE '[]'::jsonb END)
+    )) AS "reconciledCollection",
     f.order_id AS "orderId", NULL::text AS "memberId", f.created_at::text AS "registeredAt", NULL::text AS "businessDate",
     f.references_fact_id AS "referencesFactId", f.reverses_fact_id AS "reversesFactId", NULL::text AS "correctsFactId",
     COALESCE(f.transaction_reference,original.transaction_reference) AS "transactionReference",

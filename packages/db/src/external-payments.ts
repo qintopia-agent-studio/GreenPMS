@@ -1,4 +1,5 @@
 import { allocationPaymentBasis } from "./payment-allocation.ts";
+import { enrichPaymentRefundContext } from './payment-refund-context.ts';
 import { sql, type Kysely, type Transaction } from "kysely";
 import { DomainError, type CommandType } from "@qintopia/contracts";
 import { randomUUID } from "node:crypto";
@@ -15,7 +16,7 @@ export interface PaymentQuery {
   kind: ExternalBillKind; recommended?: boolean; amountMinor?: number; query?: string;
   status?: "AVAILABLE" | "ALL" | "MATCHED" | "HISTORICAL";
   begin?: Date; end?: Date; beforeId?: string; limit?: number; originalCollectionFactId?: string;
-  billId?: string;
+  billId?: string; originalCollectionBillId?: string;
 }
 
 export async function listExternalPayments(db: Db, propertyId: string, query: PaymentQuery): Promise<ExternalPaymentList> {
@@ -32,11 +33,24 @@ export async function listExternalPayments(db: Db, propertyId: string, query: Pa
   const term = query.query?.trim() || null;
   const status = query.recommended ? "AVAILABLE" : query.status ?? "AVAILABLE";
   const originalFactId = query.originalCollectionFactId ?? null;
+  let originalBillId = query.originalCollectionBillId ?? null;
+  if (query.originalCollectionBillId) {
+    const parent = (await sql<{ id: string }>`SELECT id FROM external_payment_bills WHERE id=${query.originalCollectionBillId}
+      AND property_id=${propertyId} AND kind='COLLECTION'`.execute(db)).rows[0];
+    if (!parent) throw new DomainError('NOT_FOUND', '原收款流水不存在', 404);
+  }
   if (query.kind === "REFUND" && originalFactId) {
-    const original = await db.selectFrom("collection_facts").innerJoin("orders", "orders.id", "collection_facts.order_id")
-      .select("collection_facts.fact_id").where("collection_facts.fact_id", "=", originalFactId)
-      .where("orders.property_id", "=", propertyId).where("collection_facts.fact_type", "=", "COLLECTION").executeTakeFirst();
+    const original = (await sql<{ fact_id: string; bill_id: string | null }>`SELECT f.fact_id,
+      COALESCE(f.external_payment_bill_id,(SELECT a.bill_id FROM external_payment_allocations a WHERE a.collection_fact_id=f.fact_id),
+        (SELECT m.bill_id FROM external_payment_matches m WHERE m.collection_fact_id=f.fact_id),
+        (SELECT min(b.id) FROM external_payment_bills b WHERE b.property_id=o.property_id AND b.kind='COLLECTION'
+          AND b.reference=f.transaction_reference HAVING count(*)=1)) AS bill_id
+      FROM collection_facts f JOIN orders o ON o.id=f.order_id WHERE f.fact_id=${originalFactId}
+        AND o.property_id=${propertyId} AND f.fact_type='COLLECTION'`.execute(db)).rows[0];
     if (!original) throw new DomainError("NOT_FOUND", "原收款不存在", 404);
+    if (originalBillId && original.bill_id !== originalBillId) throw new DomainError('VALIDATION_ERROR', '原收款流水与订单份额不一致');
+    originalBillId = original.bill_id;
+    if (!originalBillId) return { ...base, items: [], hasMore: false, nextBeforeId: null };
   }
   const rows = (await sql<{
     id: string; kind: ExternalBillKind; reference: string; transaction_id: string | null; amount_minor: number | null;
@@ -61,6 +75,9 @@ export async function listExternalPayments(db: Db, propertyId: string, query: Pa
       AND (${query.begin ?? null}::timestamptz IS NULL OR b.occurred_at>=${query.begin ?? null})
       AND (${query.end ?? null}::timestamptz IS NULL OR b.occurred_at<${query.end ?? null})
       AND (${originalFactId}::text IS NULL OR b.transaction_id=(SELECT transaction_reference FROM collection_facts WHERE fact_id=${originalFactId}))
+      AND (${originalBillId}::text IS NULL OR EXISTS(SELECT 1 FROM external_payment_bills parent
+        WHERE parent.id=${originalBillId} AND parent.property_id=b.property_id AND parent.source_id=b.source_id
+          AND parent.merchant_id=b.merchant_id AND parent.reference=b.transaction_id))
       AND (${term}::text IS NULL OR c.nickname ILIKE '%'||${term}||'%' OR b.reference ILIKE '%'||${term}||'%')
   ) SELECT * FROM candidates
     WHERE (${status}='ALL' OR status=${status})
@@ -74,7 +91,7 @@ export async function listExternalPayments(db: Db, propertyId: string, query: Pa
     amountMinor: row.amount_minor, occurredAt: row.occurred_at.toISOString(), nickname: row.nickname,
     status: row.status, orderId: row.order_id, membershipOrderId: row.membership_order_id,
     recommendationReasons: query.recommended ? [amountMinor ? "金额一致" : "近期流水", ...(originalFactId ? ["对应原收款"] : [])] : [] }));
-  return { ...base, items, hasMore: rows.length > limit, nextBeforeId: rows.length > limit ? items.at(-1)!.id : null };
+  return { ...base, items: await enrichPaymentRefundContext(db, propertyId, items), hasMore: rows.length > limit, nextBeforeId: rows.length > limit ? items.at(-1)!.id : null };
 }
 
 interface PaymentDescriptor { kind: ExternalBillKind; reference: string; amountMinor: number; originalCollectionFactId?: string }
@@ -100,6 +117,9 @@ function descriptors(command: CommandType, effect: RecordValue): PaymentDescript
 export interface ExternalPaymentBasis { billId: string; kind: ExternalBillKind; reference: string; amountMinor: number; alreadyMatched: boolean; allocation?: boolean; allocatedMinor?: number }
 export async function externalPaymentBasis(db: Db, propertyId: string, command: CommandType, effect: RecordValue,
   lock = false): Promise<ExternalPaymentBasis[]> {
+  // The group builder snapshots every source together and supplies its own
+  // refund-first binding basis; do not apply the ordinary collection freeze.
+  if (command === "RECORD_REFUND" && effect.operation === "RECONCILE_WECOM_REFUNDS") return [];
   if (effect.externalPaymentBillId && ["RECORD_COLLECTION", "RECORD_REFUND", "REFUND_RETAINED_FUNDS"].includes(command)) {
     return allocationPaymentBasis(db, propertyId, effect, command === "RECORD_COLLECTION" ? "COLLECTION" : "REFUND", lock);
   }

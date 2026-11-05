@@ -2,6 +2,7 @@ import { sql, type Kysely, type Transaction } from 'kysely';
 import { DomainError, type PaymentAllocationItem, type PaymentAllocationList } from '@qintopia/contracts';
 import type { Database } from './schema.ts';
 import type { PaymentQuery, ExternalPaymentBasis } from './external-payments.ts';
+import { enrichPaymentRefundContext } from './payment-refund-context.ts';
 
 type Db = Kysely<Database> | Transaction<Database>;
 export type PaymentAllocationQuery = Omit<PaymentQuery, 'status'> & { status?: PaymentQuery['status'] | 'PARTIALLY_MATCHED' };
@@ -41,8 +42,18 @@ export async function listPaymentAllocations(db: Db, propertyId: string, query: 
     bool_or(s.last_error_code IS NOT NULL) has_error FROM external_payment_sources s JOIN external_payment_accounts a ON a.source_id=s.id WHERE a.property_id=${propertyId}`.execute(db)).rows[0];
   const base = {enabled:paymentAllocationEnabled() && source?.enabled===true,lastSyncedAt:source?.last_synced_at?.toISOString()??null,synchronizationError:source?.has_error===true};
   if (source?.enabled !== true) return {...base,items:[],hasMore:false,nextBeforeId:null};
-  let originalBillId: string|null=null;
-  if(query.originalCollectionFactId) originalBillId=(await fundingSource(db,propertyId,query.originalCollectionFactId)).bill_id;
+  let originalBillId: string|null=query.originalCollectionBillId??null;
+  if (originalBillId) {
+    const parent = (await sql<{ id: string }>`SELECT id FROM external_payment_bills WHERE id=${originalBillId}
+      AND property_id=${propertyId} AND kind='COLLECTION'`.execute(db)).rows[0];
+    if (!parent) throw new DomainError('NOT_FOUND', '原收款流水不存在', 404);
+  }
+  if(query.originalCollectionFactId) {
+    const factBillId=(await fundingSource(db,propertyId,query.originalCollectionFactId)).bill_id;
+    if (originalBillId && factBillId !== originalBillId) throw new DomainError('VALIDATION_ERROR', '原收款流水与订单份额不一致');
+    originalBillId=factBillId;
+    if (!originalBillId) return {...base,items:[],hasMore:false,nextBeforeId:null};
+  }
   const status=query.recommended?'AVAILABLE':query.status??'AVAILABLE';
   const limit=query.recommended?5:Math.max(1,Math.min(100,query.limit??50));
   const rows=(await sql<{id:string;kind:'COLLECTION'|'REFUND';reference:string;transaction_id:string|null;amount_minor:number|null;occurred_at:Date;nickname:string|null;allocated_minor:string;remaining_minor:string;status:PaymentAllocationItem['status'];membership_order_id:string|null}>`
@@ -61,7 +72,7 @@ export async function listPaymentAllocations(db: Db, propertyId: string, query: 
         AND (${query.end??null}::timestamptz IS NULL OR b.occurred_at<${query.end??null})
         AND (${query.query?.trim()||null}::text IS NULL OR c.nickname ILIKE '%'||${query.query?.trim()||null}||'%' OR b.reference ILIKE '%'||${query.query?.trim()||null}||'%')
         AND (${originalBillId}::text IS NULL OR EXISTS(SELECT 1 FROM external_payment_bills parent WHERE parent.id=${originalBillId}
-          AND parent.source_id=b.source_id AND parent.merchant_id=b.merchant_id AND parent.reference=b.transaction_id))
+          AND parent.property_id=b.property_id AND parent.source_id=b.source_id AND parent.merchant_id=b.merchant_id AND parent.reference=b.transaction_id))
     ), candidates AS (
       SELECT *,GREATEST(0,COALESCE(amount_minor,0)-allocated_minor-CASE WHEN membership_order_id IS NOT NULL THEN COALESCE(amount_minor,0) ELSE 0 END)::text remaining_minor,
         CASE WHEN needs_review OR EXISTS(SELECT 1 FROM external_payment_bills d WHERE d.property_id=balances.property_id AND d.kind=balances.kind AND d.reference=balances.reference AND d.id<>balances.id) THEN 'REVIEW'
@@ -86,7 +97,7 @@ export async function listPaymentAllocations(db: Db, propertyId: string, query: 
       membershipOrderId:row.membership_order_id,recommendationReasons:query.recommended?['可分配余额']:[],allocatedMinor:Number(row.allocated_minor),remainingMinor:Number(row.remaining_minor),
       allocations:allocations.map(a=>({id:a.id,orderId:a.order_id,factId:a.fact_id,amountMinor:a.amount_minor,released:a.released,createdAt:a.created_at.toISOString()}))});
   }
-  return {...base,items,hasMore:rows.length>limit,nextBeforeId:rows.length>limit?items.at(-1)?.id??null:null};
+  return {...base,items:await enrichPaymentRefundContext(db,propertyId,items),hasMore:rows.length>limit,nextBeforeId:rows.length>limit?items.at(-1)?.id??null:null};
 }
 export async function allocationPaymentBasis(db:Db,propertyId:string,effect:Record<string,unknown>,kind:'COLLECTION'|'REFUND',lock:boolean):Promise<ExternalPaymentBasis[]> {
   requirePaymentAllocationEnabled();

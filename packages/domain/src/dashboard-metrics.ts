@@ -37,6 +37,8 @@ export interface DashboardMoneyFact {
   deletionCorrection: boolean;
   /** 外部凭据尚不能核实；业务登记与真实支付来源分开判断。 */
   registrationReview?: boolean;
+  /** 已验证回执与同组资金事实的收退款补登记；不能仅凭命令名放行。 */
+  reconciledCollection?: boolean;
 }
 export type DashboardMoneyClass = "COLLECTION" | "REFUND" | "CORRECTION" | "INTERNAL" | "REVIEW";
 export function classifyDashboardMoney(fact: DashboardMoneyFact): DashboardMoneyClass {
@@ -60,6 +62,8 @@ export function classifyDashboardMoney(fact: DashboardMoneyFact): DashboardMoney
   if (fact.kind === "REVERSAL" && ["REVERSE_FACT", "CORRECT_MEMBERSHIP_PAYMENT"].includes(fact.commandType ?? "")) return "CORRECTION";
   if (fact.correctsFact && fact.commandType === "CORRECT_MEMBERSHIP_PAYMENT") return "CORRECTION";
   if (fact.kind === "REFUND" && ["RECORD_REFUND", "REFUND_RETAINED_FUNDS"].includes(fact.commandType ?? "") && BigInt(fact.netMinor) < 0n) return "REFUND";
+  if (fact.family === "STAY" && fact.kind === "COLLECTION" && fact.commandType === "RECORD_REFUND"
+    && fact.reconciledCollection === true && BigInt(fact.netMinor) > 0n) return "COLLECTION";
   const ordinary = fact.family === "STAY" ? ["RECORD_COLLECTION", "CREATE_ORDER", "BACKFILL_COMPLETED_STAY"] : ["RECORD_MEMBERSHIP_PAYMENT", "BACKFILL_HISTORICAL_MEMBERSHIP", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"];
   if (fact.kind === "COLLECTION" && ordinary.includes(fact.commandType ?? "") && BigInt(fact.netMinor) > 0n) return "COLLECTION";
   return "REVIEW";

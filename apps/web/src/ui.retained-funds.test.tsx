@@ -40,7 +40,7 @@ vi.mock("react", async (importOriginal) => {
   };
 });
 import { api, ApiError } from "./api";
-import { CommandDialog, CommandRecoveryBar, ReceiptPanel, commandCapabilityBusinessLabels, fundsCommandCanReturnToEdit, recoveryCommandRequest, type PersistedCommandRecovery } from "./ui";
+import { CommandDialog, CommandRecoveryBar, ReceiptPanel, receiptHasCommandEvidence, commandCapabilityBusinessLabels, fundsCommandCanReturnToEdit, recoveryCommandRequest, type PersistedCommandRecovery } from "./ui";
 
 const commands = ["RETAIN_ORDER_FUNDS", "APPLY_RETAINED_FUNDS", "RELEASE_RETAINED_FUNDS", "REFUND_RETAINED_FUNDS"] as const;
 function requestFor(commandType: typeof commands[number]): CommandRequest {
@@ -209,4 +209,63 @@ it("does not start an automatic preview when the recovery coordinator denies the
   const dialog = mount({ request: requestFor("RETAIN_ORDER_FUNDS"), onClose: vi.fn(), onProgress: () => false });
   const html = markup(await dialog.settle());
   expect(html).toContain("本次核对尚未开始"); expect(preview).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+});
+
+it("labels grouped refund confirmation as completing both collection and refunds", async () => {
+  const request: CommandRequest = { commandType: "RECORD_REFUND", title: "一起补齐收款与退款", description: "",
+    input: { propertyId: "property_1", orderId: "order_1", reconciliation: {
+      source: { externalPaymentBillId: "collection_bill", amountMinor: 100000 },
+      refunds: [{ externalPaymentBillId: "refund_bill", amountMinor: 100000 }], note: "已收已退漏记"
+    } }, initialReason: { code: "RECORD_REFUND", note: "已收已退漏记" } };
+  const preview: PreviewDto = { ...previewFor(request), effect: {
+    operation: "RECONCILE_WECOM_REFUNDS", orderId: "order_1", orderStatus: "CANCELLED", currency: "CNY",
+    source: { externalPaymentBillId: "collection_bill", transactionReference: "COLLECTION-1000", amountMinor: 100000, occurredAt: "2026-11-01T08:00:00Z" },
+    refunds: [{ externalPaymentBillId: "refund_bill", refundReference: "REFUND-1000", amountMinor: 100000, occurredAt: "2026-11-02T08:00:00Z" }],
+    collectedMinor: 100000, refundedMinor: 100000, netEffectMinor: 0, note: "已收已退漏记"
+  } };
+  vi.spyOn(api, "preview").mockResolvedValue({ preview, receipt: receiptFor("RECORD_REFUND") });
+  const dialog = mount({ request, onClose: vi.fn() });
+  await dialog.settle();
+  const button = dialog.button("confirm-command")!;
+  expect(button.props.disabled).toBe(false);
+  expect(markup(button)).toContain("确认补齐收款与退款");
+  expect(markup(button)).not.toContain("确认登记退款");
+});
+
+
+function groupedRecovery() {
+  const request: CommandRequest = { commandType: "RECORD_REFUND", title: "一起补齐收款与退款", description: "",
+    input: { propertyId: "property_1", orderId: "order_1", reconciliation: {
+      source: { externalPaymentBillId: "collection_bill", amountMinor: 100000 },
+      refunds: [{ externalPaymentBillId: "refund_bill", amountMinor: 100000 }], note: "已收已退漏记"
+    } }, recoveryEffectHash: "a".repeat(64) };
+  const receipt: ReceiptDto = { ...receiptFor("RECORD_REFUND"), resourceRefs: ["order_1"], factRefs: ["collection_fact", "refund_fact"], result: {
+    operation: "RECONCILE_WECOM_REFUNDS", orderId: "order_1", orderStatus: "CANCELLED", currency: "CNY",
+    source: { externalPaymentBillId: "collection_bill", transactionReference: "COLLECTION-1000", amountMinor: 100000, occurredAt: "2026-11-01T08:00:00Z" },
+    refunds: [{ externalPaymentBillId: "refund_bill", refundReference: "REFUND-1000", amountMinor: 100000, occurredAt: "2026-11-02T08:00:00Z" }],
+    collectedMinor: 100000, refundedMinor: 100000, netEffectMinor: 0, note: "已收已退漏记",
+    sourceFactId: "collection_fact", refundFactIds: ["refund_fact"], effectHash: "a".repeat(64)
+  } };
+  return { request, receipt };
+}
+it("dispatches valid grouped recovery evidence and restores its committed receipt", async () => {
+  const { request, receipt } = groupedRecovery();
+  expect(receiptHasCommandEvidence("RECORD_REFUND", receipt, request.input, undefined, request.recoveryEffectHash)).toBe(true);
+  const preview = vi.spyOn(api, "preview"); const confirm = vi.spyOn(api, "confirm"); const onCommitted = vi.fn();
+  const dialog = mount({ request, initialReceipt: receipt, initialConfirmationKey: "original-group-key", onClose: vi.fn(), onCommitted });
+  expect(markup(await dialog.settle())).toContain("收款与退款已一起登记");
+  expect(onCommitted).toHaveBeenCalledTimes(1); expect(preview).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+});
+it.each(["missing-refund-ids", "missing-fact-refs", "wrong-hash"])("keeps %s grouped receipts query-only without showing success", async flaw => {
+  const { request, receipt } = groupedRecovery();
+  if (flaw === "missing-refund-ids") receipt.result!.refundFactIds = [];
+  if (flaw === "missing-fact-refs") receipt.factRefs = ["collection_fact"];
+  if (flaw === "wrong-hash") receipt.result!.effectHash = "b".repeat(64);
+  expect(receiptHasCommandEvidence("RECORD_REFUND", receipt, request.input, undefined, request.recoveryEffectHash)).toBe(false);
+  const preview = vi.spyOn(api, "preview"); const confirm = vi.spyOn(api, "confirm"); const onCommitted = vi.fn();
+  const dialog = mount({ request, initialReceipt: receipt, initialConfirmationKey: "original-group-key", onClose: vi.fn(), onCommitted });
+  const html = markup(await dialog.settle());
+  expect(html).not.toContain("收款与退款已一起登记"); expect(html).toContain("查询原操作结果");
+  expect(dialog.button("confirm-command")).toBeUndefined(); expect(onCommitted).not.toHaveBeenCalled();
+  expect(preview).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
 });

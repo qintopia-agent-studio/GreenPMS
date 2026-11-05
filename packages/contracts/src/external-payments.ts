@@ -3,6 +3,16 @@ export interface ExternalPaymentItem {
   amountMinor: number | null; occurredAt: string; nickname: string | null;
   status: "AVAILABLE" | "MATCHED" | "HISTORICAL" | "REVIEW" | "PENDING" | "UNVERIFIED";
   orderId: string | null; membershipOrderId: string | null; recommendationReasons: string[];
+  refundSummary?: ExternalPaymentRefundSummary;
+  relatedRefunds?: ExternalPaymentRelatedRefund[];
+}
+export interface ExternalPaymentRefundSummary {
+  succeededMinor: number; matchedMinor: number; unassignedMinor: number;
+  pendingCount: number; reviewCount: number;
+}
+export interface ExternalPaymentRelatedRefund {
+  billId: string; refundReference: string; amountMinor: number | null;
+  state: string; matchedMinor: number; unassignedMinor: number | null; needsReview: boolean;
 }
 export interface ExternalPaymentList {
   enabled: boolean; lastSyncedAt: string | null; synchronizationError: boolean;

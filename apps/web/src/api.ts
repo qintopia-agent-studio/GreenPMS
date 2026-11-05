@@ -1,4 +1,4 @@
-import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList, WorkbenchExceptionsQuery, WorkbenchExceptionsResponse } from "@qintopia/contracts";
+import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList, WorkbenchExceptionsQuery, WorkbenchExceptionsResponse, PaymentReconciliationQuery, PaymentReconciliationResponse } from "@qintopia/contracts";
 import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent, AssistantSettingsAction, AssistantTestReply, AssistantRecoveryReply } from "../../../packages/contracts/src/assistant.ts";
 import { readAssistantResponseText, readAssistantStream } from "./assistant/stream";
 import type { AccountManagementContext, AccountManagementRequest, AccountManagementResult, MemberDeletionPreview, CommandEnvelope, CommandReason, CommandType, HistoricalCommandType, ReceiptDto, RoomStatusBoardDto, RoomStatusSyncDto, RoomStatusBoardQueryDto } from "@qintopia/contracts";
@@ -186,6 +186,11 @@ function normalizeCommandResult(
 }
 
 export const api = {
+  paymentReconciliation: (query: PaymentReconciliationQuery, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ propertyId: query.propertyId });
+    for (const key of ["kind", "status", "afterId", "orderId", "limit"] as const) if (query[key] !== undefined) params.set(key, String(query[key]));
+    return request<PaymentReconciliationResponse>(`/api/v1/workbench/payment-reconciliation?${params}`, signal ? { signal } : {});
+  },
   workbenchExceptions: (query: WorkbenchExceptionsQuery, signal?: AbortSignal) => {
     const params = new URLSearchParams({ propertyId: query.propertyId });
     if (query.afterId) params.set("afterId", query.afterId);

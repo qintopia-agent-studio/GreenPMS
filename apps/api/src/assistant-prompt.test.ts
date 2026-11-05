@@ -28,6 +28,8 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "订单已取消，收1000退1000都没登记，要先恢复订单吗？", ids: ["refund-reconciliation"], facts: ["一起补齐真实收退款", "收款和退款两项权限", "不恢复订单", "不改变住宿、计价或库存", "优先已有可退原款补退款", "另有漏记份额才补原款", "收1000退1000保留两笔"] },
+    { question: "昨天漏记的退款今天还会提示吗，收退净额为0就对平了吗？", ids: ["refund-reconciliation"], facts: ["跨日期保留未处理项", "收款与退款分别逐笔对平", "净额相等不代表已对平", "同步延迟不能解释为无异常", "只读核对不自动登记或发起退款"] },
     { question: "渠道全退后0元是不是资料缺失，会禁用其他订单吗？", ids: ["room-status", "refunds"], facts: ["完整退款与计价依据可核对", "不因合法全退禁用其他订单", "缺失或矛盾资料仍须核对", "部分退款、全额退款及撤销", "不等于允许普通企微新建或改价填0", "不证明平台实际到账"] },
     { question: "普通企微订单能调成0吗，免费和会员权益现金为0还合法吗？", ids: ["booking"], facts: ["普通非会员 WECOM 新建及更正金额必须大于0", "正式免费住宿、会员权益覆盖的合法零现金除外", "有会员档案不等于使用权益"] },
     { question: "两张订单合付款已整笔记在另一单，这单能调0消除欠款吗？", ids: ["payment-allocation"], facts: ["保留各单真实合同金额", "按真实份额分配", "款记在另一单不能调0或改免费/权益绕过", "历史归属及已退房零价错误交管理员核对", "助手不承诺已修复"] },

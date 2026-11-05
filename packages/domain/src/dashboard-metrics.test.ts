@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { aggregateDashboardMoney, aggregateDashboardStays, classifyDashboardMoney, dashboardRange, dashboardSource, type DashboardMoneyFact } from "./dashboard-metrics.ts";
 const fact = (id: string, netMinor: string, extra: Partial<DashboardMoneyFact> = {}): DashboardMoneyFact => ({ id, date: "2026-10-01", currency: "CNY", netMinor, kind: "COLLECTION", commandType: "RECORD_COLLECTION", family: "STAY", linkedTransfer: false, transferSource: false, reclassifiedReversal: false, replacementCollection: false, correctsFact: false, deletionCorrection: false, ...extra });
 describe("dashboard definitions", () => {
+  it("成组补登记保留收款与退款两笔，不因净额为零漏掉交易", () => {
+    const collection = fact("group-collection", "100000", { commandType: "RECORD_REFUND", reconciledCollection: true });
+    const refund = fact("group-refund", "-100000", { commandType: "RECORD_REFUND", kind: "REFUND" });
+    expect(aggregateDashboardMoney([collection, refund], "CNY")[0]).toMatchObject({ collectedMinor: "100000", refundedMinor: "100000", netMinor: "0", reviewCount: 0 });
+    expect(classifyDashboardMoney({ ...collection, reconciledCollection: false })).toBe("REVIEW");
+    expect(classifyDashboardMoney({ ...collection, registrationReview: true })).toBe("REVIEW");
+  });
   it("uses complete days across month/leap boundaries with equally long comparison", () => {
     expect(dashboardRange({ from: "2024-02-28", to: "2024-03-01" }, "2024-03-02")).toEqual({ range: { from: "2024-02-28", to: "2024-03-01" }, previousRange: { from: "2024-02-25", to: "2024-02-27" }, nights: 3 });
     expect(dashboardRange({}, "2026-10-01").range).toEqual({ from: "2026-09-01", to: "2026-09-30" });

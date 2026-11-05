@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OrderArrangementDto, OrderArrangementHistoryItemDto } from "@qintopia/contracts";
 import type { CollectionFactDto, OrderViewDto } from "./types";
-import { OrderViewValidationError, parseOrderView } from "./orderViewValidation";
+import { assertOrderViewAllowedActions, OrderViewValidationError, parseOrderView } from "./orderViewValidation";
 
 type TestHistoryItem = Omit<OrderArrangementHistoryItemDto, "type"> & { type: string };
 
@@ -1670,5 +1670,18 @@ describe("渠道退款独立计价修订读回", () => {
     input.amounts.currentContractAmount.minorUnits = 19_000;
     input.amounts.collectionDifference.minorUnits = 19_000;
     expect(() => parseOrderView(input)).toThrow(/原退款应结减少金额/);
+  });
+});
+
+describe("refund reconciliation availability evidence", () => {
+  it("accepts an optional server capability with both funds grants", () => {
+    const parsed = parseOrderView({ ...orderView(), refundReconciliationAvailable: true });
+    expect(parsed.refundReconciliationAvailable).toBe(true);
+    expect(() => assertOrderViewAllowedActions(parsed, new Set(["RECORD_COLLECTION", "RECORD_REFUND"]))).not.toThrow();
+    expect(() => assertOrderViewAllowedActions(parsed, new Set(["RECORD_REFUND"]))).toThrow("同时需要收款及退款命令授权");
+  });
+  it("rejects an untyped or read-only grouped write capability", () => {
+    expect(() => parseOrderView({ ...orderView(), refundReconciliationAvailable: "true" })).toThrow();
+    expect(() => parseOrderView({ ...orderView(), accessLevel: "READ", refundReconciliationAvailable: true })).toThrow();
   });
 });

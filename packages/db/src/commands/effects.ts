@@ -5,6 +5,7 @@ import { fundingSource, assertNoUnassignedRefund, requirePaymentAllocationEnable
 import { sql } from "kysely";
 import { buildCheckoutReversalEffect } from "./checkout-reversal.ts";
 import { buildCompanionEffect } from "./companions.ts";
+import { buildRefundReconciliation, refundReconciliationOperation } from "../wecom-refund-reconciliation.ts";
 import { backfillCollectionMethods, currentReleaseFeatures, DomainError, freeStayCategoryCodes, type BackfillCollectionMethod, type CommandCapability, type CommandCatalogType, type CommandType, type CoverageItemDto, type FreeStayCategoryCode, type InventoryUnitKind, type StayType, type StoredQuoteDto, type TemporaryOtherRoomArrangementDto } from "@qintopia/contracts";
 import {
   amountSummary,
@@ -3081,6 +3082,12 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
   }
 
   if (commandType === "RECORD_REFUND") {
+    if (input.reconciliation !== undefined) {
+      assertOperatorFundsAllowedForOrder(context);
+      await assertLodgingFundsOpenForOrder(db, orderId);
+      const reconciliation = await buildRefundReconciliation(db, context, input);
+      return finalize(propertyId, reconciliation.effect, { ...baseBasis, ...reconciliation.basis });
+    }
     if (externalChannel(context.order.booking_channel_code)) {
       const channel = await buildChannelFundsEffect(db, propertyId, orderId, "RECORD_REFUND", input);
       return finalize(propertyId, channel.effect, { ...baseBasis, ...channel.basis });
@@ -3753,6 +3760,7 @@ export function projectCommandEffectForRead(commandType: string, effect: Record<
     };
   }
   if (commandType === "RECORD_COLLECTION" || commandType === "RECORD_REFUND") {
+    if (effect.operation === refundReconciliationOperation) return effect;
     return {
       ...effect,
       transactionReference: Object.hasOwn(effect, "transactionReference") ? effect.transactionReference : null

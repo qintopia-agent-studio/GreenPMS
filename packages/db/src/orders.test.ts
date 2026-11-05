@@ -395,6 +395,16 @@ describe("orderAllowedActions", () => {
       disabledReason: null
     });
   });
+  it("只有明确补登记能力及双权限才开放无原款的退款入口", () => {
+    const refunds = (grants: Set<string>, enabled: boolean, status = "CANCELLED", converted = false) =>
+      orderAllowedActions("WRITE", status, false, undefined, false, "WECOM", false, converted, undefined, grants, enabled)
+        .find(item => item.code === "RECORD_REFUND");
+    expect(refunds(new Set(["RECORD_REFUND", "RECORD_COLLECTION"]), true)?.enabled).toBe(true);
+    expect(refunds(new Set(["RECORD_REFUND", "RECORD_COLLECTION"]), true, "CHECK_IN_REVOKED")?.enabled).toBe(true);
+    expect(refunds(new Set(["RECORD_REFUND"]), true)?.enabled).toBe(false);
+    expect(refunds(new Set(["RECORD_REFUND", "RECORD_COLLECTION"]), false)?.enabled).toBe(false);
+    expect(refunds(new Set(["RECORD_REFUND", "RECORD_COLLECTION"]), true, "CANCELLED", true)?.enabled).toBe(false);
+  });
 });
 
 describe("projectOrderFulfillment", () => {
@@ -1343,4 +1353,12 @@ it("已退房渠道订单可审计更正金额，取消订单和直订退房订�
     }
   }
   expect(orderAllowedActions("WRITE","CHECKED_OUT",false,undefined,false,"WECOM",false,false,undefined,allOrderActionGrants).find(action=>action.code==="REPRICE_ORDER")?.enabled).toBe(false);
+});
+
+
+it("撤销入住订单仍可受控更正资金，保留原权限和转换限制", () => {
+  const actions = orderAllowedActions("WRITE", "CHECK_IN_REVOKED", true, undefined, false, "WECOM", false, false, undefined, allOrderActionGrants);
+  expect(actions.find(action => action.code === "REVERSE_FACT")?.enabled).toBe(true);
+  expect(orderAllowedActions("WRITE", "CHECK_IN_REVOKED", true, undefined, false, "WECOM", false, false, undefined, new Set(["RECORD_REFUND"])).some(action => action.code === "REVERSE_FACT")).toBe(false);
+  expect(orderAllowedActions("WRITE", "CHECK_IN_REVOKED", true, undefined, false, "WECOM", false, true, undefined, allOrderActionGrants).find(action => action.code === "REVERSE_FACT")?.enabled).toBe(false);
 });

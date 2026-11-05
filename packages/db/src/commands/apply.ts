@@ -3,6 +3,7 @@ import { applyRetainedFundsCommand, isRetainedFundsCommand, lockPaymentAllocatio
 import { sql, type Transaction } from "kysely";
 import { applyCheckoutReversal, lockCheckoutReversalInventory } from "./checkout-reversal.ts";
 import { applyCompanionEffect } from "./companions.ts";
+import { applyRefundReconciliation, lockRefundReconciliation, refundReconciliationOperation, type RefundReconciliationEffect } from "../wecom-refund-reconciliation.ts";
 import {
   createOrderPricingBasisCodes,
   currentReleaseFeatures,
@@ -560,6 +561,10 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
     await lockRoomDays(trx, roomDates);
   }
   if (commandType === "RECORD_REFUND" && externalChannel(context.order.booking_channel_code)) return;
+  if (commandType === "RECORD_REFUND" && input.reconciliation !== undefined) {
+    await lockRefundReconciliation(trx, propertyId, input.reconciliation);
+    return;
+  }
   if (commandType === "RECORD_REFUND") {
     await trx.selectFrom("collection_facts")
       .innerJoin("orders", "orders.id", "collection_facts.order_id")
@@ -627,10 +632,15 @@ export async function applyCommand(trx: Transaction<Database>, options: {
   effect: Record<string, unknown>;
   reason: CommandReason;
   commandId: string;
+  previewId?: string;
 }): Promise<AppliedCommand> {
   const input = requireObject(options.input);
   const propertyId = requireString(input, "propertyId");
   const effect = options.effect;
+  if (options.commandType === "RECORD_REFUND" && effect.operation === refundReconciliationOperation) {
+    if (!options.previewId) throw new DomainError("INTERNAL_ERROR", "成组补登记缺少核对依据", 500);
+    return applyRefundReconciliation(trx, effect as RefundReconciliationEffect, options.commandId, options.previewId);
+  }
   if (isRetainedFundsCommand(options.commandType)) return applyRetainedFundsCommand(trx, options.commandType, effect, options.commandId);
   if (options.commandType === "MANAGE_ROOM_CATALOG") return applyRoomCatalogEffect(trx, options.commandId, effect, options.reason.note);
 

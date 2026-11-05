@@ -1117,6 +1117,8 @@ export interface TokenRotationResultDto extends TokenIssueResultDto {
   rotatedFromTokenId: string;
 }
 
+export * from './payment-reconciliation.ts';
+
 export class DomainError extends Error {
   readonly code: ErrorCode;
   readonly statusCode: number;
