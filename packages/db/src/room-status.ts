@@ -941,6 +941,9 @@ function buildAvailabilitySummary(
         if (!includesUnit(interval.actualInventoryUnitId)) continue;
         if (interval.startDate > serviceDate || serviceDate >= interval.endDate) continue;
         if (interval.sourceKind !== "ORDER") continue;
+        // 历史经营汇总只计实际住宿；逾期预订仍保留在网格和待办中。
+        // 只过滤历史统计贡献，今天及未来的预订占用和可售计算不变。
+        if (serviceDate < businessDate && interval.status === "RESERVED") continue;
         if (interval.status !== "IN_HOUSE"
           && interval.status !== "RESERVED"
           && interval.status !== "SETTLED"

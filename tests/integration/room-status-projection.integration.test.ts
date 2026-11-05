@@ -29,6 +29,7 @@ import {
 import { sql, type Kysely, type Updateable } from "kysely";
 import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
+import { getDashboard } from "../../packages/db/src/dashboard.ts";
 import { assertRoomStatusBoard } from "../../apps/web/src/room-status/roomStatusValidation.ts";
 import { parseOrderView } from "../../apps/web/src/orderViewValidation.ts";
 import * as orderReader from "../../packages/db/src/orders.ts";
@@ -2388,6 +2389,131 @@ describe("PostgreSQL room-status projection", () => {
       attention: null,
       operationalAttention: "OVERDUE_RESERVED"
     });
+  });
+
+  it("excludes unfulfilled reservations from historical summaries and recomputes after completed-stay correction", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftLocalDate(businessDate, -1);
+    const range = { arrivalDate, departureDate: businessDate };
+    // 仅为本测试库提供合成目录启用依据，使历史入住率分母可核对。
+    await db.transaction().execute(async trx => {
+      await sql`alter table inventory_units disable trigger inventory_units_protect_identity`.execute(trx);
+      await trx.updateTable("inventory_units")
+        .set({ created_at: new Date(`${shiftLocalDate(arrivalDate, -1)}T00:00:00.000Z`) })
+        .where("property_id", "=", demo.propertyId).execute();
+      await sql`set constraints all immediate`.execute(trx);
+      await sql`alter table inventory_units enable trigger inventory_units_protect_identity`.execute(trx);
+    });
+    const actualCreated = await createOrder({
+      unitId: demo.secondRoomId, ...range, prefix: "historical-actual-room-count", nickname: "已入住整房样本"
+    });
+    expect(actualCreated.businessCommitted, JSON.stringify(actualCreated.error)).toBe(true);
+    const actualOrderId = String(actualCreated.result!.orderId);
+    const actualCheckIn = await withPropertyClockForTesting(new Date(`${arrivalDate}T12:00:00.000Z`), () =>
+      execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: actualOrderId } }, "historical-actual-room-check-in"));
+    expect(actualCheckIn.businessCommitted, JSON.stringify(actualCheckIn.error)).toBe(true);
+    const created = await createOrder({
+      unitId: demo.bedAId, ...range, prefix: "historical-reserved-count", nickname: "待补记单床样本"
+    });
+    expect(created.businessCommitted, JSON.stringify(created.error)).toBe(true);
+    const orderId = String(created.result!.orderId);
+
+    const before = await board(range);
+    const beforeDay = before.availabilitySummary[0]!;
+    // 同日另一位已入住住客包下四床房，人数与销售单元数不能混用。
+    expect(beforeDay).toMatchObject({ serviceDate: arrivalDate, paidOccupiedUnits: 4, occupantCount: 1, capacityKnown: true });
+    expect(beforeDay.totalSellableUnits).toBeGreaterThan(0);
+    expect(intervalForOrder(before, demo.secondRoomId, actualOrderId)).toMatchObject({ status: "IN_HOUSE" });
+    expect(intervalForOrder(before, demo.bedAId, orderId)).toMatchObject({
+      status: "RESERVED", operationalAttention: "OVERDUE_RESERVED"
+    });
+    expect(taskForOrder(before, orderId)).toMatchObject({
+      status: "RESERVED", operationalAttention: "OVERDUE_RESERVED"
+    });
+    const dashboardBefore = await getDashboard(db, demo.propertyId, { from: arrivalDate, to: arrivalDate });
+    expect(dashboardBefore.community.trend[0]).toMatchObject({ date: arrivalDate, paid: 1 });
+    expect(dashboardBefore.history).toMatchObject({
+      paidUnitNights: 4, capacityUnitNights: beforeDay.totalSellableUnits, reviewCount: 0
+    });
+    expect(dashboardBefore.history.occupancyRate).toBeCloseTo(4 / beforeDay.totalSellableUnits * 100);
+
+    const reasonNote = "合成回归：客人实际住过且已离店，工作人员漏记后补齐履约事实";
+    const prepared = await prepare({ commandType: "COMPLETE_STAY", input: {
+      propertyId: demo.propertyId, orderId, actualStayCompletedConfirmed: true,
+      reasonNote
+    } }, "historical-reserved-count-complete");
+    const completed = await confirmCommandPreview(db, writePrincipal, prepared.preview.previewId, {
+      propertyId: demo.propertyId, commandType: "COMPLETE_STAY", confirmation: true,
+      expectedEffectHash: prepared.preview.effectHash, reason: { code: "COMPLETE_STAY", note: reasonNote }
+    }, metadata("historical-reserved-count-complete-confirm"));
+    expect(completed.businessCommitted, JSON.stringify(completed.error)).toBe(true);
+    expect((await writableOrderView(orderId)).order.status).toBe("CHECKED_OUT");
+
+    const after = await board(range);
+    expect(after.availabilitySummary[0]).toMatchObject({
+      serviceDate: arrivalDate, paidOccupiedUnits: 5, occupantCount: 2,
+      totalSellableUnits: beforeDay.totalSellableUnits,
+      capacityKnown: beforeDay.capacityKnown
+    });
+    // 欠款只影响结算提示，不排除已经履约的收费住宿。
+    expect(intervalForOrder(after, demo.bedAId, orderId)).toMatchObject({ status: "ARREARS" });
+    expect(after.operationalTasks.some(task => task.operationalAttention === "OVERDUE_RESERVED"
+      && task.references.some(reference => reference.type === "ORDER" && reference.id === orderId))).toBe(false);
+    const dashboardAfter = await getDashboard(db, demo.propertyId, { from: arrivalDate, to: arrivalDate });
+    expect(dashboardAfter.community.trend[0]).toMatchObject({ date: arrivalDate, paid: 2 });
+    expect(dashboardAfter.community.trend[0]!.paid).toBe(after.availabilitySummary[0]!.occupantCount);
+    expect(dashboardAfter.history).toMatchObject({
+      paidUnitNights: 5, capacityUnitNights: beforeDay.totalSellableUnits, reviewCount: 0
+    });
+    expect(dashboardAfter.history.occupancyRate).toBeCloseTo(5 / beforeDay.totalSellableUnits * 100);
+  });
+
+  it("preserves current and future reservation inventory while excluding its historical nights", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftLocalDate(businessDate, -1);
+    const tomorrow = shiftLocalDate(businessDate, 1);
+    const range = { arrivalDate, departureDate: shiftLocalDate(businessDate, 2) };
+    const empty = await board(range);
+    const created = await createOrder({
+      unitId: demo.bedAId, ...range, prefix: "spanning-reserved-count"
+    });
+    expect(created.businessCommitted, JSON.stringify(created.error)).toBe(true);
+    const orderId = String(created.result!.orderId);
+
+    const reserved = await board(range);
+    expect(reserved.availabilitySummary.find(day => day.serviceDate === arrivalDate))
+      .toMatchObject({ paidOccupiedUnits: 0, occupantCount: 0 });
+    for (const serviceDate of [businessDate, tomorrow]) {
+      const baseline = empty.availabilitySummary.find(day => day.serviceDate === serviceDate)!;
+      expect(reserved.availabilitySummary.find(day => day.serviceDate === serviceDate)).toMatchObject({
+        paidOccupiedUnits: 1, occupantCount: 1,
+        availableBeds: baseline.availableBeds - 1,
+        availableRooms: baseline.availableRooms,
+        totalSellableUnits: baseline.totalSellableUnits
+      });
+      expect(unitIn(reserved, demo.bedAId).days.find(day => day.serviceDate === serviceDate))
+        .toMatchObject({ status: "RESERVED", available: false });
+    }
+    expect(taskForOrder(reserved, orderId)).toMatchObject({
+      status: "RESERVED", operationalAttention: "OVERDUE_RESERVED"
+    });
+
+    const checkedIn = await execute({ commandType: "CHECK_IN", input: {
+      propertyId: demo.propertyId, orderId
+    } }, "spanning-reserved-count-check-in");
+    expect(checkedIn.businessCommitted, JSON.stringify(checkedIn.error)).toBe(true);
+    expect(checkedIn.result).toMatchObject({ fulfillmentTiming: {
+      effectiveDate: arrivalDate, recordedBusinessDate: businessDate, recordingMode: "LATE_RECORDED"
+    } });
+    const actual = await board(range);
+    expect(actual.availabilitySummary.find(day => day.serviceDate === arrivalDate))
+      .toMatchObject({ paidOccupiedUnits: 1, occupantCount: 1 });
+    for (const serviceDate of [businessDate, tomorrow]) {
+      expect(actual.availabilitySummary.find(day => day.serviceDate === serviceDate))
+        .toEqual(reserved.availabilitySummary.find(day => day.serviceDate === serviceDate));
+    }
+    const dashboard = await getDashboard(db, demo.propertyId, { from: arrivalDate, to: arrivalDate });
+    expect(dashboard.community.trend[0]).toMatchObject({ date: arrivalDate, paid: 1 });
   });
 
   it("fails an ended overdue reservation task closed when its current pricing revision is missing", async () => {
