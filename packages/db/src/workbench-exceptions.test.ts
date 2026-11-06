@@ -96,11 +96,11 @@ describe('business and financial workbench groups', () => {
 
   it('counts overlapping orders once per group and filters reasons before cursor pagination', () => {
     const first = workbenchExceptionPage(all, { group: 'BUSINESS', limit: 1 });
-    expect(first).toMatchObject({ totalOrders: 2, nextCursor: 'order-b' });
+    expect(first).toMatchObject({ totalOrders: 2, groupCounts: { BUSINESS: 2, FINANCIAL: 3 }, nextCursor: 'order-b' });
     expect(first.items.map(row => row.orderId)).toEqual(['order-b']);
     expect(first.items[0]?.reasons.map(reason => reason.code)).toEqual(['OVERDUE_ARRIVAL']);
     const next = workbenchExceptionPage(all, { group: 'BUSINESS', limit: 1, afterId: first.nextCursor! });
-    expect(next).toMatchObject({ totalOrders: 2, nextCursor: null });
+    expect(next).toMatchObject({ totalOrders: 2, groupCounts: first.groupCounts, nextCursor: null });
     expect(next.items.map(row => row.orderId)).toEqual(['order-c']);
     expect(next.items[0]?.reasons.map(reason => reason.code)).toEqual(['INVENTORY_NOT_RELEASED', 'LIFECYCLE_INCONSISTENT']);
     expect(all[1]?.reasons).toHaveLength(2);
@@ -111,6 +111,7 @@ describe('business and financial workbench groups', () => {
     for (const code of ['CHANNEL_DATA_REVIEW', 'CHANNEL_AMOUNT_MISMATCH', 'FUNDS_INCONSISTENT'] as const) expect(workbenchExceptionGroupFor(code)).toBe('FINANCIAL');
     const financial = workbenchExceptionPage(all, { group: 'FINANCIAL' });
     expect(financial.totalOrders).toBe(3);
+    expect(financial.groupCounts).toEqual({ BUSINESS: 2, FINANCIAL: 3 });
     expect(financial.items.map(row => row.orderId)).toEqual(['order-a', 'order-b', 'order-d']);
     expect(financial.items[1]?.reasons).toEqual([all[1]!.reasons[1]]);
     expect(financial.items[1]?.reasons[0]?.amount).toEqual({ currency: 'CNY', minorUnits: 2000 });
@@ -122,6 +123,6 @@ describe('business and financial workbench groups', () => {
     expect(workbenchExceptionPage(all, {}).totalOrders).toBe(4);
     expect(workbenchExceptionPage(all, { group: 'BUSINESS', afterId: 'order-z' })).toMatchObject({ totalOrders: 2, items: [], nextCursor: null });
     expect(workbenchExceptionPage([all[0]!], { group: 'BUSINESS' })).toMatchObject({ totalOrders: 0, items: [] });
-    expect(workbenchExceptionPage([], {})).toEqual({ totalOrders: 0, items: [], nextCursor: null });
+    expect(workbenchExceptionPage([], {})).toEqual({ totalOrders: 0, groupCounts: { BUSINESS: 0, FINANCIAL: 0 }, items: [], nextCursor: null });
   });
 });

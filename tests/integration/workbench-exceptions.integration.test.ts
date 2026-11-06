@@ -164,6 +164,8 @@ describe('workbench exceptions property-wide read model', () => {
         do {
           const page = await getWorkbenchExceptions(runtime, { propertyId: demo.propertyId, group, limit: 1, ...(afterId ? { afterId } : {}) });
           expect(page.totalOrders).toBe(expected.length);
+          expect(page.groupCounts).toEqual(all.groupCounts);
+          expect(page.groupCounts[group]).toBe(expected.length);
           expect(page.items).toHaveLength(1);
           rows.push(...page.items);
           afterId = page.nextCursor ?? undefined;
@@ -180,7 +182,7 @@ describe('workbench exceptions property-wide read model', () => {
   it('scopes queries and validates limits without returning another property or hiding failures', async () => {
     const other = 'property_workbench_other';
     await db.insertInto('properties').values({ id: other, code: 'WB-OTHER', name: '合成其他门店', timezone: 'Asia/Shanghai', currency: 'CNY' }).execute();
-    expect(await getWorkbenchExceptions(runtime, { propertyId: other })).toMatchObject({ propertyId: other, totalOrders: 0, items: [], nextCursor: null });
+    expect(await getWorkbenchExceptions(runtime, { propertyId: other })).toMatchObject({ propertyId: other, totalOrders: 0, groupCounts: { BUSINESS: 0, FINANCIAL: 0 }, items: [], nextCursor: null });
     await expect(getWorkbenchExceptions(runtime, { propertyId: 'property_missing' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(getWorkbenchExceptions(runtime, { propertyId: demo.propertyId, limit: 101 })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
     await expect(getWorkbenchExceptions(runtime, { propertyId: demo.propertyId, group: 'SYSTEM' as WorkbenchExceptionGroup })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });

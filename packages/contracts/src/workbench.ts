@@ -41,6 +41,8 @@ export interface WorkbenchExceptionsResponse {
   businessDate: string;
   asOf: string;
   totalOrders: number;
+  /** Property-wide counts before group filtering and pagination; one order per group. */
+  groupCounts: Record<WorkbenchExceptionGroup, number>;
   items: WorkbenchExceptionItem[];
   nextCursor: string | null;
 }

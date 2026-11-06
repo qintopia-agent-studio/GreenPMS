@@ -8,6 +8,10 @@
 
 .exception-group-switch button {
   min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);

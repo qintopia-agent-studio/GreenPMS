@@ -71,14 +71,14 @@ describe('workbench exception API contract', () => {
   it('filters by group while returning stable filtered totals and pagination', async () => {
     const business = await app.inject({ method: 'GET', url: `${path}&group=BUSINESS&limit=1`, headers });
     expect(business.statusCode, business.body).toBe(200);
-    expect(business.json()).toMatchObject({ totalOrders: 0, items: [], nextCursor: null });
+    expect(business.json()).toMatchObject({ totalOrders: 0, groupCounts: { BUSINESS: 0, FINANCIAL: 2 }, items: [], nextCursor: null });
     const financial = await app.inject({ method: 'GET', url: `${path}&group=FINANCIAL&limit=1`, headers });
     expect(financial.statusCode, financial.body).toBe(200);
     const first = financial.json();
-    expect(first).toMatchObject({ totalOrders: 2 });
+    expect(first).toMatchObject({ totalOrders: 2, groupCounts: { BUSINESS: 0, FINANCIAL: 2 } });
     expect(first.items).toHaveLength(1);
     const next = (await app.inject({ method: 'GET', url: `${path}&group=FINANCIAL&limit=1&afterId=${encodeURIComponent(first.nextCursor)}`, headers })).json();
-    expect(next).toMatchObject({ totalOrders: 2, nextCursor: null });
+    expect(next).toMatchObject({ totalOrders: 2, groupCounts: first.groupCounts, nextCursor: null });
     expect([first.items[0].orderId, next.items[0].orderId]).toEqual([...ids].sort());
   });
 

@@ -12,11 +12,15 @@ interface EvidenceRow extends WorkbenchExceptionEvidence {
 
 /** Filter reasons before paginating; an order can have a task in both groups. */
 export function workbenchExceptionPage(all: readonly WorkbenchExceptionItem[], query: Pick<WorkbenchExceptionsQuery, 'group' | 'afterId' | 'limit'>) {
+  const groupCounts = { BUSINESS: 0, FINANCIAL: 0 };
+  for (const item of all) {
+    for (const group of new Set(item.reasons.map(reason => workbenchExceptionGroupFor(reason.code)))) groupCounts[group]++;
+  }
   const grouped = query.group ? all.map(item => ({ ...item, reasons: item.reasons.filter(reason => workbenchExceptionGroupFor(reason.code) === query.group) }))
     .filter(item => item.reasons.length > 0) : all;
   const candidates = query.afterId ? grouped.filter(item => item.orderId > query.afterId!) : grouped;
   const items = candidates.slice(0, query.limit ?? 50);
-  return { totalOrders: grouped.length, items, nextCursor: candidates.length > items.length ? items.at(-1)!.orderId : null };
+  return { totalOrders: grouped.length, groupCounts, items, nextCursor: candidates.length > items.length ? items.at(-1)!.orderId : null };
 }
 
 /** One property-wide snapshot; no business mutations or per-order lifecycle projections. */

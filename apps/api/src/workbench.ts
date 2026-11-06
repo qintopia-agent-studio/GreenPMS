@@ -19,6 +19,7 @@ export const WorkbenchExceptionsResponseSchema = Type.Object({
   businessDate: LocalDate,
   asOf: DateTime,
   totalOrders: Type.Integer({ minimum: 0 }),
+  groupCounts: Type.Object({ BUSINESS: Type.Integer({ minimum: 0 }), FINANCIAL: Type.Integer({ minimum: 0 }) }, { additionalProperties: false }),
   nextCursor: nullable(Id),
   items: Type.Array(Type.Object({
     orderId: Id,

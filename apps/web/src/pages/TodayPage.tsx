@@ -8,6 +8,7 @@ import type { CommandCapability, CommandRequest, OrderRowDto } from "../types";
 import { localDateInTimeZone } from "../dates";
 import { useWorkbenchExceptions, WorkbenchExceptionsQueue } from "../workbenchExceptions";
 import { usePaymentReconciliation, PaymentReconciliationQueue } from "../paymentReconciliation";
+import { workbenchExceptionCounts } from "../workbenchExceptionCounts";
 import {
   CommandDialog,
   type CommandDialogCloseContext,
@@ -89,6 +90,7 @@ export function TodayPage() {
   const [refreshToken, setRefreshToken] = useState(0);
   const exceptions = useWorkbenchExceptions(propertyId, refreshToken, exceptionGroup);
   const paymentReconciliation = usePaymentReconciliation(propertyId, refreshToken, tab === "EXCEPTIONS" && exceptionGroup === "FINANCIAL");
+  const exceptionCounts = workbenchExceptionCounts(propertyId, exceptions.state, paymentReconciliation.state);
   const [command, setCommand] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [commandNotice, setCommandNotice] = useState<string>();
@@ -187,15 +189,15 @@ export function TodayPage() {
       {commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="today-command-recovery" /> : null}
       {commandRecovery.pending && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="today-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；只读查看不受影响。</p></div></section> : null}
       <div className="today-tabs" role="tablist" aria-label="工作台分类">
-          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span>{item.id !== "EXCEPTIONS" ? <strong>{loading || error ? "—" : buckets[item.id].length}</strong> : null}</button>)}
+          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span><strong title={item.id === "EXCEPTIONS" ? "待处理事项数" : undefined}>{item.id === "EXCEPTIONS" ? exceptionCounts.total ?? "—" : loading || error ? "—" : buckets[item.id].length}</strong></button>)}
       </div>
       {tab !== "EXCEPTIONS" ? <InlineError context="read" error={error} title="无法载入工作台" /> : null}
       {tab !== "EXCEPTIONS" && error ? <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)}>重新载入工作台</button> : null}
       <section id="today-tabpanel" className="today-queue" role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex={0}>
         {tab === "EXCEPTIONS" ? <>
           <div className="exception-group-switch" role="group" aria-label="异常分类">
-            <button type="button" aria-pressed={exceptionGroup === "BUSINESS"} onClick={() => setExceptionGroup("BUSINESS")}>业务异常</button>
-            <button type="button" aria-pressed={exceptionGroup === "FINANCIAL"} onClick={() => setExceptionGroup("FINANCIAL")}>财务异常</button>
+            <button type="button" aria-pressed={exceptionGroup === "BUSINESS"} onClick={() => setExceptionGroup("BUSINESS")}><span>业务异常</span><strong title="待处理事项数">{exceptionCounts.business ?? "—"}</strong></button>
+            <button type="button" aria-pressed={exceptionGroup === "FINANCIAL"} onClick={() => setExceptionGroup("FINANCIAL")}><span>财务异常</span><strong title="待处理事项数">{exceptionCounts.financial ?? "—"}</strong></button>
           </div>
           <WorkbenchExceptionsQueue {...exceptions} group={exceptionGroup} />
           {exceptionGroup === "FINANCIAL" ? <PaymentReconciliationQueue {...paymentReconciliation} /> : null}

@@ -100,11 +100,29 @@ describe('persistent payment reconciliation read contract', () => {
     do {
       const page = await getPaymentReconciliation(runtime, { propertyId: demo.propertyId, limit: 2, ...(afterId ? { afterId } : {}) });
       expect(page.totalItems).toBe(all.totalItems); expect(page.summary).toEqual(all.summary);
+      expect(page.totalOpenItems).toBe(all.totalItems);
       ids.push(...page.items.map(row => row.id)); afterId = page.nextCursor ?? undefined;
     } while (afterId);
     expect(ids).toEqual(all.items.map(row => row.id)); expect(new Set(ids).size).toBe(ids.length);
     const order = await getPaymentReconciliation(runtime, { propertyId: demo.propertyId, orderId });
     expect(order.items.every(row => row.orderIds.includes(orderId))).toBe(true);
+    expect(order.totalOpenItems).toBe(all.totalItems);
+  });
+  it('keeps the property badge total across kind, status, order and empty-page filters', async () => {
+    const open = await getPaymentReconciliation(runtime, { propertyId: demo.propertyId });
+    expect(open.totalOpenItems).toBe(7);
+    const refunded = await app.inject({ method: 'GET', url: `${path}&kind=REFUND&limit=1`, headers });
+    expect(refunded.statusCode, refunded.body).toBe(200);
+    expect(refunded.json()).toMatchObject({ totalOpenItems: 7, totalItems: 4 });
+    expect(refunded.json().items).toHaveLength(1);
+    const all = await getPaymentReconciliation(runtime, { propertyId: demo.propertyId, status: 'ALL', limit: 1 });
+    expect(all.totalItems).toBeGreaterThan(open.totalItems);
+    expect(all.totalOpenItems).toBe(7);
+    const emptyPage = await getPaymentReconciliation(runtime, { propertyId: demo.propertyId, kind: 'REFUND', afterId: 'zzzz' });
+    expect(emptyPage).toMatchObject({ totalOpenItems: 7, totalItems: 4, items: [], nextCursor: null });
+    const other = 'property_reconciliation_counts_empty';
+    await owner.insertInto('properties').values({ id: other, code: 'RECON-EMPTY', name: '合成空门店', timezone: 'Asia/Shanghai', currency: 'CNY' }).execute();
+    expect(await getPaymentReconciliation(runtime, { propertyId: other })).toMatchObject({ totalItems: 0, totalOpenItems: 0, items: [] });
   });
   it('enriches both selector versions and limits refunds to the exact original source and merchant', async () => {
     for (const read of [listExternalPayments, listPaymentAllocations]) {

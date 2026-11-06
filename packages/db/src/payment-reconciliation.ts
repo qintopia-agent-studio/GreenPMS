@@ -228,14 +228,15 @@ export async function getPaymentReconciliation(db: Kysely<Database>, query: Paym
     // Normalize timestamps before comparisons; SQL text may use offsets or spaces.
     bills.forEach(bill => { bill.occurredAt = new Date(bill.occurredAt).toISOString(); bill.discoveredAt = new Date(bill.discoveredAt).toISOString(); });
     facts.forEach(fact => { fact.createdAt = new Date(fact.createdAt).toISOString(); });
-    const all = projectPaymentReconciliation({ bills, facts, claims, matchingSince: sync.matchingSince?.toISOString() ?? null })
-      .filter(item => (!query.kind || query.kind === 'ALL' || item.kind === query.kind) && (!query.orderId || item.orderIds.includes(query.orderId)));
+    const projected = projectPaymentReconciliation({ bills, facts, claims, matchingSince: sync.matchingSince?.toISOString() ?? null });
+    const totalOpenItems = projected.filter(item => item.issues.length > 0).length;
+    const all = projected.filter(item => (!query.kind || query.kind === 'ALL' || item.kind === query.kind) && (!query.orderId || item.orderIds.includes(query.orderId)));
     const open = query.status === 'ALL' ? all : all.filter(item => item.issues.length > 0);
     const remaining = query.afterId ? open.filter(item => item.id > query.afterId!) : open;
     const items = remaining.slice(0, limit);
     return { propertyId: query.propertyId, asOf: property.asOf.toISOString(),
       sync: { enabled: sync.enabled, lastSyncedAt: sync.lastSyncedAt?.toISOString() ?? null, hasError: sync.hasError },
-      summary: summarizePaymentReconciliation(all), totalItems: open.length, items,
+      summary: summarizePaymentReconciliation(all), totalItems: open.length, totalOpenItems, items,
       nextCursor: remaining.length > limit ? items.at(-1)!.id : null };
   });
 }

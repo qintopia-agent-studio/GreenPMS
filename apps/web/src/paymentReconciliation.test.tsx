@@ -5,7 +5,7 @@ import type { PaymentReconciliationResponse } from "@qintopia/contracts";
 import { PaymentReconciliationQueue, reconciliationMoney, type PaymentReconciliationState } from "./paymentReconciliation";
 const totals = { externalMinor: "100000", businessMinor: "0", unassignedMinor: "100000", excessMinor: "0", unbackedMinor: "0", unknownCount: 0 };
 function response(): PaymentReconciliationResponse {
-  return { propertyId: "property-1", asOf: "2026-11-06T08:00:00Z", sync: { enabled: true, lastSyncedAt: "2026-11-06T08:00:00Z", hasError: false }, summary: { collections: totals, refunds: totals }, totalItems: 2, nextCursor: null,
+  return { propertyId: "property-1", asOf: "2026-11-06T08:00:00Z", sync: { enabled: true, lastSyncedAt: "2026-11-06T08:00:00Z", hasError: false }, summary: { collections: totals, refunds: totals }, totalOpenItems: 2, totalItems: 2, nextCursor: null,
     items: ["COLLECTION", "REFUND"].map((kind, index) => ({ id: String(index), kind: kind as "COLLECTION" | "REFUND", billId: String(index), factId: null, orderId: null, orderIds: [], membershipOrderId: null, reference: `ref-${index}`, originalTransactionReference: "original", nickname: "测试付款人", currency: "CNY", amountMinor: 100000, allocatedMinor: "0", businessMinor: "0", unassignedMinor: "100000", excessMinor: "0", occurredAt: "2026-10-01T08:00:00Z", discoveredAt: "2026-11-05T08:00:00Z", issues: [{ code: "UNASSIGNED", message: "尚未关联业务" }] })) };
 }
 function render(state: PaymentReconciliationState) {

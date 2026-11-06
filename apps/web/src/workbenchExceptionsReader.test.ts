@@ -4,7 +4,7 @@ import { createWorkbenchExceptionsReader } from "./workbenchExceptionsReader";
 
 afterEach(() => vi.useRealTimers());
 function response(overrides: Partial<WorkbenchExceptionsResponse> = {}): WorkbenchExceptionsResponse {
-  return { propertyId: "sample-property", businessDate: "2026-10-24", asOf: "2026-10-24T03:00:00Z", totalOrders: 73, items: [], nextCursor: "sample-order-050", ...overrides };
+  return { propertyId: "sample-property", businessDate: "2026-10-24", asOf: "2026-10-24T03:00:00Z", groupCounts: { BUSINESS: 73, FINANCIAL: 5 }, totalOrders: 73, items: [], nextCursor: "sample-order-050", ...overrides };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;

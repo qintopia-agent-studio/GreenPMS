@@ -9,7 +9,7 @@ function render(state: WorkbenchExceptionsState, group: WorkbenchExceptionGroup 
   return renderToStaticMarkup(<MemoryRouter><WorkbenchExceptionsQueue state={state} group={group} retry={() => {}} firstPage={() => {}} nextPage={() => {}} /></MemoryRouter>);
 }
 const data = {
-  propertyId: "sample-property", businessDate: "2026-10-24", asOf: "2026-10-24T03:00:00Z", totalOrders: 51, nextCursor: "sample-order",
+  propertyId: "sample-property", businessDate: "2026-10-24", asOf: "2026-10-24T03:00:00Z", groupCounts: { BUSINESS: 51, FINANCIAL: 2 }, totalOrders: 51, nextCursor: "sample-order",
   items: [{
     orderId: "sample-order", orderStatus: "CANCELLED", stayStatus: "CANCELLED", guestName: "演示住客", arrivalDate: "2026-03-01", departureDate: "2026-03-03", unitLabel: "样本 A01", orderHref: "/orders/sample-order",
     reasons: [

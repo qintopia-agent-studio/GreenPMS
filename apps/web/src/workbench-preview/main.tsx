@@ -82,7 +82,7 @@ api.workbenchExceptions = async (query, signal): Promise<WorkbenchExceptionsResp
   const selected = query.group ? all.map(item => ({ ...item, reasons: item.reasons.filter(reason => workbenchExceptionGroupFor(reason.code) === query.group) })).filter(item => item.reasons.length) : all;
   const remaining = query.afterId ? selected.filter(item => item.orderId > query.afterId!) : selected;
   const items = remaining.slice(0, query.limit ?? 50);
-  return { propertyId: query.propertyId, businessDate, asOf: new Date().toISOString(), totalOrders: selected.length, items, nextCursor: remaining.length > items.length ? items.at(-1)!.orderId : null };
+  return { propertyId: query.propertyId, businessDate, asOf: new Date().toISOString(), totalOrders: selected.length, groupCounts: { BUSINESS: all.filter(item => item.reasons.some(reason => workbenchExceptionGroupFor(reason.code) === "BUSINESS")).length, FINANCIAL: all.filter(item => item.reasons.some(reason => workbenchExceptionGroupFor(reason.code) === "FINANCIAL")).length }, items, nextCursor: remaining.length > items.length ? items.at(-1)!.orderId : null };
 };
 function samplePayments(propertyId: string): PaymentReconciliationItem[] {
   const pairReference = "SAMPLE-COLLECTION-20261105-LOCAL-PREVIEW-000000000000000001";
@@ -135,7 +135,7 @@ api.paymentReconciliation = async (query, signal): Promise<PaymentReconciliation
   return {
     propertyId: query.propertyId, asOf, sync: { enabled: true, lastSyncedAt: asOf, hasError: false },
     summary: { collections: samplePaymentTotals(all, "COLLECTION"), refunds: samplePaymentTotals(all, "REFUND") },
-    totalItems: all.length, items, nextCursor: remaining.length > items.length ? items.at(-1)!.id : null
+    totalItems: all.length, totalOpenItems: requestedScenario === "empty" ? 0 : samplePayments(query.propertyId).filter(item => item.issues.length > 0).length, items, nextCursor: remaining.length > items.length ? items.at(-1)!.id : null
   };
 };
 function Preview() {
