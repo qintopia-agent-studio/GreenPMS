@@ -2251,7 +2251,7 @@ test("READ Web principal receives the real projection without business write act
   await quickPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
   await page.getByRole("button", { name: "打开选中对象上下文", exact: true }).click();
   const actionRegion = page.locator(".room-status-context-actions");
-  await expect(actionRegion).toContainText("当前账号只有查看权限，不能补录住宿或执行其他写入");
+  await expect(actionRegion).toContainText("当前账号只有查看权限，不能办理住宿。请联系管理员开通相应操作权限。");
   for (const action of ["创建正常住宿订单", "创建免费入住", "放置维修锁房"]) {
     await expect(actionRegion.getByRole("button", { name: action, exact: true })).toHaveCount(0);
   }

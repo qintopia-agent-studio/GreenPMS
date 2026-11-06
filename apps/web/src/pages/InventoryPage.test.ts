@@ -1915,7 +1915,7 @@ describe("Room-status backfill entry routing", () => {
     });
     expect(renewing).toEqual({
       kind: "REFRESH",
-      reason: "正在更新房态，更新完成前暂不能写入。"
+      reason: "正在更新房态，暂时无法办理。请等待更新完成后再试。"
     });
 
     const failed = roomStatusActionPresentationBlock({
