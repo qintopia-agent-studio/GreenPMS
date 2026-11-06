@@ -20,6 +20,8 @@
 
 ## 住宿
 
+先读目标订单详情的 `allowedActions`（包括 `enabled`、`disabledReason`）、`effectiveArrangement.businessDate`、订单/Stay 状态和 `fulfillment`。`CHECK_IN` 用于实际办理入住，`CHECK_OUT` 用于已入住订单退房；当预订订单漏记入住、客人实际已完成住宿且离店，并且 `COMPLETE_STAY` 可用时，使用它一次补齐入住和退房，不先补普通入住再试退房。动作可用不代表业务事实已确认；未住过、未离店或存在歧义时先对话核实。动作被禁用时按原因处理，不能换命令规避。
+
 | 意图 | 命令与结果 |
 | --- | --- |
 | 报价和建单 | `quote` 执行 `CREATE_QUOTE`，再以 quoteId `CREATE_ORDER`；成功后读取新 orderId、日期、房源、金额和状态 |
@@ -32,7 +34,7 @@
 | 撤销误入住 | `REVOKE_CHECK_IN`；必须真实确认未使用房间，再核对撤销状态与保留的原入住记录 |
 | 补齐漏记的已完成住宿 | `COMPLETE_STAY`；须确认实际完成事实，回读入住/退房履约都存在且仅一次，不编造实际发生 |
 
-普通建单 Confirm reason 固定为 `{"code":"CREATE_STANDARD_ORDER","note":""}`。历史补录或临时换类安排沿用专属原因和预览锁定说明；`COMPLETE_STAY` 的 reason.code 为 `COMPLETE_STAY`，note 必须与 input.reasonNote 一致。不要对所有建单套用普通原因，也不要用任意字符串试错。
+`CREATE_ORDER` 和 `COMPLETE_STAY` 的确认原因由执行器从预览 effect 中原样确定，预览输出 `confirmationReason`。这几类提交省略 `--reason` 即可：普通建单使用 `CREATE_STANDARD_ORDER` 和空 note；补录建单使用 `BACKFILL_STAY` 及锁定补录原因；临时换类建单使用 `TEMPORARY_OTHER_ROOM` 及锁定安排原因；`COMPLETE_STAY` 使用 `COMPLETE_STAY` 及预览的 `reasonNote`。传入不同文字会在本地拒绝，预览仍可使用；改为省略 `--reason`，无需重新预览。原因原文已在预览中确认，不要在正式提交时补写一段新总结。`--confirmed` 仍要求员工意图覆盖效果和必要业务事实。
 
 ## 会员与资金
 

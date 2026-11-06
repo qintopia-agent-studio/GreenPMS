@@ -5,6 +5,7 @@
 | 情况 | 下一步 |
 | --- | --- |
 | Preview 响应丢失 | 用相同输入、命令及状态文件重放 `prepare`。它只重放原预览键，绝不完成业务 |
+| 本地拒绝锁定原因不匹配，仍为 PREPARED | 没有发出 Confirm；沿用原状态，省略 `--reason` 后提交，原样采用预览的 confirmationReason，不重新预览 |
 | Confirm 或 quote 响应丢失 | `recover --state 路径`，查询原正式 commandType/propertyId/idempotencyKey；不要再次提交或新建状态 |
 | 已有正式回执，但回读失败 | 沿用状态再次恢复/回读；正式业务不再 POST。不报告最终核实成功，直到权威结果可读且吻合 |
 | 查询 UNKNOWN | 明确待核实；可依据当前 API 恢复契约显式执行 `resolve --state 路径`。它有独立恢复键，body引用原业务键，不是重新办理 |

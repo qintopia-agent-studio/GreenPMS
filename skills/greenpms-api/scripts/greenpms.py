@@ -21,12 +21,14 @@ import urllib.parse
 import urllib.request
 import uuid
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 MAX_RESPONSE = 16 * 1024 * 1024
 SECRET_KEYS = {"authorization", "token", "tokensecret", "apitoken", "apikey", "password",
                "currentpassword", "newpassword", "privatekey", "clientsecret", "accesstoken"}
 CREDENTIAL_COMMANDS = {"ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"}
 TARGET_ID_FIELDS = ("orderId", "memberId", "membershipOrderId", "entitlementLotId", "maintenanceLockId")
+JS_WHITESPACE = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+                 "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
 
 
 class ClientError(Exception):
@@ -37,6 +39,11 @@ class ClientError(Exception):
 
 def fail(code, message):
     raise ClientError(code, message)
+
+
+def trim_api_text(value):
+    # Match server-side JavaScript String.trim(), including BOM but not U+0085.
+    return value.strip(JS_WHITESPACE)
 
 
 def object_json(value):
@@ -295,12 +302,50 @@ def new_state(client, command, input_value, readback, operation):
             "phase": "NEW", "createdAt": time.time()}
 
 
+def canonical_confirmation_reason(value):
+    """Copy locked wording from the authoritative preview, never invent consent."""
+    command = value["commandType"]
+    if command not in ("CREATE_ORDER", "COMPLETE_STAY"):
+        return None
+    effect = value.get("preview", {}).get("effect")
+    if not isinstance(effect, dict):
+        fail("LOCKED_REASON_UNAVAILABLE", "The preview lacks the required confirmation reason; do not guess it.")
+
+    def locked(code, note, maximum=1000):
+        normalized = trim_api_text(note) if isinstance(note, str) else ""
+        if not normalized or len(normalized) > maximum or "<redacted>" in normalized:
+            fail("LOCKED_REASON_UNAVAILABLE", "The preview lacks a usable locked confirmation reason; do not guess it.")
+        return {"code": code, "note": normalized}
+
+    if command == "COMPLETE_STAY":
+        if value["input"].get("actualStayCompletedConfirmed") is not True:
+            fail("ACTUAL_STAY_CONFIRMATION_REQUIRED", "COMPLETE_STAY needs the recorded confirmation that the guest actually stayed and departed.")
+        return locked("COMPLETE_STAY", effect.get("reasonNote"))
+    backfill = effect.get("backfill")
+    temporary = effect.get("temporaryOtherRoomArrangement")
+    if (("backfill" in effect and not isinstance(backfill, dict))
+            or ("temporaryOtherRoomArrangement" in effect and not isinstance(temporary, dict))
+            or (backfill is not None and temporary is not None)
+            or (value["input"].get("backfill") is True and backfill is None)
+            or ("temporaryOtherRoomReason" in value["input"] and temporary is None)):
+        fail("LOCKED_REASON_UNAVAILABLE", "The preview's create-order reason branch is incomplete or inconsistent; do not use a default reason.")
+    if backfill is not None:
+        return locked("BACKFILL_STAY", backfill.get("reason"))
+    if temporary is not None:
+        return locked("TEMPORARY_OTHER_ROOM", effect.get("temporaryOtherRoomReason"), 200)
+    return {"code": "CREATE_STANDARD_ORDER", "note": ""}
+
+
 def result_envelope(state, response=None):
     result = {"phase": state.value["phase"], "stateFile": str(state.path), "commandType": state.value["commandType"],
               "correlationId": state.value["correlationId"], "businessVerified": False}
     for key in ("preview", "previewReceipt", "receipt", "quote"):
         if key in state.value:
             result[key] = state.value[key]
+    if state.value["phase"] == "PREPARED":
+        reason = canonical_confirmation_reason(state.value)
+        if reason is not None:
+            result["confirmationReason"] = reason
     if response:
         result["response"] = response
     return result
@@ -441,10 +486,22 @@ def commit(client, args):
             fail("PREVIEW_REQUIRED", "No validated preview exists. Retry prepare with the original state and identical input.")
         if not args.confirmed:
             fail("BUSINESS_CONFIRMATION_REQUIRED", "Review the effect and obtain any missing business confirmation before --confirmed.")
-        reason = object_json(args.reason)
+        canonical = canonical_confirmation_reason(state.value)
+        reason = object_json(args.reason) if args.reason is not None else canonical
+        if reason is None:
+            fail("REASON_REQUIRED", "Supply a truthful structured --reason for this command; no confirmation wording can be inferred.")
         reject_secrets(reason, client.token)
-        if set(reason) != {"code", "note"} or not isinstance(reason["code"], str) or not reason["code"].strip() or not isinstance(reason["note"], str):
+        if (set(reason) != {"code", "note"} or not isinstance(reason["code"], str)
+                or not trim_api_text(reason["code"]) or len(reason["code"]) > 80
+                or not isinstance(reason["note"], str) or len(reason["note"]) > 1000):
             fail("INVALID_REASON", "Supply the command's exact {code, note} reason contract.")
+        if canonical is not None:
+            comparable = {**reason, "note": trim_api_text(reason["note"])} if canonical["code"] in ("COMPLETE_STAY", "BACKFILL_STAY") else reason
+            if comparable != canonical:
+                fail("LOCKED_REASON_MISMATCH", "Reason differs from the preview's locked confirmationReason. Reuse that wording; changed business facts need a new authorized preview.")
+            reason = canonical
+        if canonical is None and not trim_api_text(reason["note"]):
+            fail("REASON_REQUIRED", "A nonempty truthful confirmation note is required for this command.")
         if args.readback:
             safe_path(args.readback)
             reject_secrets(args.readback, client.token)
@@ -558,8 +615,8 @@ def parser():
     query.add_argument("path")
     query.add_argument("--query", default="{}")
     query.add_argument("--fields")
-    schema = commands.add_parser("schema", help="Show one command's current request and confirmation schemas.")
-    schema.add_argument("command")
+    schema = commands.add_parser("schema", help="Show selected commands' schemas with one OpenAPI request.")
+    schema.add_argument("command", nargs="+")
     for name in ("prepare", "quote"):
         item = commands.add_parser(name, help="Create a preview only." if name == "prepare" else "Create a single-stage quotation, never a booking.")
         if name == "prepare":
@@ -569,7 +626,7 @@ def parser():
         item.add_argument("--readback")
     item = commands.add_parser("commit", help="Submit an authorized preview once, then optionally read its business target.")
     item.add_argument("--state", required=True)
-    item.add_argument("--reason", required=True, help="Exact JSON {code,note} required by this command.")
+    item.add_argument("--reason", help="JSON {code,note}; omit only when the preview provides a locked confirmationReason.")
     item.add_argument("--confirmed", action="store_true", help="Assert that user intent covers the exact effect and required business facts.")
     item.add_argument("--readback")
     for name in ("recover", "resolve"):
@@ -583,13 +640,14 @@ def run(args, client):
         return client.request("GET", "/api/v1/me")
     if args.action == "get":
         result = client.request("GET", args.path, query=object_json(args.query))
-        if args.fields and "data" in result:
+        if result.get("ok") and args.fields and "data" in result:
             result["data"] = select_fields(result["data"], args.fields)
         return result
     if args.action == "schema":
         result = client.request("GET", "/api/v1/openapi.json")
         if result.get("ok"):
-            result["data"] = compact_schema(result["data"], args.command)
+            selected = [compact_schema(result["data"], command) for command in dict.fromkeys(args.command)]
+            result["data"] = selected[0] if len(args.command) == 1 else {"commands": selected}
         return result
     if args.action in ("prepare", "quote"):
         return prepare(client, args, quote=args.action == "quote")

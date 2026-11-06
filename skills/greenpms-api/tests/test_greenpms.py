@@ -93,6 +93,13 @@ class ProtocolTests(unittest.TestCase):
     def load(self):
         return json.loads(Path(self.state).read_text())
 
+    def prepare_locked(self, command, effect, input_value):
+        prepared = preview()
+        prepared["preview"].update(commandType=command, effect=effect)
+        prepared["receipt"]["commandType"] = "PREVIEW:" + command
+        return self.invoke(Opener(Response(prepared)), "prepare", command,
+                           "--input", json.dumps(input_value), "--state", self.state)
+
     def test_preview_is_not_business_success_and_repeated_prepare_does_not_start_another_flow(self):
         result = self.prepare()
         self.assertEqual(result["phase"], "PREPARED")
@@ -128,6 +135,163 @@ class ProtocolTests(unittest.TestCase):
             self.commit(Opener(), confirmed=False)
         self.assertEqual(error.exception.code, "BUSINESS_CONFIRMATION_REQUIRED")
         self.assertEqual(self.load()["phase"], "PREPARED")
+
+    def test_locked_reasons_are_copied_from_preview_and_mismatch_does_not_consume_attempt(self):
+        cases = [
+            ("CREATE_ORDER", {"quoteId": "quote_test"}, {"quoteId": "quote_test"},
+             {"code": "CREATE_STANDARD_ORDER", "note": ""}),
+            ("CREATE_ORDER", {"backfill": {"reason": "实际住宿补录"}},
+             {"quoteId": "quote_test", "backfill": True, "backfillReason": "  实际住宿补录  "},
+             {"code": "BACKFILL_STAY", "note": "实际住宿补录"}),
+            ("CREATE_ORDER", {"temporaryOtherRoomArrangement": {"kind": "TEMPORARY_OTHER_ROOM"},
+                              "temporaryOtherRoomReason": "经同事确认的临时安排"},
+             {"quoteId": "quote_test", "temporaryOtherRoomReason": "经同事确认的临时安排"},
+             {"code": "TEMPORARY_OTHER_ROOM", "note": "经同事确认的临时安排"}),
+            ("COMPLETE_STAY", {"orderId": "order_test", "reasonNote": "同事确认客人实际住过且已离店"},
+             {"orderId": "order_test", "actualStayCompletedConfirmed": True,
+              "reasonNote": "  同事确认客人实际住过且已离店  "},
+             {"code": "COMPLETE_STAY", "note": "同事确认客人实际住过且已离店"})
+        ]
+        for index, (command, effect, input_value, canonical) in enumerate(cases):
+            with self.subTest(reason=canonical["code"]):
+                self.state = str(Path(self.temp.name) / f"locked-{index}.json")
+                prepared = self.prepare_locked(command, effect, input_value)
+                self.assertEqual(prepared["confirmationReason"], canonical)
+                before = Path(self.state).read_bytes()
+                original = self.load()
+                mismatch = {**canonical, "note": canonical["note"] + "改写说明"}
+                opener = Opener()
+                with self.assertRaises(cli.ClientError) as error:
+                    self.invoke(opener, "commit", "--state", self.state, "--confirmed",
+                                "--reason", json.dumps(mismatch), "--readback", "/api/v1/orders/{result.orderId}")
+                self.assertEqual(error.exception.code, "LOCKED_REASON_MISMATCH")
+                self.assertEqual(opener.requests, [])
+                self.assertEqual(Path(self.state).read_bytes(), before)
+                self.assertEqual(self.load()["phase"], "PREPARED")
+                opener = Opener(Response(receipt(command)))
+                result = self.invoke(opener, "commit", "--state", self.state, "--confirmed")
+                self.assertEqual(result["phase"], "COMMITTED")
+                payload = json.loads(opener.requests[0][0].data)
+                self.assertEqual(payload["reason"], canonical)
+                self.assertEqual(payload["expectedEffectHash"], original["preview"]["effectHash"])
+                self.assertEqual(opener.requests[0][0].get_header("Idempotency-key"), original["confirmKey"])
+                self.assertEqual(self.load()["clientVersion"], "1.0.1")
+
+    def test_locked_reason_cannot_supply_missing_business_confirmation(self):
+        self.prepare_locked("COMPLETE_STAY", {"orderId": "order_test", "reasonNote": "真实住宿已结束"},
+                            {"orderId": "order_test", "actualStayCompletedConfirmed": True, "reasonNote": "真实住宿已结束"})
+        before = Path(self.state).read_bytes()
+        with self.assertRaises(cli.ClientError) as error:
+            self.invoke(Opener(), "commit", "--state", self.state)
+        self.assertEqual(error.exception.code, "BUSINESS_CONFIRMATION_REQUIRED")
+        self.assertEqual(Path(self.state).read_bytes(), before)
+        state = self.load()
+        state["input"].pop("actualStayCompletedConfirmed")
+        Path(self.state).write_text(json.dumps(state))
+        before = Path(self.state).read_bytes()
+        with self.assertRaises(cli.ClientError) as error:
+            self.invoke(Opener(), "commit", "--state", self.state, "--confirmed")
+        self.assertEqual(error.exception.code, "ACTUAL_STAY_CONFIRMATION_REQUIRED")
+        self.assertEqual(Path(self.state).read_bytes(), before)
+
+    def test_locked_reason_equivalence_matches_javascript_without_erasing_unicode_text(self):
+        # JS trim keeps U+0085 (Python's default strip removes it) and removes BOM.
+        note = "verified stay\u0085"
+        for command in ("COMPLETE_STAY", "CREATE_ORDER"):
+            with self.subTest(command=command):
+                self.state = str(Path(self.temp.name) / f"unicode-{command}.json")
+                effect = {"reasonNote": note} if command == "COMPLETE_STAY" else {"backfill": {"reason": note}}
+                input_value = ({"actualStayCompletedConfirmed": True, "reasonNote": note}
+                               if command == "COMPLETE_STAY" else {"backfill": True, "backfillReason": note})
+                code = "COMPLETE_STAY" if command == "COMPLETE_STAY" else "BACKFILL_STAY"
+                canonical = {"code": code, "note": note}
+                output = self.prepare_locked(command, effect, input_value)
+                self.assertEqual(output["confirmationReason"], canonical)
+                opener = Opener(Response(receipt(command)))
+                result = self.invoke(opener, "commit", "--state", self.state, "--confirmed", "--reason",
+                                     json.dumps({"code": code, "note": "\ufeff \t" + note + "\u00a0\u3000"}))
+                self.assertEqual(result["phase"], "COMMITTED")
+                self.assertEqual(json.loads(opener.requests[0][0].data)["reason"], canonical)
+
+    def test_standard_and_temporary_order_reasons_keep_exact_note_matching(self):
+        for index, (effect, canonical) in enumerate((
+                ({"quoteId": "quote_test"}, {"code": "CREATE_STANDARD_ORDER", "note": ""}),
+                ({"temporaryOtherRoomArrangement": {}, "temporaryOtherRoomReason": "confirmed arrangement"},
+                 {"code": "TEMPORARY_OTHER_ROOM", "note": "confirmed arrangement"}))):
+            self.state = str(Path(self.temp.name) / f"exact-{index}.json")
+            self.prepare_locked("CREATE_ORDER", effect, {"quoteId": "quote_test"})
+            before = Path(self.state).read_bytes()
+            with self.assertRaises(cli.ClientError) as error:
+                self.invoke(Opener(), "commit", "--state", self.state, "--confirmed", "--reason",
+                            json.dumps({**canonical, "note": " " + canonical["note"] + " "}))
+            self.assertEqual(error.exception.code, "LOCKED_REASON_MISMATCH")
+            self.assertEqual(Path(self.state).read_bytes(), before)
+
+    def test_generic_reason_nonempty_check_uses_server_whitespace_semantics(self):
+        self.prepare(readback=False)
+        before = Path(self.state).read_bytes()
+        with self.assertRaises(cli.ClientError) as error:
+            self.invoke(Opener(), "commit", "--state", self.state, "--confirmed", "--reason",
+                        json.dumps({"code": "CHECK_OUT", "note": "\ufeff\u00a0"}))
+        self.assertEqual(error.exception.code, "REASON_REQUIRED")
+        self.assertEqual(Path(self.state).read_bytes(), before)
+        opener = Opener(Response(receipt()))
+        output = self.invoke(opener, "commit", "--state", self.state, "--confirmed", "--reason",
+                             json.dumps({"code": "CHECK_OUT", "note": "\u0085"}))
+        self.assertEqual(output["phase"], "COMMITTED")
+        self.assertEqual(json.loads(opener.requests[0][0].data)["reason"]["note"], "\u0085")
+
+    def test_missing_or_malformed_locked_reason_fails_closed_without_formal_post(self):
+        cases = [
+            ("CREATE_ORDER", {"backfill": {}}, {"backfill": True}),
+            ("CREATE_ORDER", {"backfill": None}, {"backfill": True}),
+            ("CREATE_ORDER", {}, {"backfill": True}),
+            ("CREATE_ORDER", {"temporaryOtherRoomArrangement": {}}, {"temporaryOtherRoomReason": "confirmed"}),
+            ("CREATE_ORDER", {}, {"temporaryOtherRoomReason": "confirmed"}),
+            ("CREATE_ORDER", {"temporaryOtherRoomArrangement": {}, "temporaryOtherRoomReason": "x" * 201}, {}),
+            ("COMPLETE_STAY", {"reasonNote": "  "}, {"actualStayCompletedConfirmed": True}),
+            ("COMPLETE_STAY", {}, {"actualStayCompletedConfirmed": True}),
+            ("COMPLETE_STAY", {"reasonNote": "<redacted>"}, {"actualStayCompletedConfirmed": True})
+        ]
+        for index, (command, effect, input_value) in enumerate(cases):
+            with self.subTest(command=command, effect=effect):
+                self.state = str(Path(self.temp.name) / f"missing-reason-{index}.json")
+                with self.assertRaises(cli.ClientError) as error:
+                    self.prepare_locked(command, effect, input_value)
+                self.assertEqual(error.exception.code, "LOCKED_REASON_UNAVAILABLE")
+                before = Path(self.state).read_bytes()
+                with self.assertRaises(cli.ClientError) as error:
+                    self.invoke(Opener(), "commit", "--state", self.state, "--confirmed")
+                self.assertEqual(error.exception.code, "LOCKED_REASON_UNAVAILABLE")
+                self.assertEqual(Path(self.state).read_bytes(), before)
+
+    def test_other_commands_still_require_truthful_nonempty_reason(self):
+        self.prepare(readback=False)
+        before = Path(self.state).read_bytes()
+        for supplied in (None, {"code": "CHECK_OUT", "note": "   "}):
+            args = ["commit", "--state", self.state, "--confirmed"]
+            if supplied is not None:
+                args += ["--reason", json.dumps(supplied)]
+            with self.assertRaises(cli.ClientError) as error:
+                self.invoke(Opener(), *args)
+            self.assertEqual(error.exception.code, "REASON_REQUIRED")
+            self.assertEqual(Path(self.state).read_bytes(), before)
+
+    def test_automatic_locked_reason_lost_response_preserves_exact_confirm_payload(self):
+        self.prepare_locked("COMPLETE_STAY", {"orderId": "order_test", "reasonNote": "同事已确认真实住宿完成"},
+                            {"orderId": "order_test", "actualStayCompletedConfirmed": True,
+                             "reasonNote": "同事已确认真实住宿完成"})
+        original = self.load()
+        result = self.invoke(Opener(TimeoutError()), "commit", "--state", self.state, "--confirmed")
+        self.assertEqual(result["phase"], "UNKNOWN")
+        self.assertEqual(self.load()["confirmation"]["reason"],
+                         {"code": "COMPLETE_STAY", "note": "同事已确认真实住宿完成"})
+        self.invoke(Opener(), "commit", "--state", self.state, "--confirmed")
+        recovery = Opener(Response(receipt("COMPLETE_STAY")))
+        result = self.invoke(recovery, "recover", "--state", self.state)
+        self.assertEqual(result["phase"], "COMMITTED")
+        self.assertIn(original["confirmKey"], recovery.requests[0][0].full_url)
+        self.assertEqual(recovery.requests[0][0].get_method(), "GET")
 
     def test_lost_confirm_response_preserves_original_identity_and_never_reposts(self):
         self.prepare()
@@ -430,6 +594,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(cli.select_fields(data, "orders.id,orders.guest.nickname,nextCursor"),
                          {"orders": [{"id": "order_test", "guest": {"nickname": "guest"}}], "nextCursor": None})
 
+    def test_fields_projection_preserves_non_success_api_errors_without_credentials(self):
+        body = {"code": "VALIDATION_ERROR", "message": "propertyId is required", "details": {
+            "errorMessages": ["missing propertyId"], "debugEcho": ENV["GREENPMS_API_TOKEN"]}}
+        opener = Opener(Response(body, 400))
+        result = self.invoke(opener, "get", "/api/v1/orders", "--query", '{"query":"302","pageSize":100}',
+                             "--fields", "orders.id,orders.status,nextCursor")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["http"]["status"], 400)
+        self.assertEqual(result["data"]["message"], "propertyId is required")
+        self.assertEqual(result["data"]["details"]["errorMessages"], ["missing propertyId"])
+        self.assertEqual(result["data"]["details"]["debugEcho"], "<redacted>")
+        self.assertNotIn(ENV["GREENPMS_API_TOKEN"], json.dumps(result))
+        self.assertNotIn("propertyId=", opener.requests[0][0].full_url)
+
     def test_schema_output_contains_only_requested_command_and_no_response_union(self):
         selected = {"type": "object", "properties": {"commandType": {"const": "CHECK_OUT"}, "input": {"$ref": "#/components/schemas/Input"}}}
         unrelated = {"type": "object", "properties": {"commandType": {"const": "ISSUE_TOKEN"}, "input": {"type": "object"}}}
@@ -441,6 +619,25 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotIn("ISSUE_TOKEN", json.dumps(output))
         self.assertNotIn("response union", json.dumps(output))
         self.assertIn("#/components/schemas/Input", output["referencedSchemas"])
+
+    def test_schema_batch_fetches_once_and_single_command_retains_original_shape(self):
+        branches = [{"type": "object", "properties": {"commandType": {"const": command},
+                     "input": {"type": "object", "properties": {"orderId": {"type": "string"}}}}}
+                    for command in ("CHECK_IN", "CHECK_OUT", "COMPLETE_STAY", "ISSUE_TOKEN")]
+        document = {"paths": {}}
+        for path in ("/api/v1/command-previews", "/api/v1/command-previews/{previewId}/confirm"):
+            document["paths"][path] = {"post": {"requestBody": {"content": {"application/json": {
+                "schema": {"anyOf": branches}}}}, "responses": {"200": {"unrelated": "large response"}}}}
+        opener = Opener(Response(document))
+        result = self.invoke(opener, "schema", "CHECK_IN", "CHECK_OUT", "COMPLETE_STAY", "CHECK_OUT")
+        self.assertEqual(len(opener.requests), 1)
+        self.assertEqual([item["commandType"] for item in result["data"]["commands"]],
+                         ["CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"])
+        self.assertNotIn("ISSUE_TOKEN", json.dumps(result))
+        self.assertNotIn("large response", json.dumps(result))
+        single = self.invoke(Opener(Response(document)), "schema", "CHECK_OUT")
+        self.assertEqual(single["data"], cli.compact_schema(document, "CHECK_OUT"))
+        self.assertNotIn("commands", single["data"])
 
     def test_main_does_not_print_credential_bearing_exceptions(self):
         with mock.patch.dict(os.environ, ENV, clear=True), mock.patch.object(cli, "run", side_effect=ValueError(ENV["GREENPMS_API_TOKEN"])):
