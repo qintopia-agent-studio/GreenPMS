@@ -315,7 +315,7 @@ test("U1 pending command coordinates and clears across tabs without reload", asy
     if (await peerPopover.isVisible()) {
       await expect(peerPopover.getByRole("button", { name: "预订", exact: true })).toBeDisabled();
       await expect(peerPopover.getByRole("button", { name: "维修锁房", exact: true })).toBeDisabled();
-      await expect(peerPopover).toContainText("上一笔操作结果尚未收口");
+      await expect(peerPopover).toContainText("上一笔操作结果尚未确认。请先查询原操作结果");
       await expect(peerPopover.getByRole("button", { name: "查询原操作结果", exact: true })).toBeVisible();
       await expect(peerPopover.getByRole("button", { name: "查看房态记录", exact: true })).toBeVisible();
       await peerPopover.getByRole("button", { name: "关闭快捷操作", exact: true }).click();
