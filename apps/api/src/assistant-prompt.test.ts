@@ -74,6 +74,8 @@ describe("versioned employee operating knowledge", () => {
     { question: "清洁按钮怎么用？", ids: ["maintenance"], facts: ["清洁工作流关闭", "内部占用也不是当前可办理能力"] },
     { question: "如何改房型价格、工作人员权限和外部密钥？", ids: ["catalog", "accounts-tokens"], facts: ["设置→房型与价格", "设置→账号管理", "设置→智能体与外部访问", "不能因新增功能自动给旧Token增加能力"] }
   ];
+  scenarios.push({ question: "换一个外部智能体也能办理吗，风险确认要回PMS页面吗？", ids: ["accounts-tokens"], facts: ["各外部智能体共用API", "依Token身份/门店/命令权限办理", "风险确认可通过对话", "原指令覆盖必要事实不重复问", "不代人同意", "内置助手不直开上述设置、不代改权限、不提交业务"] });
+  scenarios.push({ question: "外部智能体拿到退房预览成功回执，就能说退房完成了吗？", ids: ["accounts-tokens"], facts: ["PREVIEW:*成功回执不代表业务完成", "正式执行并回读一致才报完成", "未知用原提交身份恢复"] });
   scenarios.push({ question: "模型还在慢慢回答，超过一分钟会被停止吗？", ids: ["assistant-help"], facts: ["首响等待60秒", "连续60秒无有效进展才超时", "文字、思考、工具增量均可续期", "保活心跳不算", "持续响应无总时限", "停止即取消", "权限失效不触发备用"] });
   scenarios.push({ question: "把备用设为主用会停用旧主、让我重新对话吗？", ids: ["assistant-help"], facts: ["仅已启用的完整连接", "保留双方启用状态", "保留对话与上下文", "当前回答继续", "后续问题按新顺序", "保存连接配置仍使旧对话失效"] });
   scenarios.push({ question: "备用供应商怎么设置，主恢复后什么时候切回？", ids: ["assistant-help"], facts: ["主用/备用两张卡", "改连接须重测", "设为主用", "无需重填Key", "使旧对话失效", "最多自动切备用一次", "用备用重新回答", "10分钟", "无人提问不探测", "不发送业务资料", "不让用户等待", "立即检查恢复", "不改主备身份", "不能凭知识断言当前供应商"] });

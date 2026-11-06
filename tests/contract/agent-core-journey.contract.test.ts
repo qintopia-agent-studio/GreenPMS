@@ -119,6 +119,7 @@ async function runCommand(
   const previewBody = previewResponse.json() as PreviewResponse;
   expect(previewBody.preview).toMatchObject({ commandType, effectHash: expect.any(String) });
   expect(previewBody.receipt).toMatchObject({
+    commandType: `PREVIEW:${commandType}`,
     executionStatus: "EXECUTED",
     businessCommitted: true,
     correlationId,
@@ -158,6 +159,7 @@ async function runCommand(
   expect(receipt).toMatchObject({
     receiptId: expect.any(String),
     commandId: expect.any(String),
+    commandType,
     executionStatus: "EXECUTED",
     businessCommitted: true,
     correlationId,

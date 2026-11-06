@@ -106,6 +106,14 @@ export const HistoricalCommandTypeSchema = Type.Union([
 export const HistoricalRecoverableCommandTypeSchema = Type.Union(
   historicalRecoverableCommandTypes.map((commandType) => Type.Literal(commandType))
 );
+const ReceiptCommandTypeSchema = Type.Union([
+  ...historicalRecoverableCommandTypes.map((commandType) => Type.Literal(commandType)),
+  ...historicalRecoverableCommandTypes.filter((commandType) => commandType !== "CREATE_QUOTE")
+    .map((commandType) => Type.Literal(`PREVIEW:${commandType}`))
+], {
+  description: "Exact persisted operation this receipt describes. PREVIEW:* only prepares a preview and never executes the target business operation. CREATE_QUOTE creates a quote only. A confirmed business receipt uses the requested business command type without PREVIEW:.",
+  examples: ["PREVIEW:CHECK_OUT", "CHECK_OUT", "CREATE_QUOTE"]
+});
 export const OrderStatusSchema = Type.Union([
   Type.Literal("RESERVED"), Type.Literal("CHECKED_IN"), Type.Literal("CHECKED_OUT"),
   Type.Literal("CANCELLED"), Type.Literal("NO_SHOW"), Type.Literal("CHECK_IN_REVOKED")
@@ -2283,14 +2291,19 @@ export const ExecutedCommandResultSchema = Type.Union([
 export const ReceiptSchema = strictObject({
   receiptId: Id,
   commandId: Id,
-  executionStatus: Type.Union([Type.Literal("EXECUTED"), Type.Literal("NOT_EXECUTED"), Type.Literal("UNKNOWN")]),
-  businessCommitted: Type.Boolean(),
+  commandType: ReceiptCommandTypeSchema,
+  executionStatus: Type.Union([Type.Literal("EXECUTED"), Type.Literal("NOT_EXECUTED"), Type.Literal("UNKNOWN")], {
+    description: "Execution status of this receipt's commandType. EXECUTED for PREVIEW:* means preview creation succeeded, not that the target business operation ran."
+  }),
+  businessCommitted: Type.Boolean({
+    description: "Whether this receipt's commandType committed. For PREVIEW:* true means the preview was saved; no target business change occurred. Report business completion only after the matching confirmed command succeeds and its resource result is verified."
+  }),
   correlationId: Type.String({ minLength: 1, maxLength: 160 }),
   result: Type.Optional(ExecutedCommandResultSchema),
   error: Type.Optional(ErrorResponse),
   resourceRefs: Type.Array(Id),
   factRefs: Type.Array(Id),
-  committedAt: Type.Optional(DateTime)
+  committedAt: Type.Optional(Type.String({ format: "date-time", description: "Commit time of this receipt's commandType; a preview commit time is not the target business operation's completion time." }))
 });
 
 const HistoricalReadOnlyMetadata = {
@@ -2343,8 +2356,9 @@ const PreInHouseMembershipPreviewReceiptMoveResultSchema = strictObject({
 const HistoricalExecutedReceiptBase = {
   receiptId: Id,
   commandId: Id,
+  commandType: ReceiptCommandTypeSchema,
   executionStatus: Type.Literal("EXECUTED"),
-  businessCommitted: Type.Literal(true),
+  businessCommitted: Type.Literal(true, { description: "The historical commandType committed. PREVIEW:* only saved a preview; historical recovery is read-only and does not execute a business operation." }),
   correlationId: Type.String({ minLength: 1, maxLength: 160 }),
   resourceRefs: Type.Array(Id),
   factRefs: Type.Array(Id),

@@ -23,7 +23,7 @@ describe("成组退款HTTP契约", () => {
   it("完整序列化原收款、独立退款和多事实回执，防止响应丢失核对依据", () => {
     expect(Value.Check(CommandEnvelopeSchema, { commandType: "RECORD_REFUND", input })).toBe(true);
     expect(Value.Check(CommandEffectSchema, effect)).toBe(true);
-    const receipt = { receiptId: "receipt_group", commandId: "command_group", executionStatus: "EXECUTED", businessCommitted: true,
+    const receipt = { receiptId: "receipt_group", commandId: "command_group", commandType: "RECORD_REFUND", executionStatus: "EXECUTED", businessCommitted: true,
       correlationId: "group-test", result: { ...effect, sourceFactId: "fact_source", refundFactIds: ["fact_refund"], effectHash: "a".repeat(64) },
       resourceRefs: ["order_cancelled"], factRefs: ["fact_source", "fact_refund"], committedAt: "2026-11-06T01:00:00.000Z" };
     expect(Value.Check(ReceiptSchema, receipt)).toBe(true);

@@ -1,0 +1,99 @@
+# 外部客户端：对话确认与业务命令 API
+
+本页是所有外部客户端共用的接入契约和本次回执身份补充的实施约定。适用于任何智能体、模型或运行时，不要求特定插件；接口以当前服务的 `/api/v1/openapi.json` 为准。
+
+## 目标与边界
+
+员工通过对话表达业务需求，客户端负责查询、预览、正式提交、核实结果并反馈。需要补充信息或人工决定时，在同一对话中完成；协议不要求员工打开 PMS 页面。
+
+- API Key（Token）绑定的身份、门店范围、当前授权与 Token 命令上限共同决定权限。换模型、换运行时或增加功能都不会增加权限；有效 Key 不等于拥有全部命令权限。
+- UI 要求人确认的业务事实和风险内容，在对话中必须保持相同含义。原指令已明确对象、操作及必要事实，且预览效果完全落在授权范围内时，无需机械重复询问。对象歧义、未经授权的金额或日期变化、尚未确认的业务事实，须先用业务语言说明并取得回答；不得猜测或代人同意。
+- `confirmation: true` 是客户端在完成上述核对后提交的协议字段，不是自动获得员工同意的方式。可在现有 `reason.note` 中简述业务理由和确认记录引用；不复制完整聊天、凭据或无关个人信息。该引用不替代服务端权限与业务校验，也不新增授权机制。
+- 本次只补充通用回执身份及说明。保留 Preview/Confirm、锁后复核、事务、幂等、审计和结果恢复，不改计价、库存、资金或业务权限，不新增办理接口、审批页面或客户端专用服务。
+- PMS 内置助手当前仍只有既有查询及打开正式入口的能力；本页不为其增加业务提交工具，不表示任何外部客户端已经接入或通过验收。
+
+## 先辨明回执属于哪一步
+
+持久回执新增 `commandType`，由已存储的命令类型读取，适用于首次响应、幂等重放、回执查询、命令查询和历史回执读取。
+
+| 回执 `commandType` | 结果含义 | 能否报告目标业务完成 |
+| --- | --- | --- |
+| `PREVIEW:CHECK_OUT` 等 `PREVIEW:*` | 预览已经生成，`result.preview` 保存预计效果 | 不能；例如订单仍保持在住 |
+| `CHECK_OUT` 等正式命令 | 正式办理尝试的结果 | 还须核对成功状态、目标对象及权威业务回读 |
+| `CREATE_QUOTE` | 单阶段报价命令的结果 | 只表示报价结果，不表示创建订单或办理入住 |
+
+`executionStatus`、`businessCommitted` 和 `committedAt` 均描述回执所标识的命令。为兼容既有客户端，预览回执保留 `EXECUTED` / `businessCommitted: true`；它表示预览记录已保存，不表示预计效果已经作用于订单。只检查这两个字段不能判断目标业务成功。`UNKNOWN` 表示结果尚未确定，不能报告成功或认定从未执行。
+
+历史记录从其原命令补充类型，不重写旧回执事实或业务数据。客户端类型允许缺少 `commandType`，以读取旧服务器或既有缓存；缺少该字段时，先检查 `result.preview`，任何带该结果的回执都属于预览。正式结果还须结合原请求身份、命令专属结果与业务回读核实，不能仅凭 `EXECUTED` 或 `businessCommitted` 推断。未知或不能判明类型时保持未完成状态。
+
+这是新增响应字段。若客户端严格使用旧 JSON Schema 拒绝额外字段，应同步更新响应 Schema；保持旧字段值不代表旧客户端会自动理解新字段。接入验收需检查完整结果判断，不能只确认请求返回 200。
+
+## 正常退房完整示例
+
+以下均为占位符，不是真实业务记录。先查询目标订单，确定唯一 `orderId`、当前状态、门店营业日及可用操作。提前退房等不同业务意图沿用对应命令及业务规则；不要用普通退房绕过。
+
+请求使用同一有效 Token。预览和正式提交各自生成并保存稳定的幂等键，使用同一关联 ID 串起本次办理；重试同一尝试时保留原键和原请求。
+
+```http
+POST /api/v1/command-previews
+Authorization: Bearer <configured-token>
+Content-Type: application/json
+Idempotency-Key: <checkout-preview-key>
+X-Correlation-ID: <checkout-flow-id>
+```
+
+```json
+{
+  "commandType": "CHECK_OUT",
+  "input": {
+    "propertyId": "<property-id>",
+    "orderId": "<order-id>"
+  }
+}
+```
+
+返回 `preview` 和 `receipt`。此时 `receipt.commandType` 为 `PREVIEW:CHECK_OUT`，订单尚未退房。保留 `previewId`、准确的 `effectHash`、`effect` 和 `expiresAt`，并把预览与正式提交的命令、回执身份分开记录。
+
+核对 `effect` 的对象、状态、日期、金额和其他业务影响。必要的员工确认可在对话中完成；满足既有授权与业务条件后，客户端继续提交：
+
+```http
+POST /api/v1/command-previews/<preview-id>/confirm
+Authorization: Bearer <configured-token>
+Content-Type: application/json
+Idempotency-Key: <checkout-confirm-key>
+X-Correlation-ID: <checkout-flow-id>
+```
+
+```json
+{
+  "propertyId": "<property-id>",
+  "commandType": "CHECK_OUT",
+  "confirmation": true,
+  "expectedEffectHash": "<exact-effectHash-from-preview>",
+  "reason": {
+    "code": "CHECK_OUT",
+    "note": "<真实办理理由；必要时附确认记录引用>"
+  }
+}
+```
+
+成功必须核对正式回执，而非前一步预览回执：
+
+- `commandType = CHECK_OUT`、`executionStatus = EXECUTED`、`businessCommitted = true`。
+- `result.orderId` 与目标一致，`result.status = CHECKED_OUT`，存在对应的 `result.amendmentId`；保存此次正式 `commandId` 和 `receiptId`。
+- `GET /api/v1/orders/<order-id>` 回读同一订单，订单为 `CHECKED_OUT`、Stay 为 `COMPLETED`、`fulfillment.checkOut` 存在，履约记录与本次办理吻合，才向员工报告“已办理退房”。
+
+查询预览的 `commandId` 和 `receiptId` 只会再次取得预览结果。普通退房的 `factRefs` 可以为空，不能把空数组当作未退房的判断依据。正式成功后若业务回读失败或矛盾，应告知“提交结果已取得，业务结果待核实”，继续查询，不重新办理。
+
+## 超时、过期与恢复
+
+1. 正式提交响应丢失时，有正式命令或回执 ID 就读取 `/api/v1/commands/<command-id>` 或 `/api/v1/receipts/<receipt-id>`。没有 ID 时，用原正式 `commandType`、`propertyId` 和原 Confirm 幂等键查询 `/api/v1/command-results`。预览的 ID 和幂等键不能代替正式提交身份。预览响应丢失可用原预览请求同键重放，或查询已知的预览命令/回执 ID；`command-results` 与 `resolve` 不接受 `PREVIEW:*` 类型。
+2. `UNKNOWN` 或查询失败时保持待核实，不换新键再次办理。不确定的尝试按现有 `POST /api/v1/command-results/resolve` 契约恢复；只有获得确定的未执行结果后，才可在原业务授权仍有效的情况下发起新的办理尝试。
+3. 已成功的正式命令用原键、原请求重放时返回原回执，不重复修改业务。`GET` 命令和回执接口均是原回执的读取，不是两份独立业务成功证据。
+4. 预览过期或返回 `PREVIEW_STALE` 时，重新查询并生成预览。以新的 `expiresAt`、`effectHash` 和效果为准，复核原确认是否仍覆盖新效果；有实质变化时在对话中再次确认变化部分。不要把旧哈希或旧确认盲目套到新效果。
+
+## 验证与验收
+
+自动验证应覆盖：预览有成功回执但零目标业务写入；正式确认更新目标业务；预览与正式回执在首次、重放、恢复及历史读取时类型一致；失败和未知结果不能变成成功；既有授权与幂等保护保留。
+
+人工验收按[主验收计划](../../待开发项/QinTopia-PMS-分步开发与人工验收计划.md)记录：明确正常办理、必要澄清后继续、超时按原身份恢复三类对话场景。代码或合成 API 检查通过，不代表任一真实智能体已接入、真实模型已遵守约定或生产已部署。

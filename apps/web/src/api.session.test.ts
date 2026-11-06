@@ -4,6 +4,15 @@ afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 describe("business request session invalidation", () => {
+  it.each(["CHECK_OUT", undefined])("preserves recovery command identity %s without inventing it for older responses", async (commandType) => {
+    const { api } = await import("./api");
+    const receipt = { receiptId: "receipt_test", commandId: "command_test",
+      ...(commandType ? { commandType } : {}), executionStatus: "EXECUTED", businessCommitted: true,
+      correlationId: "test", result: { orderId: "order_test", status: "CHECKED_OUT" }, resourceRefs: ["order_test"], factRefs: [] };
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(json(receipt))));
+    expect(await api.commandResult("p", "CHECK_OUT", "original-confirm-key")).toEqual(receipt);
+    expect(await api.resolveCommandResult("p", "CHECK_OUT", "original-confirm-key")).toEqual(receipt);
+  });
   it("notifies once on 401 even with malformed JSON and stops further business requests", async () => {
     const { api, onSessionExpired } = await import("./api");
     const fetch = vi.fn().mockResolvedValue(new Response("broken", { status: 401, headers: { "Content-Type": "application/json" } }));
