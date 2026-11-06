@@ -2906,12 +2906,12 @@ export function roomStatusActionPresentationBlock(input: {
   if (input.refreshFailed) {
     return {
       kind: "REFRESH",
-      reason: "房态刷新失败，当前仍显示上次成功结果。刷新成功前不能发起补录或其他写入。",
+      reason: "房态刷新失败，当前仍显示上次成功结果。请重试刷新，刷新成功后再办理。",
       actionLabel: "重试刷新"
     };
   }
   if (input.accessLevel !== "WRITE") {
-    return { kind: "PERMISSION", reason: "当前账号只有查看权限，不能补录住宿或执行其他写入。" };
+    return { kind: "PERMISSION", reason: "当前账号只有查看权限，不能办理住宿。请联系管理员开通相应操作权限。" };
   }
   if (input.projectionIncomplete) {
     return {
@@ -2924,23 +2924,23 @@ export function roomStatusActionPresentationBlock(input: {
     return {
       kind: "REFRESH",
       reason: input.projectionExpired
-        ? "正在更新房态，更新完成前暂不能写入。"
+        ? "正在更新房态，暂时无法办理。请等待更新完成后再试。"
         : input.projectionReady
-          ? "正在更新房态，更新完成前暂不能写入。"
+          ? "正在更新房态，暂时无法办理。请等待更新完成后再试。"
           : "房态数据尚未完整载入。请刷新房态；载入完成前不能补录或进行其他操作。",
     };
   }
   if (!input.recoveryReady || input.recoveryError) {
     return {
       kind: "RECOVERY",
-      reason: "命令恢复记录暂不可用。确认原操作结果前不能发起新的补录或其他写入。",
+      reason: "上次操作记录暂时无法读取，暂不能开始新操作。请刷新页面后重试。",
       ...(input.hasRecoveryEntry ? { actionLabel: input.recoveryActionLabel ?? "处理恢复记录" } : {})
     };
   }
   if (input.recoveryBlocked) {
     return {
       kind: "RECOVERY",
-      reason: "上一笔操作结果尚未收口。请先查询原操作结果；处理完成前不能发起新的补录。",
+      reason: "上一笔操作结果尚未确认。请先查询原操作结果，处理完成后再开始新操作。",
       ...(input.hasRecoveryEntry ? { actionLabel: input.recoveryActionLabel ?? "查询原操作结果" } : {})
     };
   }
@@ -3844,11 +3844,9 @@ export function InventoryPage() {
             roomPageIndex: response.page.index
           }, restored.factFingerprint);
           dispatchView({ type: "RESTORE", state: resolution.state });
-          if (resolution.outcome === "FACT_CHANGED") {
-            setReturnNotice(restored.revision === response.revision
-              ? "已重新校验返回位置。原选区的可售、状态、来源、冲突或允许动作已经变化；已保留选区供核对并将焦点移至选区起点。旧 Preview 不会继续使用。"
-              : "房态数据已变化，且原选区的可售、状态、来源、冲突或允许动作已经变化；已保留选区供核对并将焦点移至选区起点。旧核对结果不会继续使用。");
-          } else if (resolution.outcome === "FALLBACK") {
+          // Browsing restoration needs no user action, even when facts changed.
+          // Keep reconciliation above and report actual operation blockers at their entry points.
+          if (resolution.outcome === "FALLBACK") {
             setReturnNotice("当前筛选或日期范围已变化，已切换为当前可用的房态内容。");
           } else if (resolution.outcome === "EMPTY") {
             setReturnNotice("上次查看的位置已失效，已回到当前可用的房态内容。");
@@ -5481,7 +5479,7 @@ export function InventoryPage() {
       return false;
     }
     if (commandsBlocked) {
-      setActionError(new Error("当前房态已陈旧、正在刷新、权限已收窄或命令恢复尚未收口；命令未发送，表单草稿保持不变。"));
+      setActionError(new Error(`${actionPresentationBlock?.reason ?? "上一笔操作尚未完成。请先查询原操作结果，处理完成后再试。"}填写内容已保留。`));
       return false;
     }
     const attemptId = commandAttemptGuard.begin();
@@ -5519,7 +5517,7 @@ export function InventoryPage() {
       return false;
     }
     if (commandsBlocked && !activeQuoteIntentSwitch) {
-      setActionError(new Error("当前房态不再满足安全写入条件。未发送命令，请刷新后重新核对选区。"));
+      setActionError(new Error(actionPresentationBlock?.reason ?? "上一笔操作尚未完成。请先查询原操作结果，处理完成后再试。"));
       return false;
     }
     const selection = selectionOverride ?? viewState.selection;
