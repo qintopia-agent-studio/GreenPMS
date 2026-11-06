@@ -121,19 +121,21 @@ export function projectPaymentReconciliation(snapshot: ReconciliationSnapshot): 
     const verified = bill.state === 'SUCCESS' && bill.amountMinor !== null && bill.amountMinor > 0 && !bill.needsReview && !duplicate;
     const external = bill.amountMinor === null ? null : BigInt(bill.amountMinor);
     const issues: PaymentReconciliationItem['issues'] = [];
-    if (!verified) issues.push(issue('UNVERIFIED', bill.state === 'PENDING' ? '退款仍在处理中，尚不能核实成功' : '流水状态、金额或来源尚未核实，不能认定已对平'));
-    if (bill.needsReview || duplicate) issues.push(issue('SOURCE_REVIEW', '原始来源有变更或同号来源不唯一，请核对凭据'));
-    if (external !== null && business > external || external !== null && allocated > external) issues.push(issue('OVERCLAIMED', '登记或来源占用超过外部流水金额'));
-    if (verified && external !== null && business < external) issues.push(issue('UNASSIGNED', bill.kind === 'REFUND' ? '外部已成功退款，仍有金额未完成业务登记' : '外部已成功收款，仍有金额未完成业务登记'));
-    if (allocated !== business) issues.push(issue('BUSINESS_MISMATCH', '来源占用与有效业务登记不一致，需核对冲销或归属记录'));
-    if (linked.some(fact => fact.currency !== 'CNY')) issues.push(issue('SOURCE_REVIEW', '业务币种与企微来源不一致，金额不能混合核对'));
+    if (!verified) issues.push(issue('UNVERIFIED', bill.state === 'PENDING'
+      ? `这笔${bill.kind === 'REFUND' ? '退款' : '收款'}还没确认成功，请先到企微查看。`
+      : `这笔${bill.kind === 'REFUND' ? '退款' : '收款'}的结果或金额还不确定，请先到企微查看。`));
+    if (bill.needsReview || duplicate) issues.push(issue('SOURCE_REVIEW', '企微记录有变化，或同一单号出现了多次，请查看原始收退款凭据。'));
+    if (external !== null && business > external || external !== null && allocated > external) issues.push(issue('OVERCLAIMED', '订单使用这笔钱的金额超过了企微金额，请查看相关订单。'));
+    if (verified && external !== null && business < external) issues.push(issue('UNASSIGNED', bill.kind === 'REFUND' ? '企微已经退款，订单里还没记全这笔退款。' : '企微已经收款，订单里还没记全这笔收款。'));
+    if (allocated !== business) issues.push(issue('BUSINESS_MISMATCH', '这笔钱对应的订单记录对不上，请查看相关订单。'));
+    if (linked.some(fact => fact.currency !== 'CNY')) issues.push(issue('SOURCE_REVIEW', '订单记录的币种与企微不同，请先核对币种和金额。'));
     if (bill.kind === 'REFUND') {
       const parents = collectionsBySource.get(sourceKey(bill.sourceId, bill.merchantId, bill.originalReference)) ?? [];
       const parentIds = new Set(parents.map(parent => parent.id));
-      if (parents.length !== 1) issues.push(issue('MISSING_ORIGINAL', '尚无唯一可核对的原收款流水'));
+      if (parents.length !== 1) issues.push(issue('MISSING_ORIGINAL', '无法确定这笔退款退的是哪笔收款，请核对原收款单号。'));
       if (linked.some(fact => fact.originalBillId ? !parentIds.has(fact.originalBillId)
         : !fact.originalReference || fact.originalReference !== bill.originalReference)) {
-        issues.push(issue('SOURCE_REVIEW', '退款业务的原收款与外部退款来源不一致'));
+        issues.push(issue('SOURCE_REVIEW', '订单和企微记录的原收款不是同一笔，请核对这笔退款。'));
       }
     }
     // A reversed entry may still occupy its source. Preserve that known order
@@ -156,7 +158,7 @@ export function projectPaymentReconciliation(snapshot: ReconciliationSnapshot): 
       reference: fact.reference, originalTransactionReference: fact.originalReference, nickname: null, currency: fact.currency,
       amountMinor: null, allocatedMinor: '0', businessMinor: String(fact.amountMinor), unassignedMinor: null, excessMinor: '0',
       occurredAt: fact.createdAt, discoveredAt: null, issues: [issue(ambiguous ? 'SOURCE_REVIEW' : 'BUSINESS_WITHOUT_BILL',
-        ambiguous ? '业务单号对应多笔外部来源，不能自动认定归属' : '已有业务登记，但没有可核对的企微流水')] });
+        ambiguous ? '订单里的单号对应了多笔企微记录，还不能确定是哪一笔。' : '订单里记了这笔钱，但没找到对应的企微收退款记录。')] });
   }
   return items.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }

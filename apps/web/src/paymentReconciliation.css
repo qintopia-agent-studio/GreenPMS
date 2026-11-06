@@ -1,5 +1,10 @@
 .payment-reconciliation-queue { display: grid; gap: 14px; border-bottom: 1px solid var(--border, #d5dfd9); padding-bottom: 22px; margin-bottom: 18px; }
 .payment-reconciliation-queue h3, .payment-reconciliation-queue h4 { margin: 0; }
+.payment-reconciliation-queue > .filter-select-control { margin: 0 14px; max-width: 260px; }
+.payment-reconciliation-summary { margin: 0 14px; }
+.payment-reconciliation-summary > summary { padding: 10px 0; cursor: pointer; color: var(--accent); font-weight: 600; }
+.payment-reconciliation-notice { margin: 0 14px; line-height: 1.7; }
+.payment-reconciliation-notice[role="status"] { padding: 12px; border-left: 3px solid var(--warning); background: var(--surface-muted); }
 .payment-reconciliation-totals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .payment-reconciliation-total { border: 1px solid #d5dfd9; border-radius: 8px; padding: 14px; background: #f9fbf9; }
 .payment-reconciliation-total dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; margin: 10px 0 0; }

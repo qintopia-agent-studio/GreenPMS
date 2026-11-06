@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-06.1";
+export const assistantKnowledgeRevision = "2026-11-06.2";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -72,12 +72,13 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
 助手订单搜索最多返回20条且可能还有下一页，不能据此给出全店总数。`
   },
   {
-    id: "workbench-exceptions", title: "工作台异常原因与处理范围", commands: [],
+    id: "workbench-exceptions", title: "工作台异常", commands: [],
     sources: ["docs/implementation/spec-workbench-actionable-exceptions.md", "docs/operations/workbench-exceptions-api.md", "packages/contracts/src/workbench.ts", "apps/web/src/pages/TodayPage.tsx"],
-    content: `工作台异常为具体未完成事项。正常取消/已标记未到不因状态或原住期纳入；超过到店日仍预订才算逾期未到，超过离店日仍在住才算逾期未退，当天待离店不算逾期。
-应收不足为欠款，多款待处理；取消/未到/撤销入住多款未退为应退未退。已确认登记的有效剩余留存除外；取消净收600元、剩余留存200元，应退400元，已用/已退/已解除不再抵扣。负净额或留存超额待核对；免费与会员权益抵扣不当现金欠款。
-渠道按应结及成交/更正/退款净额核对，普通收款为0不等于欠款；全额退款净额为0不报渠道退款异常，普通资金遗留或资料缺失待核对；PMS登记不证明平台实际到账。
-终态库存/预留权益未释放、状态不一致需核对。资金和资料异常跨日期持续；同单多原因只计1笔，原因金额不相加。查看订单沿现有流程办理。页面与外部API同源，需门店READ；总数不是当前页条数，失败/未加载不等于零。内置助手没有异常实时查询工具，外部客房智能体接入另行验证。`
+    content: `工作台→异常分“业务异常”（默认）和“财务异常”。业务看逾期未办入住/退房、结束后仍占房/会员天数、订单与住宿状态不一致；财务看订单款项及企微收退款漏记/金额不符。尚无完整夜审。
+异常为具体未完成事项，正常取消/已标记未到不因状态或原住期纳入。超过到店日仍预订、超过离店日仍在住才算逾期，当天待离店不算逾期。
+应收不足为欠款；取消/未到/撤销入住多款未退为应退未退，已登记有效剩余留存除外：净收600元、剩余留存200元，应退400元，已用/已退/已解除不再抵扣。其他多款、负净额或留存超额待核对，免费/会员抵扣不当现金欠款。
+渠道核对应结与成交/更正/退款净额，普通收款为0不等于欠款；全退净额0不报退款异常。普通资金遗留/资料缺失待核对，PMS登记不证明平台实际到账。
+资金和资料异常跨日期持续。同单可出现在两类，各列本类问题、每类只计1笔；两类不能相加当总订单数，原因金额不相加。页面与外部API同源，需门店READ；总数不是当前页条数，失败/未加载不等于零。助手没有异常实时查询工具，外部另验。`
   },
   {
     id: "check-in-out", title: "入住、退房与住宿结束", commands: ["CHECK_IN", "CHECK_OUT", "COMPLETE_STAY"],
@@ -118,10 +119,10 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
 例：收1000元，A订单分400元，B订单选择同一流水分600元；三个或更多订单同理，合计不超余额。示例不是实时余额。现金、银行按实际方式和凭据登记，不套用企微拆分；付款昵称、相同金额仅是线索，不证明款项归属。`
   },
   {
-    id: "refund-reconciliation", title: "收退款漏记补齐与持续核对", commands: [],
+    id: "refund-reconciliation", title: "收退款补记", commands: [],
     sources: ["docs/implementation/spec-refund-business-reconciliation.md", "apps/web/src/components/OrderFundsFormDialog.tsx", "packages/db/src/wecom-refund-reconciliation.ts"],
-    content: `原收退款都漏记：在原订单退款表单一起补齐真实收退款，需收款和退款两项权限及分配、流水来源启用。取消、未到、撤销入住、退房也可办理，不恢复订单、不改变住宿、计价或库存。优先已有可退原款补退款；另有漏记份额才补原款，按本单份额确认。收1000退1000保留两笔。
-工作台异常跨日期保留未处理项，收款与退款分别逐笔对平；净额相等不代表已对平。流水与业务缺失或金额矛盾须核对。同步延迟不能解释为无异常；只读核对不自动登记或发起退款。`
+    content: `跨日期保留未处理项。收款与退款分别逐笔对平，净额相等不代表已对平；同步延迟不能解释为无异常，只读核对不自动登记或发起退款。
+原收退款都漏记：原订单退款表单一起补齐真实收退款，需收款和退款两项权限及分配、流水来源启用。取消/未到/撤销入住/退房也可办理，不恢复订单、不改变住宿、计价或库存。优先已有可退原款补退款；另有漏记份额才补原款，按本单份额确认。收1000退1000保留两笔。`
   },
   {
     id: "refunds", title: "部分退款、合并退款与真实退款登记", commands: ["RECORD_REFUND"],

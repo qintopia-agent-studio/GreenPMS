@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, ChevronRight, DoorOpen, LogIn, LogOut, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
-import type { CommandType } from "@qintopia/contracts";
+import type { CommandType, WorkbenchExceptionGroup } from "@qintopia/contracts";
 import { api } from "../api";
 import { commandRecoveryAvailable, principalCan, useWorkspace } from "../session";
 import type { CommandCapability, CommandRequest, OrderRowDto } from "../types";
@@ -82,12 +82,13 @@ export function TodayPage() {
   const dateEdited = useRef(false);
   const previousPropertyId = useRef(propertyId);
   const [tab, setTab] = useState<TodayTab>("ARRIVALS");
+  const [exceptionGroup, setExceptionGroup] = useState<WorkbenchExceptionGroup>("BUSINESS");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>();
   const [recoveryError, setRecoveryError] = useState<unknown>();
   const [refreshToken, setRefreshToken] = useState(0);
-  const exceptions = useWorkbenchExceptions(propertyId, refreshToken);
-  const paymentReconciliation = usePaymentReconciliation(propertyId, refreshToken, tab === "EXCEPTIONS");
+  const exceptions = useWorkbenchExceptions(propertyId, refreshToken, exceptionGroup);
+  const paymentReconciliation = usePaymentReconciliation(propertyId, refreshToken, tab === "EXCEPTIONS" && exceptionGroup === "FINANCIAL");
   const [command, setCommand] = useState<CommandRequest>();
   const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
   const [commandNotice, setCommandNotice] = useState<string>();
@@ -96,6 +97,7 @@ export function TodayPage() {
   useEffect(() => {
     if (previousPropertyId.current === propertyId) return;
     previousPropertyId.current = propertyId;
+    setExceptionGroup("BUSINESS");
     setCommand(undefined);
     setRecoveryDialogOpen(false);
     setRecoveryError(undefined);
@@ -185,12 +187,19 @@ export function TodayPage() {
       {commandRecovery.pending && recoveryPendingAllowed ? <CommandRecoveryBar recovery={commandRecovery.pending} onOpen={openRecoveryDialog} testId="today-command-recovery" /> : null}
       {commandRecovery.pending && !recoveryPendingAllowed ? <section className="recovery-bar" role="status" data-testid="today-command-recovery-forbidden"><div><strong>原操作当前无权继续</strong><p>当前账号已没有该命令授权，恢复入口已隐藏；只读查看不受影响。</p></div></section> : null}
       <div className="today-tabs" role="tablist" aria-label="工作台分类">
-          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span><strong>{item.id === "EXCEPTIONS" ? exceptions.state.loading || exceptions.state.error || paymentReconciliation.state.loading || paymentReconciliation.state.error ? "—" : `${exceptions.state.data?.totalOrders ?? 0} 单 · ${paymentReconciliation.state.data?.totalItems ?? 0} 笔` : loading || error ? "—" : buckets[item.id].length}</strong></button>)}
+          {tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} aria-controls="today-tabpanel" id={`tab-${item.id}`} onClick={() => setTab(item.id)}><span>{item.label}</span>{item.id !== "EXCEPTIONS" ? <strong>{loading || error ? "—" : buckets[item.id].length}</strong> : null}</button>)}
       </div>
       {tab !== "EXCEPTIONS" ? <InlineError context="read" error={error} title="无法载入工作台" /> : null}
       {tab !== "EXCEPTIONS" && error ? <button className="button button-secondary" type="button" onClick={() => setRefreshToken((value) => value + 1)}>重新载入工作台</button> : null}
       <section id="today-tabpanel" className="today-queue" role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex={0}>
-        {tab === "EXCEPTIONS" ? <><PaymentReconciliationQueue {...paymentReconciliation} /><WorkbenchExceptionsQueue {...exceptions} /></> : loading ? <LoadingBlock label="正在载入待办事项" /> : error ? null : visible.length === 0 ? <EmptyState title="当前队列为空" detail="该营业日期没有匹配的订单。" /> : visible.map((order) => (
+        {tab === "EXCEPTIONS" ? <>
+          <div className="exception-group-switch" role="group" aria-label="异常分类">
+            <button type="button" aria-pressed={exceptionGroup === "BUSINESS"} onClick={() => setExceptionGroup("BUSINESS")}>业务异常</button>
+            <button type="button" aria-pressed={exceptionGroup === "FINANCIAL"} onClick={() => setExceptionGroup("FINANCIAL")}>财务异常</button>
+          </div>
+          <WorkbenchExceptionsQueue {...exceptions} group={exceptionGroup} />
+          {exceptionGroup === "FINANCIAL" ? <PaymentReconciliationQueue {...paymentReconciliation} /> : null}
+        </> : loading ? <LoadingBlock label="正在载入待办事项" /> : error ? null : visible.length === 0 ? <EmptyState title="当前队列为空" detail="该营业日期没有匹配的订单。" /> : visible.map((order) => (
           <article className="queue-row" key={order.id}>
             <div className="queue-icon" aria-hidden="true">{tab === "DEPARTURES" ? <LogOut size={19} /> : tab === "ARRIVALS" ? <LogIn size={19} /> : <DoorOpen size={19} />}</div>
             <div className="queue-primary">

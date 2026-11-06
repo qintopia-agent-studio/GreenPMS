@@ -10,6 +10,7 @@ import { DateTime, ErrorResponse, Id, LocalDate, Money } from './schemas.ts';
 const nullable = (schema: TSchema) => Type.Union([schema, Type.Null()]);
 export const WorkbenchExceptionsQuerySchema = Type.Object({
   propertyId: Id,
+  group: Type.Optional(Type.Union([Type.Literal('BUSINESS'), Type.Literal('FINANCIAL')])),
   afterId: Type.Optional(Id),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 }))
 }, { additionalProperties: false });

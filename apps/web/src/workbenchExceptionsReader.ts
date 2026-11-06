@@ -1,4 +1,4 @@
-import type { WorkbenchExceptionsQuery, WorkbenchExceptionsResponse } from "@qintopia/contracts";
+import type { WorkbenchExceptionGroup, WorkbenchExceptionsQuery, WorkbenchExceptionsResponse } from "@qintopia/contracts";
 
 export type ReadWorkbenchExceptions = (query: WorkbenchExceptionsQuery, signal?: AbortSignal) => Promise<WorkbenchExceptionsResponse>;
 export interface WorkbenchExceptionsState {
@@ -9,7 +9,7 @@ export interface WorkbenchExceptionsState {
 }
 
 /** A single visible page: obsolete reads can never replace a newer refresh or scope. */
-export function createWorkbenchExceptionsReader(propertyId: string, read: ReadWorkbenchExceptions, timeoutMs = 12_000) {
+export function createWorkbenchExceptionsReader(propertyId: string, read: ReadWorkbenchExceptions, timeoutMs = 12_000, group?: WorkbenchExceptionGroup) {
   let state: WorkbenchExceptionsState = { loading: true, page: 1 };
   const listeners = new Set<() => void>();
   let generation = 0;
@@ -41,7 +41,7 @@ export function createWorkbenchExceptionsReader(propertyId: string, read: ReadWo
       publish({ loading: false, page, error });
     }, timeoutMs);
     try {
-      const data = await read({ propertyId, ...(afterId ? { afterId } : {}), limit: 50 }, signal);
+      const data = await read({ propertyId, ...(group ? { group } : {}), ...(afterId ? { afterId } : {}), limit: 50 }, signal);
       if (generation !== requestGeneration || signal.aborted) return;
       if (data.propertyId !== propertyId) throw new Error("异常事项门店不匹配，请刷新重试");
       // Never combine the next page with yesterday's traversal after crossing midnight.

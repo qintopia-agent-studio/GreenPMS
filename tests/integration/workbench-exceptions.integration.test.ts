@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { sql, type Kysely } from 'kysely';
-import type { AuthPrincipal, CommandEnvelope } from '@qintopia/contracts';
+import { workbenchExceptionGroupFor, type AuthPrincipal, type CommandEnvelope, type WorkbenchExceptionGroup } from '@qintopia/contracts';
 import { createCommandPreview, confirmCommandPreview, createDatabase, listOrders, withPropertyClockForTesting, type Database } from '@qintopia/db';
 import { getWorkbenchExceptions } from '../../packages/db/src/workbench-exceptions.ts';
 import { createQuoteForTesting } from '../../packages/db/src/pricing-service.ts';
@@ -146,11 +146,47 @@ describe('workbench exceptions property-wide read model', () => {
       VALUES(${demo.propertyId},'CHANNEL_REFUND',${id},10000,'CNY','合成已发生退款承接')`.execute(db);
     expect(await item(id)).toBeUndefined();
   });
+  it('keeps mixed orders in both groups with only the relevant reasons across all pages', async () => {
+    const mixed = await order(), businessOnly = await order(0, 'WECOM', true), financialOnly = await order();
+    await collect(financialOnly);
+    await cancel(financialOnly);
+    const before = await db.selectFrom('orders').select(['id', 'version', 'status']).orderBy('id').execute();
+    await withPropertyClockForTesting(new Date('2029-01-10T02:00:00Z'), async () => {
+      const all = await read();
+      expect(all.items.find(row => row.orderId === mixed)?.reasons.map(reason => reason.code)).toEqual(['OVERDUE_ARRIVAL', 'BALANCE_DUE']);
+      expect(all.items.find(row => row.orderId === businessOnly)?.reasons.map(reason => reason.code)).toEqual(['OVERDUE_ARRIVAL']);
+      expect(all.items.find(row => row.orderId === financialOnly)?.reasons.map(reason => reason.code)).toEqual(['REFUND_DUE']);
+      for (const group of ['BUSINESS', 'FINANCIAL'] as const) {
+        const expected = all.items.map(row => ({ ...row, reasons: row.reasons.filter(reason => workbenchExceptionGroupFor(reason.code) === group) }))
+          .filter(row => row.reasons.length > 0);
+        const rows = [];
+        let afterId: string | undefined;
+        do {
+          const page = await getWorkbenchExceptions(runtime, { propertyId: demo.propertyId, group, limit: 1, ...(afterId ? { afterId } : {}) });
+          expect(page.totalOrders).toBe(expected.length);
+          expect(page.items).toHaveLength(1);
+          rows.push(...page.items);
+          afterId = page.nextCursor ?? undefined;
+        } while (afterId);
+        expect(rows).toEqual(expected);
+        expect(new Set(rows.map(row => row.orderId)).size).toBe(rows.length);
+        expect(rows.find(row => row.orderId === mixed)?.reasons.map(reason => reason.code)).toEqual([group === 'BUSINESS' ? 'OVERDUE_ARRIVAL' : 'BALANCE_DUE']);
+        expect(rows.map(row => row.orderId)).toContain(group === 'BUSINESS' ? businessOnly : financialOnly);
+        expect(rows.map(row => row.orderId)).not.toContain(group === 'BUSINESS' ? financialOnly : businessOnly);
+      }
+    });
+    expect(await db.selectFrom('orders').select(['id', 'version', 'status']).orderBy('id').execute()).toEqual(before);
+  });
   it('scopes queries and validates limits without returning another property or hiding failures', async () => {
     const other = 'property_workbench_other';
     await db.insertInto('properties').values({ id: other, code: 'WB-OTHER', name: '合成其他门店', timezone: 'Asia/Shanghai', currency: 'CNY' }).execute();
     expect(await getWorkbenchExceptions(runtime, { propertyId: other })).toMatchObject({ propertyId: other, totalOrders: 0, items: [], nextCursor: null });
     await expect(getWorkbenchExceptions(runtime, { propertyId: 'property_missing' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await expect(getWorkbenchExceptions(runtime, { propertyId: demo.propertyId, limit: 101 })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    await expect(getWorkbenchExceptions(runtime, { propertyId: demo.propertyId, group: 'SYSTEM' as WorkbenchExceptionGroup })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    for (const group of ['BUSINESS', 'FINANCIAL'] as const) {
+      expect(await getWorkbenchExceptions(runtime, { propertyId: other, group })).toMatchObject({ propertyId: other, totalOrders: 0, items: [], nextCursor: null });
+      await expect(getWorkbenchExceptions(runtime, { propertyId: 'property_missing', group })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    }
   });
 });
