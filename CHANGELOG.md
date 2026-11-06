@@ -2,6 +2,23 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.19.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.18.2...v1.19.0) (2026-11-06)
+
+
+### Features
+
+* **payments:** unify refund matching and persistent reconciliation ([#138](https://github.com/qintopia-agent-studio/GreenPMS/issues/138)) ([e021870](https://github.com/qintopia-agent-studio/GreenPMS/commit/e021870fbdde6a8afc0660bfc68049bb9927eba7))
+
+
+### Bug Fixes
+
+* **assistant:** 准确识别上游错误并自动恢复回答 ([#137](https://github.com/qintopia-agent-studio/GreenPMS/issues/137)) ([1b93a60](https://github.com/qintopia-agent-studio/GreenPMS/commit/1b93a60c4b1845d5f083bcd05e5e4c7c1284eefe))
+
+
+### Documentation
+
+* **workflow:** 明确 PR 关联与合并后主动同步 ([#135](https://github.com/qintopia-agent-studio/GreenPMS/issues/135)) ([dd396ba](https://github.com/qintopia-agent-studio/GreenPMS/commit/dd396ba4edc7e2b37fe924586547d19757eadd20))
+
 ## [1.18.2](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.18.1...v1.18.2) (2026-11-05)
 
 
