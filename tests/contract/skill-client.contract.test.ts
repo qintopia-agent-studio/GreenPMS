@@ -191,4 +191,88 @@ describe("installed Skill client against the public HTTPS API", () => {
     expect((await cli(confirmArgs("checkout", "CHECK_OUT"))).receipt).toEqual(recovered.receipt);
     expect(posts()).toBe(checkoutPosts);
   }, 120_000);
+
+  it("binds completed-stay confirmation to the preview and records the original stay once without inventing payment", async () => {
+    const arrivalDate = shiftDate(businessDate, -5), departureDate = shiftDate(businessDate, -3);
+    apiClock = new Date(`${arrivalDate}T04:00:00Z`);
+    const quote = await cli(["quote", "--input", JSON.stringify({ inventoryUnitId: demo.roomId,
+      stayType: "TRANSIENT", arrivalDate, departureDate, pricingPolicyVersionId: demo.publicPricingPolicyId }),
+    "--state", stateFile("completed-stay-quote")]);
+    const contractAmount = quote.quote.currentContractAmount;
+    expect(contractAmount.minorUnits).toBeGreaterThan(0);
+    await prepare("CREATE_ORDER", { quoteId: quote.quote.quoteId,
+      primaryGuest: { fullName: "Synthetic Completed Stay Guest", nickname: "completed-stay-contract" },
+      bookingChannelCode: "WECOM" }, "completed-stay-booking");
+    const booked = await cli(confirmArgs("completed-stay-booking", "CREATE_STANDARD_ORDER", ""));
+    const orderId = booked.receipt.result.orderId as string;
+    apiClock = new Date(`${businessDate}T04:00:00Z`);
+    const before = await readOrder(orderId);
+    const segmentIds = before.segments.map((segment: { id: string }) => segment.id) as string[];
+    const claims = () => db.selectFrom("inventory_claims")
+      .select(["id", "service_date", "active", "released_at"])
+      .where("source_type", "=", "ORDER_SEGMENT").where("source_id", "in", segmentIds)
+      .orderBy("service_date").orderBy("id").execute();
+    const claimsBefore = await claims();
+    expect(before).toMatchObject({ order: { status: "RESERVED", arrival_date: arrivalDate, departure_date: departureDate },
+      stay: { status: "PLANNED" }, fulfillment: { checkIn: null, checkOut: null }, collectionFacts: [],
+      amounts: { currentContractAmount: contractAmount, netRecordedCollection: { minorUnits: 0 },
+        collectionDifference: contractAmount, refundReferenceAmount: { minorUnits: 0 } } });
+    expect(claimsBefore.map(claim => claim.service_date)).toEqual([arrivalDate, shiftDate(arrivalDate, 1)]);
+    expect(claimsBefore.every(claim => claim.active && claim.released_at === null)).toBe(true);
+
+    // These are explicitly confirmed facts for this synthetic fixture, never inferred from an overdue status.
+    const reasonNote = "合成验收：工作人员确认客人实际入住并已离店，系统漏录入住与退房；未收款。";
+    const prepared = await prepare("COMPLETE_STAY", { orderId, actualStayCompletedConfirmed: true, reasonNote }, "completed-stay");
+    expect(prepared).toMatchObject({ phase: "PREPARED", previewReceipt: { commandType: "PREVIEW:COMPLETE_STAY" },
+      preview: { effect: { operation: "COMPLETE_STAY", orderId, reasonNote, settlementStatus: "ARREARS",
+        inventoryRelease: { claimCount: 2 },
+        checkIn: { effectiveDate: arrivalDate, recordingMode: "LATE_RECORDED" },
+        checkOut: { effectiveDate: departureDate, recordingMode: "LATE_RECORDED" } } } });
+    expect(await readOrder(orderId)).toEqual(before);
+    expect(await claims()).toEqual(claimsBefore);
+    const preparedState = await readFile(stateFile("completed-stay"), "utf8");
+    const requestCount = requests.length;
+    const mismatched = await cli(confirmArgs("completed-stay", "COMPLETE_STAY", "改写说明不能替换已锁定的事实。"), 2);
+    expect(mismatched).toMatchObject({ ok: false, error: { code: "LOCKED_REASON_MISMATCH" } });
+    expect(requests).toHaveLength(requestCount);
+    expect(await readFile(stateFile("completed-stay"), "utf8")).toBe(preparedState);
+    expect(await readOrder(orderId)).toEqual(before);
+    expect(await claims()).toEqual(claimsBefore);
+
+    const commitArgs = ["commit", "--state", stateFile("completed-stay"), "--confirmed",
+      "--readback", "/api/v1/orders/{result.orderId}"];
+    const beforeCommitPosts = posts();
+    const completed = await cli(commitArgs);
+    expect(posts()).toBe(beforeCommitPosts + 1);
+    expect(completed).toMatchObject({ phase: "COMMITTED", businessVerified: false,
+      receipt: { commandType: "COMPLETE_STAY", executionStatus: "EXECUTED", businessCommitted: true,
+        result: { orderId, status: "CHECKED_OUT", settlementStatus: "ARREARS", collectionFactId: null } },
+      readback: { ok: true, data: { order: { id: orderId, status: "CHECKED_OUT" }, stay: { status: "COMPLETED" } } } });
+    const after = completed.readback.data;
+    expect(after.amounts).toEqual(before.amounts);
+    expect(after.pricingRevisions).toEqual(before.pricingRevisions);
+    expect(after.segments).toEqual(before.segments);
+    expect(after.collectionFacts).toEqual([]);
+    for (const [type, effectiveDate, projection] of [
+      ["CHECK_IN", arrivalDate, after.fulfillment.checkIn], ["CHECK_OUT", departureDate, after.fulfillment.checkOut]
+    ] as const) {
+      const facts = after.amendments.filter((item: { amendment_type: string }) => item.amendment_type === type);
+      expect(facts).toHaveLength(1);
+      expect(facts[0]).toMatchObject({ reason_code: "COMPLETE_STAY", reason_note: reasonNote,
+        command_id: completed.receipt.commandId });
+      expect(projection).toMatchObject({ plannedBusinessDate: effectiveDate, recordedBusinessDate: businessDate,
+        recordingMode: "LATE_RECORDED", reason: { code: "COMPLETE_STAY", note: reasonNote } });
+    }
+    const claimsAfter = await claims();
+    expect(claimsAfter.map(claim => claim.id)).toEqual(claimsBefore.map(claim => claim.id));
+    expect(claimsAfter.every(claim => !claim.active && claim.released_at !== null)).toBe(true);
+    expect([...completed.receipt.result.releasedClaimIds].sort()).toEqual(claimsBefore.map(claim => claim.id).sort());
+    const confirmedState = JSON.parse(await readFile(stateFile("completed-stay"), "utf8"));
+    expect(confirmedState.confirmation.reason).toEqual({ code: "COMPLETE_STAY", note: reasonNote });
+    expect(confirmedState.confirmKey).toBe(JSON.parse(preparedState).confirmKey);
+    expect((await cli(commitArgs)).receipt).toEqual(completed.receipt);
+    expect(posts()).toBe(beforeCommitPosts + 1);
+    expect((await readOrder(orderId)).amendments).toEqual(after.amendments);
+    expect(await claims()).toEqual(claimsAfter);
+  }, 120_000);
 });
