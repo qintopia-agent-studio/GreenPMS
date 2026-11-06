@@ -2,6 +2,15 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.19.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.19.0...v1.19.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **api:** 区分预览回执与正式业务结果 ([#142](https://github.com/qintopia-agent-studio/GreenPMS/issues/142)) ([430b119](https://github.com/qintopia-agent-studio/GreenPMS/commit/430b119c920e635dca6ca307ebead86405a615ce))
+* **room-status:** 取消进入页面时的选区变化提示 ([#139](https://github.com/qintopia-agent-studio/GreenPMS/issues/139)) ([1e755f1](https://github.com/qintopia-agent-studio/GreenPMS/commit/1e755f1c480ac2e45b150e4b2b4af6e9223dbf54))
+* **workbench:** 按业务和财务分类异常并统一标签计数 ([#140](https://github.com/qintopia-agent-studio/GreenPMS/issues/140)) ([9c9b95e](https://github.com/qintopia-agent-studio/GreenPMS/commit/9c9b95ef3e24bae85fdb2b1bc764c6fb035eb35b))
+
 ## [1.19.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.18.2...v1.19.0) (2026-11-06)
 
 
