@@ -1,5 +1,6 @@
 import { isExternalBookingChannel } from "./channel-amount";
-import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { isRefundReconciliationInput, isValidRefundReconciliationInput, refundReconciliationPreviewHasEvidence, refundReconciliationReceiptHasEvidence, type RefundReconciliationInput } from "./wecomRefundReconciliation";
+import { createContext, Fragment, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertCircle, Check, ChevronRight, CircleHelp, Clock3, LoaderCircle, RefreshCw, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
@@ -2724,6 +2725,15 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
   if (businessCommand === "REVERSE_FACT" && effect.channelOperating === true) {
     return <div className="effect-summary"><h3>核对渠道退款误录撤销</h3><dl className="difference-grid"><dt>恢复经营金额</dt><dd>{formatMinor(Number(effect.amountMinor),String(effect.currency))}</dd><dt>原退款业务日期</dt><dd>{String(effect.businessDate)}</dd><dt>当前渠道应结</dt><dd>{formatMinor(Number(effect.contractBeforeMinor),String(effect.currency))} → {formatMinor(Number(effect.contractTargetMinor),String(effect.currency))}</dd><dt>误录原因</dt><dd>{String(effect.note)}</dd></dl><p>保留原退款记录并追加纠错，不发起平台收退款，不改变住宿安排。</p></div>;
   }
+  if (businessCommand === "RECORD_REFUND" && (effect.operation === "RECONCILE_WECOM_REFUNDS" || isRefundReconciliationInput(commandInput ?? {}))) {
+    if (!refundReconciliationPreviewHasEvidence(effect, commandInput ?? {})) return <div className="effect-summary" role="alert"><h3>收退款依据尚未核对完整</h3><p>原收款、各笔退款或金额与本次填写不一致，请返回修改后重新核对。</p></div>;
+    return <div className="effect-summary funds-command-summary" data-testid="command-effect"><h3>请核对一起补齐的收款与退款</h3>
+      <dl className="difference-grid"><dt>补记原收款</dt><dd><strong>{formatMinor(effect.collectedMinor, effect.currency)}</strong></dd>
+        <dt>原收款单号</dt><dd>{effect.source.transactionReference}</dd><dt>实际收款时间</dt><dd>{formatDateTime(effect.source.occurredAt)}</dd>
+        {effect.refunds.map((row, index) => <Fragment key={row.externalPaymentBillId}><dt>第 {index + 1} 笔退款</dt><dd>{formatMinor(row.amountMinor, effect.currency)} · {row.refundReference} · {formatDateTime(row.occurredAt)}</dd></Fragment>)}
+        <dt>本次退款合计</dt><dd>{formatMinor(effect.refundedMinor, effect.currency)}</dd><dt>本次净影响</dt><dd><strong>{formatMinor(effect.netEffectMinor, effect.currency)}</strong></dd>
+        <dt>退款原因和补记说明</dt><dd>{effect.note}</dd></dl><p>全部收退款在一次确认中登记；订单状态、金额和住宿安排保持原状。</p></div>;
+  }
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const amountMinor = typeof effect.amountMinor === "number" ? effect.amountMinor : undefined;
     const currency = typeof effect.currency === "string" ? effect.currency : "CNY";
@@ -4031,6 +4041,14 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
       {committed && orderId ? <Link className="button button-secondary" to={`/orders/${encodeURIComponent(orderId)}`} onClick={onNavigateToResource}>查看订单 <ChevronRight aria-hidden="true" size={17} /></Link> : null}
     </section>;
   }
+  if (businessCommand === "RECORD_REFUND" && result?.operation === "RECONCILE_WECOM_REFUNDS") {
+    return <section className={`receipt-panel ${committed ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt" aria-labelledby="receipt-heading">
+      <h3 id="receipt-heading">{committed ? "收款与退款已一起登记" : "收款与退款未登记"}</h3>
+      <p>{committed ? "原收款及各笔退款已关联本订单，订单状态和住宿安排保持原状。" : "本次没有写入收退款记录。"}</p>
+      {committed ? <dl className="receipt-grid"><dt>补记收款</dt><dd>{formatMinor(Number(result.collectedMinor), "CNY")}</dd><dt>退款合计</dt><dd>{formatMinor(Number(result.refundedMinor), "CNY")}</dd><dt>本次净影响</dt><dd>{formatMinor(Number(result.netEffectMinor), "CNY")}</dd></dl> : null}
+      {receipt.error ? <p className="receipt-error">{receipt.error.message}</p> : null}
+    </section>;
+  }
   if (businessCommand === "RECORD_COLLECTION" || businessCommand === "RECORD_REFUND") {
     const label = businessCommand === "RECORD_REFUND" ? "退款" : "收款";
     const transactionReference = result && typeof result.transactionReference === "string" ? result.transactionReference : undefined;
@@ -4298,6 +4316,7 @@ export interface PersistedCommandRecovery {
   commandType: HistoricalCommandType;
   confirmationKey: string;
   targetRefs: string[];
+  refundReconciliation?: RefundReconciliationInput;
   presentation?: "MEMBER_STAY" | "BACKFILL_STAY" | "COMPLETE_STAY" | "FULFILLMENT" | "STAY_DATES" | "MOVE_UNIT" | "ORDER_LIFECYCLE";
   effectHash?: string;
   state: PersistedCommandRecoveryState;
@@ -4414,6 +4433,13 @@ function recoveryTargetRefsAreValid(commandType: unknown, targetRefs: readonly s
       && Object.keys(parsed).length === 2;
   }
   return true;
+}
+
+function refundRecoveryEvidenceIsValid(recovery: { commandType: unknown; targetRefs: string[]; effectHash?: unknown; refundReconciliation?: unknown; presentation?: unknown }): boolean {
+  if (recovery.refundReconciliation === undefined) return true;
+  const targets = parsedRecoveryTargetRefs(recovery.targetRefs);
+  return recovery.commandType === "RECORD_REFUND" && isValidRefundReconciliationInput(recovery.refundReconciliation)
+    && recovery.presentation === undefined && isEffectHash(recovery.effectHash) && recovery.targetRefs.length === 1 && nonblankString(targets?.orderId);
 }
 
 function requiredRecoveryPresentation(commandType: HistoricalCommandType): PersistedCommandRecovery["presentation"] | undefined {
@@ -5238,6 +5264,10 @@ export function receiptHasCommandEvidence(
   expectedEffectHash?: string
 ): boolean {
   if (!receiptExecutionSemanticsAreCoherent(receipt) || !terminalReceiptHasDurableIdentity(receipt)) return false;
+  if (commandType === "RECORD_REFUND" && receipt.businessCommitted
+    && (isRefundReconciliationInput(input) || (isRecord(receipt.result) && receipt.result.operation === "RECONCILE_WECOM_REFUNDS"))) {
+    return refundReconciliationReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
   if (commandType === "MANAGE_ORDER_OCCUPANTS" && receipt.businessCommitted) {
     const result = isRecord(receipt.result) ? receipt.result : undefined;
     if (!result || !companionEffectHasEvidence(result, input, !previewEffect && input.action === undefined)
@@ -5718,6 +5748,7 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
     || !Array.isArray(value.targetRefs)
     || !value.targetRefs.every((item) => typeof item === "string")
     || !recoveryTargetRefsAreValid(value.commandType, value.targetRefs as string[])
+    || !refundRecoveryEvidenceIsValid(value as unknown as PersistedCommandRecovery)
     || (value.presentation !== undefined && value.presentation !== "MEMBER_STAY" && value.presentation !== "BACKFILL_STAY" && value.presentation !== "COMPLETE_STAY" && value.presentation !== "FULFILLMENT" && value.presentation !== "STAY_DATES" && value.presentation !== "MOVE_UNIT" && value.presentation !== "ORDER_LIFECYCLE")
     || (value.presentation === "MEMBER_STAY" && value.commandType !== "CREATE_ORDER")
     || (value.presentation === "BACKFILL_STAY" && value.commandType !== "CREATE_ORDER")
@@ -5742,6 +5773,7 @@ export function readPersistedCommandRecovery(storage: CommandRecoveryStorage, su
 
 export function savePersistedCommandRecovery(storage: CommandRecoveryStorage, recovery: PersistedCommandRecovery): boolean {
   if (recoveryScopePropertyId(recovery.scopeId) !== recovery.propertyId
+    || !refundRecoveryEvidenceIsValid(recovery)
     || !recoveryTargetRefsAreValid(recovery.commandType, recovery.targetRefs)) return false;
   try {
     storage.setItem(commandRecoveryStorageKey(recovery.subjectId, recovery.scopeId), JSON.stringify(recovery));
@@ -5807,8 +5839,15 @@ export function transitionPersistedCommandRecovery(
   if (progress.state === "CONFIRMING") {
     const propertyId = context.request.input.propertyId;
     const targetRefs = recoveryTargetRefs(context.request.input);
+    const hasRefundReconciliation = context.request.commandType === "RECORD_REFUND" && Object.hasOwn(context.request.input, "reconciliation");
+    let refundReconciliation: RefundReconciliationInput | undefined;
+    if (hasRefundReconciliation) {
+      const candidate = context.request.input.reconciliation;
+      if (!isValidRefundReconciliationInput(candidate)) return { accepted: false, recovery: current };
+      refundReconciliation = candidate;
+    }
     const requiredPresentation = requiredRecoveryPresentation(context.request.commandType);
-    const strictRecoveryEvidence = recoveryRequiresEffectHash(
+    const strictRecoveryEvidence = refundReconciliation !== undefined || recoveryRequiresEffectHash(
       context.request.commandType,
       context.request.presentation
     );
@@ -5820,6 +5859,7 @@ export function transitionPersistedCommandRecovery(
     }
     if (!recoveryTargetRefsAreValid(context.request.commandType, targetRefs)) return { accepted: false, recovery: current };
     if (strictRecoveryEvidence && !isEffectHash(progress.effectHash)) return { accepted: false, recovery: current };
+    if (!refundRecoveryEvidenceIsValid({ commandType: context.request.commandType, targetRefs, effectHash: progress.effectHash, refundReconciliation, presentation: context.request.presentation })) return { accepted: false, recovery: current };
     if (current && current.confirmationKey !== progress.confirmationKey) return { accepted: false, recovery: current };
     if (current?.effectHash !== undefined && current.effectHash !== progress.effectHash) return { accepted: false, recovery: current };
     if (current && isTerminalCommandRecovery(current.state)) return { accepted: false, recovery: current };
@@ -5833,6 +5873,7 @@ export function transitionPersistedCommandRecovery(
         commandType: context.request.commandType,
         confirmationKey: progress.confirmationKey,
         targetRefs,
+        ...(refundReconciliation !== undefined ? { refundReconciliation: structuredClone(refundReconciliation) } : {}),
         ...(context.request.presentation ? { presentation: context.request.presentation } : {}),
         ...(strictRecoveryEvidence ? { effectHash: progress.effectHash } : {}),
         state: "CONFIRMING",
@@ -5852,6 +5893,9 @@ export function transitionPersistedCommandRecovery(
   if (progress.state === "UNKNOWN" || progress.receipt.executionStatus === "UNKNOWN") {
     return { accepted: true, recovery: { ...current, state: "UNKNOWN", updatedAt } };
   }
+  if (current.refundReconciliation && !receiptHasCommandEvidence(current.commandType, progress.receipt, recoveryCommandRequest(current).input, undefined, current.effectHash)) {
+    return { accepted: true, recovery: { ...current, state: "UNKNOWN", updatedAt } };
+  }
   return {
     accepted: true,
     recovery: { ...current, state: progress.receipt.executionStatus, updatedAt }
@@ -5859,6 +5903,7 @@ export function transitionPersistedCommandRecovery(
 }
 
 export function recoveryCommandRequest(recovery: PersistedCommandRecovery): CommandRequest {
+  const refundReconciliation = recovery.refundReconciliation;
   const memberStay = recovery.presentation === "MEMBER_STAY";
   const backfillStay = recovery.presentation === "BACKFILL_STAY";
   const completeStay = recovery.presentation === "COMPLETE_STAY";
@@ -5870,7 +5915,7 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
   const u1CommandType = isU1CommandType(recovery.commandType) ? recovery.commandType : undefined;
   const administratorMembershipCorrection = commandType && isAdministratorMembershipCorrection(commandType) ? commandType : undefined;
   const historicalStayCorrection = recovery.commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS";
-  const restoreTargetInputs = completeStay
+  const restoreTargetInputs = refundReconciliation !== undefined || completeStay
     || recovery.commandType === "MANAGE_ORDER_OCCUPANTS"
     || stayDates
     || moveUnit
@@ -5880,7 +5925,9 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
   const targetInputs = restoreTargetInputs ? parsedRecoveryTargetRefs(recovery.targetRefs) ?? {} : {};
   return {
     commandType: recovery.commandType,
-    title: memberStay
+    title: refundReconciliation
+      ? "查询收款与退款登记结果"
+      : memberStay
       ? "恢复会员住宿结果"
       : backfillStay
         ? "恢复补录住宿结果"
@@ -5928,6 +5975,7 @@ export function recoveryCommandRequest(recovery: PersistedCommandRecovery): Comm
     ...(recovery.effectHash ? { recoveryEffectHash: recovery.effectHash } : {}),
     input: {
       ...targetInputs,
+      ...(refundReconciliation ? { reconciliation: structuredClone(refundReconciliation) } : {}),
       propertyId: recovery.propertyId,
       ...(backfillStay ? { backfill: true } : {}),
       ...(completeStay ? { actualStayCompletedConfirmed: true } : {}),
@@ -6481,7 +6529,8 @@ export function CommandDialog({
   const backfillStay = request.commandType === "CREATE_ORDER" && request.presentation === "BACKFILL_STAY";
   const completeStay = request.commandType === "COMPLETE_STAY" && request.presentation === "COMPLETE_STAY";
   const strictAdministratorCorrection = isStrictAdministratorCorrection(request.commandType);
-  const initialReceiptHasEvidence = (!backfillStay && !completeStay && !strictAdministratorCorrection)
+  const reconciledRefund = request.commandType === "RECORD_REFUND" && isRefundReconciliationInput(request.input);
+  const initialReceiptHasEvidence = (!backfillStay && !completeStay && !strictAdministratorCorrection && !reconciledRefund)
     || !initialReceipt
     || receiptHasCommandEvidence(request.commandType, initialReceipt, request.input, undefined, request.recoveryEffectHash);
   const [preview, setPreview] = useState<PreviewDto>();
@@ -6580,6 +6629,7 @@ export function CommandDialog({
     && !confirmationKey
     && (!u1CommandType || u1PreviewHasBusinessEvidence(u1CommandType, preview.effect, request.input))
     && (!historicalStayCorrection || historicalStayCorrectionPreviewHasEvidence(preview.effect, request.input))
+    && (!reconciledRefund || refundReconciliationPreviewHasEvidence(preview.effect, request.input))
     && (request.commandType !== "REVOKE_CHECK_OUT" || checkoutReversalPreviewHasEvidence(preview.effect, request.input))
     && (!administratorMembershipCorrection || (executableCommandType && administratorMembershipPreviewHasEvidence(executableCommandType, preview.effect, request.input)))
     && (!backfillStay || completedStayBackfillPreviewHasEvidence(preview.effect, request.input))
@@ -6787,7 +6837,7 @@ export function CommandDialog({
   }
 
   useEffect(() => {
-    if (!initialReceipt?.businessCommitted || (!u1CommandType && !backfillStay && !completeStay && !strictAdministratorCorrection)) return;
+    if (!initialReceipt?.businessCommitted || (!u1CommandType && !backfillStay && !completeStay && !strictAdministratorCorrection && !reconciledRefund)) return;
     if (!receiptHasCommandEvidence(request.commandType, initialReceipt, request.input, preview?.effect, request.recoveryEffectHash ?? preview?.effectHash)) {
       setReceipt(undefined);
       setError(new Error("服务端返回的操作结果无法核对；系统将只查询原操作结果，不会重复提交。"));
@@ -6801,6 +6851,10 @@ export function CommandDialog({
     if (!preview || !reasonCode.trim()
       || (!createOrderBusiness && !lodgingFulfillment && !tokenBusiness && !(fundBusiness && (request.commandType === "RECORD_COLLECTION" || reasonNote.trim())) && !reasonNote.trim())
       || writeBlocked || previewExpired || networkUncertain || confirmationKey) return;
+    if (reconciledRefund && !refundReconciliationPreviewHasEvidence(preview.effect, request.input)) {
+      setError(new Error("原收款、退款份额或合计与本次填写不一致，本次没有提交。"));
+      return;
+    }
     if (historicalStayCorrection && !historicalStayCorrectionPreviewHasEvidence(preview.effect, request.input)) {
       setError(new Error("原安排、核实后的安排或保持不变事实不完整，本次没有提交。"));
       return;
@@ -7020,7 +7074,7 @@ export function CommandDialog({
             {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <RefreshCw aria-hidden="true" size={17} />}{businessFacing ? "重新载入核对信息" : "重新生成服务端预览"}
           </button> : null}
           {preview && !previewExpired && !receipt && !confirmationKey && !networkUncertain ? <button className={`button ${businessFacing ? "button-primary" : "button-danger"} command-confirm-button`} type="button" onClick={() => void confirm()} disabled={!canConfirm} data-testid="confirm-command">
-            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : backfillStay ? "确认补录住宿" : completeStay ? "确认完成住宿" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : retainedFundsLabel ? `确认${retainedFundsLabel}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
+            {busy ? <LoaderCircle className="spin" aria-hidden="true" size={17} /> : <Check aria-hidden="true" size={17} />}{memberProfile ? "确认创建会员档案" : membershipBusiness && executableCommandType ? `确认${membershipCommandLabel(executableCommandType)}` : memberLodging ? "确认创建会员住宿订单" : backfillStay ? "确认补录住宿" : completeStay ? "确认完成住宿" : createOrderBusiness ? "确认创建住宿订单" : fulfillment && executableCommandType ? `确认${fulfillmentCommandLabel(executableCommandType)}` : reconciledRefund ? "确认补齐收款与退款" : fundBusiness ? `确认${request.commandType === "RECORD_REFUND" ? "登记退款" : "登记收款"}` : retainedFundsLabel ? `确认${retainedFundsLabel}` : tokenBusiness ? `确认${tokenCommandLabel(request.commandType)}` : u1CommandType ? `确认${commandShellLabel(u1CommandType)}` : `确认提交：${request.title}`}
           </button> : null}
         </>
       }

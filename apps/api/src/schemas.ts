@@ -554,6 +554,11 @@ export const CommandEnvelopeSchema = Type.Union([
   commandEnvelope("COMPLETE_CLEANING", strictObject({ ...PropertyInput, cleaningTaskId: Id })),
   commandEnvelope("RECORD_COLLECTION", strictObject({ ...OrderInput, externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, method: ShortText, transactionReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
   commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, businessDate: Type.Optional(LocalDate), externalPaymentBillId: Type.Optional(Id), amountMinor: PositiveAmount, referencesFactId: Id, method: ShortText, transactionReference: Type.Optional(ShortText), refundReference: Type.Optional(ShortText), note: Type.Optional(OptionalNote) })),
+  commandEnvelope("RECORD_REFUND", strictObject({ ...OrderInput, reconciliation: strictObject({
+    source: strictObject({ externalPaymentBillId: Id, amountMinor: PositiveAmount }),
+    refunds: Type.Array(strictObject({ externalPaymentBillId: Id, amountMinor: PositiveAmount }), { minItems: 1, maxItems: 50 }),
+    note: Note
+  }) })),
   commandEnvelope("REVERSE_FACT", strictObject({ ...OrderInput, reversesFactId: Id, note: Note, releaseExternalPaymentAllocation: Type.Optional(Type.Boolean()) })),
   commandEnvelope("RETAIN_ORDER_FUNDS", strictObject({ ...OrderInput, sourceFactId: Id, amountMinor: PositiveAmount, ownerName: ShortText, ownerContact: ShortText, confirmationNote: Note })),
   commandEnvelope("APPLY_RETAINED_FUNDS", strictObject({ ...OrderInput, retainedFundId: Id, amountMinor: PositiveAmount, authorizationNote: Note })),
@@ -983,6 +988,12 @@ const RevokeCheckOutEffectSchema = strictObject({
   fundsSummary: strictObject({ netRecordedCollection: Money, collectionDifference: Money, refundReferenceAmount: Money })
 });
 
+export const WecomRefundReconciliationEffectSchema = strictObject({
+  operation: Type.Literal("RECONCILE_WECOM_REFUNDS"), orderId: Id, orderStatus: OrderStatusSchema, currency: Type.Literal("CNY"),
+  source: strictObject({ externalPaymentBillId: Id, transactionReference: ShortText, amountMinor: PositiveAmount, occurredAt: DateTime }),
+  refunds: Type.Array(strictObject({ externalPaymentBillId: Id, refundReference: ShortText, amountMinor: PositiveAmount, occurredAt: DateTime }), { minItems: 1, maxItems: 50 }),
+  collectedMinor: PositiveAmount, refundedMinor: PositiveAmount, netEffectMinor: NonNegativeAmount, note: Note
+});
 const RetainedFundsOperationSchema = Type.Union(["RETAIN_ORDER_FUNDS", "APPLY_RETAINED_FUNDS", "RELEASE_RETAINED_FUNDS", "REFUND_RETAINED_FUNDS"].map(value => Type.Literal(value)));
 const RetainedFundsEffectBase = {
   orderId: Id, sourceOrderId: Id, sourceFactId: Id, billId: Id,
@@ -997,6 +1008,7 @@ const RetainedFundsEffectSchema = Type.Union([
     method: Type.Literal("WECOM"), referencesFactId: Id, transactionReference: Type.Null(), externalPaymentBillId: Id, refundReference: ShortText })
 ]);
 export const CommandEffectSchema = Type.Union([
+  WecomRefundReconciliationEffectSchema,
   RetainedFundsEffectSchema,
   RoomCatalogEffectSchema,
   RevokeCheckOutEffectSchema,
@@ -2214,6 +2226,8 @@ const MembershipVoidReconvertedResultSchema = strictObject({
 });
 
 export const ExecutedCommandResultSchema = Type.Union([
+  strictObject({ ...WecomRefundReconciliationEffectSchema.properties, sourceFactId: Id,
+    refundFactIds: Type.Array(Id, { minItems: 1, maxItems: 50 }), effectHash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
   RoomCatalogResultSchema,
   strictObject({ operation: Type.Literal("MANAGE_ORDER_OCCUPANTS"),
     ...TemporaryOtherRoomLifecycleEvidenceFields,
@@ -3276,6 +3290,7 @@ export const CollectionFactRowSchema = strictObject({
 
 export const OrderDetailResponseSchema = strictObject({
   accessLevel: AccessLevelSchema,
+  refundReconciliationAvailable: Type.Optional(Type.Boolean()),
   allowedActions: Type.Array(strictObject({
     code: Type.Union(orderActionCodes.map((code) => Type.Literal(code))),
     enabled: Type.Boolean(),

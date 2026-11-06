@@ -1,4 +1,5 @@
 import { channelOperatingSummary } from "./channel-operating.ts";
+import { paymentAllocationEnabled } from "./payment-allocation.ts";
 import { projectCatalogUnitNames } from "./room-catalog-labels.ts";
 import { currentPrimaryGuest, projectCurrentOrderOccupants } from "./current-order-guests.ts";
 import { sql, type Kysely, type Transaction } from "kysely";
@@ -500,7 +501,8 @@ export function orderAllowedActions(
     hasCheckOut: boolean;
     hasCheckInRevocation: boolean;
   },
-  commandGrants: ReadonlySet<CommandCapability | string> = new Set()
+  commandGrants: ReadonlySet<CommandCapability | string> = new Set(),
+  canReconcileRefunds = false
 ): OrderAllowedActionDto[] {
   if (accessLevel === "READ") return [];
   const enabledByStatus: Partial<Record<OrderActionCode, readonly string[]>> = {
@@ -519,8 +521,8 @@ export function orderAllowedActions(
     MARK_NO_SHOW: ["RESERVED"],
     REVOKE_CHECK_IN: ["CHECKED_IN"],
     RECORD_COLLECTION: ["RESERVED", "CHECKED_IN", "CHECKED_OUT"],
-    RECORD_REFUND: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
-    REVERSE_FACT: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW"],
+    RECORD_REFUND: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"],
+    REVERSE_FACT: ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"],
     CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP: ["CHECKED_IN", "CHECKED_OUT"]
   };
   return orderActionCodes
@@ -598,7 +600,7 @@ export function orderAllowedActions(
       && stayConversionChannelDisabledReason === null
       && !convertedOrderActionDisabled
       && !completeStayFactsDisabled
-      && (code !== "RECORD_REFUND" || hasRefundableCollection)
+      && (code !== "RECORD_REFUND" || hasRefundableCollection || (canReconcileRefunds && commandGrants.has("RECORD_COLLECTION")))
       && (code !== "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" || hasTransferableCollection);
     return {
       code,
@@ -1927,10 +1929,19 @@ export async function getOrderViewSnapshot(
     historicalCorrectionGroupsByCommandId
   });
  const channelOperating = await channelOperatingSummary(db, context.order.property_id, orderId);
+ const refundReconciliationAvailable = paymentAllocationEnabled() && accessLevel === "WRITE"
+   && commandGrants.has("RECORD_REFUND") && commandGrants.has("RECORD_COLLECTION")
+   && ["RESERVED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED", "NO_SHOW", "CHECK_IN_REVOKED"].includes(context.order.status)
+   && !context.order.member_id && !context.order.member_contract_id && context.order.stay_type !== "FREE"
+   && (!context.order.booking_channel_code || context.order.booking_channel_code === "WECOM")
+   && context.revision.currency === "CNY" && membershipConversion === null && !temporaryOtherRoomEvidence
+   && Boolean((await sql<{ enabled: boolean }>`SELECT EXISTS(SELECT 1 FROM external_payment_sources s
+     JOIN external_payment_accounts a ON a.source_id=s.id WHERE a.property_id=${context.order.property_id} AND s.enabled) enabled`.execute(db)).rows[0]?.enabled);
  const awaitingPreviousCheckout = context.order.status === "RESERVED" && await previousStayAwaitingCheckout(db, context.order.property_id, activeTimeline.find((day) => day.serviceDate === businessDate)?.inventoryUnitId ?? context.currentSegment.inventoryUnitId, businessDate, context.order.id);
  return {
    accessLevel,
    channelOperating,
+   refundReconciliationAvailable,
    allowedActions: orderAllowedActions(accessLevel, context.order.status, hasRefundableCollection(facts), {
      businessDate,
      arrivalDate: context.order.arrival_date,
@@ -1941,7 +1952,7 @@ export async function getOrderViewSnapshot(
      hasCheckIn: lifecycle.fulfillment.checkIn !== null,
      hasCheckOut: lifecycle.fulfillment.checkOut !== null,
      hasCheckInRevocation: lifecycle.fulfillment.checkInRevocation !== null
-   }, commandGrants).map(action => action.code === "RECORD_REFUND" && channelOperating && accessLevel === "WRITE"
+   }, commandGrants, refundReconciliationAvailable).map(action => action.code === "RECORD_REFUND" && channelOperating && accessLevel === "WRITE"
      ? { ...action, enabled: channelOperating.initialized && channelOperating.originalSaleFactId !== null && BigInt(channelOperating.netMinor)>0n, disabledReason: !channelOperating.initialized ? "历史已计收入尚未承接" : BigInt(channelOperating.netMinor)>0n ? null : "没有可退的渠道成交余额" } : action).map((action) => action.code === "CHECK_IN" && action.enabled && awaitingPreviousCheckout
      ? { ...action, enabled: false, disabledReason: "PREVIOUS_STAY_NOT_CHECKED_OUT" } : action).filter((action) => !amendments.some((amendment) => amendment.amendment_type === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"
      && recordValue(amendment.payload)?.crossRoomUpgrade)

@@ -14,19 +14,28 @@ import {
   type OrderFundsAction
 } from "../orderFunds";
 import { InlineError, Modal, formatDateTime, formatMinor } from "../uiBasic";
-import { ExternalPaymentPicker } from "./ExternalPaymentPicker";
+import { ExternalPaymentPicker, type PaymentItem } from "./ExternalPaymentPicker";
+import { WecomRefundReconciliationForm } from "./WecomRefundReconciliationForm";
+import { isRefundReconciliationInput, type RefundReconciliationDraft } from "../wecomRefundReconciliation";
 
 export type { OrderFundsAction } from "../orderFunds";
 
-function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, writeBlocked = false, writeBlockedReason = "当前订单、房态或权限已变化，暂不能继续。请关闭后重新打开并核对。", onClose, onSubmit }: {
+export interface OrderFundsEditingDraft {
+  amountYuan: string; method: string; note: string; transactionReference: string;
+  refundReference: string; factId: string; billId: string;
+}
+
+function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, editingDraft, writeBlocked = false, writeBlockedReason = "当前订单、房态或权限已变化，暂不能继续。请关闭后重新打开并核对。", onClose, onSubmit, onReconcile }: {
   action: OrderFundsAction;
   view: OrderViewDto;
   initialFactId?: string;
   draft?: CommandRequest;
+  editingDraft?: OrderFundsEditingDraft | undefined;
   writeBlocked?: boolean;
   writeBlockedReason?: string;
   onClose: () => void;
   onSubmit: (request: CommandRequest) => void;
+  onReconcile?: ((item: PaymentItem | undefined, draft: OrderFundsEditingDraft, existingFactId?: string) => void) | undefined;
 }) {
   const [retained, setRetained] = useState<RetainedFundItem[]>([]);
   const [retainedReady, setRetainedReady] = useState(false);
@@ -39,7 +48,7 @@ function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, writeB
     && draft.input.orderId === view.order.id
     && draft.input.propertyId === view.order.property_id ? draft : undefined;
   const draftFactId = typeof matchingDraft?.input.referencesFactId === "string" ? matchingDraft.input.referencesFactId : undefined;
-  const initialSelectedFactId = initialFactId ?? draftFactId ?? refundableCollections[0]?.fact_id ?? "";
+  const initialSelectedFactId = editingDraft?.factId ?? initialFactId ?? draftFactId ?? refundableCollections[0]?.fact_id ?? "";
   const recordedExcessMinor = view.amounts.refundReferenceAmount.minorUnits;
   function selectedRefundCollectionFor(collectionFactId: string): CollectionFactDto | undefined {
     return collections.find((fact) => fact.fact_id === collectionFactId);
@@ -51,16 +60,16 @@ function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, writeB
   }
   const initialSuggestedRefund = action === "RECORD_REFUND" ? suggestedRefundFor(initialSelectedFactId) : 0;
   const initialRefundMethod = action === "RECORD_REFUND" ? selectedRefundCollectionFor(initialSelectedFactId)?.method ?? "WECOM" : "WECOM";
-  const [amountYuan, setAmountYuan] = useState(() => typeof matchingDraft?.input.amountMinor === "number"
+  const [amountYuan, setAmountYuan] = useState(() => editingDraft?.amountYuan ?? (typeof matchingDraft?.input.amountMinor === "number"
     ? collectionAmountMinorToYuanInput(matchingDraft.input.amountMinor)
-    : collectionAmountMinorToYuanInput(initialSuggestedRefund));
-  const [method, setMethod] = useState(typeof matchingDraft?.input.method === "string" ? matchingDraft.input.method : initialRefundMethod);
-  const [note, setNote] = useState(typeof matchingDraft?.input.note === "string" ? matchingDraft.input.note : "");
-  const [transactionReference, setTransactionReference] = useState(typeof matchingDraft?.input.transactionReference === "string" ? matchingDraft.input.transactionReference : "");
-  const [refundReference, setRefundReference] = useState(typeof matchingDraft?.input.refundReference === "string" ? matchingDraft.input.refundReference : "");
+    : collectionAmountMinorToYuanInput(initialSuggestedRefund)));
+  const [method, setMethod] = useState(editingDraft?.method ?? (typeof matchingDraft?.input.method === "string" ? matchingDraft.input.method : initialRefundMethod));
+  const [note, setNote] = useState(editingDraft?.note ?? (typeof matchingDraft?.input.note === "string" ? matchingDraft.input.note : ""));
+  const [transactionReference, setTransactionReference] = useState(editingDraft?.transactionReference ?? (typeof matchingDraft?.input.transactionReference === "string" ? matchingDraft.input.transactionReference : ""));
+  const [refundReference, setRefundReference] = useState(editingDraft?.refundReference ?? (typeof matchingDraft?.input.refundReference === "string" ? matchingDraft.input.refundReference : ""));
   const [allocationEnabled, setAllocationEnabled] = useState(false);
   const [billRemaining, setBillRemaining] = useState<number>();
-  const [billId, setBillId] = useState(typeof matchingDraft?.input.externalPaymentBillId === "string" ? matchingDraft.input.externalPaymentBillId : "");
+  const [billId, setBillId] = useState(editingDraft?.billId ?? (typeof matchingDraft?.input.externalPaymentBillId === "string" ? matchingDraft.input.externalPaymentBillId : ""));
   useEffect(() => { const controller = new AbortController(); void api.paymentAllocations({propertyId: view.order.property_id, kind: "COLLECTION", limit: "1"}, controller.signal).then(data => { if (!controller.signal.aborted) setAllocationEnabled(data.enabled); }).catch(() => {}); return () => controller.abort(); }, [view.order.property_id]);
   const [factId, setFactId] = useState(initialSelectedFactId);
   const transactionReferenceRequired = orderFundsTransactionReferenceRequired(action, method);
@@ -83,6 +92,12 @@ function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, writeB
       setAmountYuan(collectionAmountMinorToYuanInput(suggestedRefundFor(next)));
     }
   }, [retainedReady, retained, action, allocationEnabled, factId]);
+
+  function openReconciliation(item?: PaymentItem) {
+    const existing = item && refundableCollections.find(fact => fact.fact_type === "COLLECTION"
+      && (fact.external_payment_bill_id === item.id || fact.transaction_reference === item.reference));
+    onReconcile?.(item, { amountYuan, method, note, transactionReference, refundReference, factId, billId }, existing?.fact_id);
+  }
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -109,7 +124,7 @@ function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, writeB
           {action === "RECORD_REFUND" && refundableCollections.length === 0 ? (
             <div className="span-two form-field-note" role="status">
               <strong>该订单当前没有可退款的收款记录</strong>
-              <span>需要先有未被冲销、且仍有可退余额的原收款，才能登记退款。</span>
+              <span>{onReconcile ? "如果原收款和退款均已实际发生，可在这里一起补齐。" : "需要先有未被冲销、且仍有可退余额的原收款，才能登记退款。"}</span>
             </div>
           ) : null}
           {action === "RECORD_REFUND" && refundableCollections.length > 0 ? <label className="span-two">选择原收款<select value={factId} onChange={(event) => {
@@ -128,9 +143,10 @@ function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, writeB
             <span>对应所选原收款；本次退款需记录独立退款单号。</span>
           </div> : null}
           {action === "RECORD_REFUND" && method === "WECOM" ? <ExternalPaymentPicker allocationMode={allocationEnabled} key={factId} propertyId={view.order.property_id} kind="REFUND" originalCollectionFactId={factId} value={refundReference} amountMinor={Math.round(Number(amountYuan) * 100)} testId="refund-reference" disabled={refundableCollections.length === 0} onChange={(reference, item) => { setRefundReference(reference); setBillId(item?.id ?? ""); setBillRemaining(item && "remainingMinor" in item ? item.remainingMinor : undefined); if (item?.amountMinor) { const available = "remainingMinor" in item ? item.remainingMinor : item.amountMinor; const suggested = action === "RECORD_REFUND" ? suggestedRefundFor(factId) : Math.max(0, view.amounts.collectionDifference.minorUnits); setAmountYuan(collectionAmountMinorToYuanInput(allocationEnabled ? Math.min(available, suggested || available) : item.amountMinor)); } setValidationError(undefined); }} /> : null}
-          {transactionReferenceRequired ? method === "WECOM" ? <ExternalPaymentPicker allocationMode={allocationEnabled} propertyId={view.order.property_id} value={transactionReference} amountMinor={Math.round(Number(amountYuan) * 100) || Math.max(0, view.amounts.collectionDifference.minorUnits)} testId="transaction-reference" onChange={(reference, item) => { setTransactionReference(reference); setBillId(item?.id ?? ""); setBillRemaining(item && "remainingMinor" in item ? item.remainingMinor : undefined); if (item?.amountMinor) { const available = "remainingMinor" in item ? item.remainingMinor : item.amountMinor; const suggested = action === "RECORD_REFUND" ? suggestedRefundFor(factId) : Math.max(0, view.amounts.collectionDifference.minorUnits); setAmountYuan(collectionAmountMinorToYuanInput(allocationEnabled ? Math.min(available, suggested || available) : item.amountMinor)); } setValidationError(undefined); }} /> : <label className="span-two">交易单号 / 流水号<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="transaction-reference" disabled={action === "RECORD_REFUND" && refundableCollections.length === 0} /></label> : null}
+          {transactionReferenceRequired ? method === "WECOM" ? <ExternalPaymentPicker allocationMode={allocationEnabled} propertyId={view.order.property_id} value={transactionReference} amountMinor={Math.round(Number(amountYuan) * 100) || Math.max(0, view.amounts.collectionDifference.minorUnits)} testId="transaction-reference" onReconcile={onReconcile && retainedReady ? openReconciliation : undefined} onChange={(reference, item) => { setTransactionReference(reference); setBillId(item?.id ?? ""); setBillRemaining(item && "remainingMinor" in item ? item.remainingMinor : undefined); if (item?.amountMinor) { const available = "remainingMinor" in item ? item.remainingMinor : item.amountMinor; const suggested = action === "RECORD_REFUND" ? suggestedRefundFor(factId) : Math.max(0, view.amounts.collectionDifference.minorUnits); setAmountYuan(collectionAmountMinorToYuanInput(allocationEnabled ? Math.min(available, suggested || available) : item.amountMinor)); } setValidationError(undefined); }} /> : <label className="span-two">交易单号 / 流水号<input value={transactionReference} onChange={(event) => { setTransactionReference(event.target.value); setValidationError(undefined); }} required maxLength={200} data-testid="transaction-reference" disabled={action === "RECORD_REFUND" && refundableCollections.length === 0} /></label> : null}
           <label className="span-two">{action === "RECORD_REFUND" ? "退款原因" : method === "CASH" ? "收款人" : method === "OTHER" ? "其他收款说明" : "备注（选填）"}<textarea rows={3} value={note} onChange={(event) => { setNote(event.target.value); setValidationError(undefined); }} required={action === "RECORD_REFUND" || method === "CASH" || method === "OTHER"} maxLength={1000} data-testid={action === "RECORD_REFUND" ? "refund-reason" : "collection-note"} /></label>
         </div>
+        {action === "RECORD_REFUND" && onReconcile ? <button type="button" className="button button-secondary" disabled={writeBlocked} onClick={() => openReconciliation()}>{refundableCollections.length ? "还有漏记份额，一起补齐" : "原收款尚未登记，一起补齐"}</button> : null}
         <div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={writeBlocked || ((allocationEnabled || action === "RECORD_REFUND") && !retainedReady) || (action === "RECORD_REFUND" && refundableCollections.length === 0)}>下一步</button></div>
       </form>
     </Modal>
@@ -139,6 +155,35 @@ function NormalOrderFundsFormDialog({ action, view, initialFactId, draft, writeB
 
 
 export function OrderFundsFormDialog(props: Parameters<typeof NormalOrderFundsFormDialog>[0]) {
- return props.action === "RECORD_REFUND" && props.view.channelOperating
-   ? <ChannelRefundForm {...props} /> : <NormalOrderFundsFormDialog {...props} />;
+  const matchingDraft = props.draft?.commandType === "RECORD_REFUND" && props.draft.input.orderId === props.view.order.id
+    && props.draft.input.propertyId === props.view.order.property_id ? props.draft : undefined;
+  const [reconciling, setReconciling] = useState(() => Boolean(matchingDraft && isRefundReconciliationInput(matchingDraft.input)));
+  const [initialSource, setInitialSource] = useState<PaymentItem>();
+  const [existingRefundFactId, setExistingRefundFactId] = useState<string>();
+  const [normalAction, setNormalAction] = useState(props.action);
+  const mayReconcile = props.view.refundReconciliationAvailable === true;
+  const [normalDrafts, setNormalDrafts] = useState<Partial<Record<OrderFundsAction, OrderFundsEditingDraft>>>({});
+  const [groupDraft, setGroupDraft] = useState<RefundReconciliationDraft>();
+  function reconcile(item: PaymentItem | undefined, draft: OrderFundsEditingDraft, existingFactId?: string) {
+    if (!mayReconcile) return;
+    setNormalDrafts(current => {
+      const next = { ...current, [normalAction]: draft };
+      if (existingFactId && next.RECORD_REFUND?.factId !== existingFactId) delete next.RECORD_REFUND;
+      return next;
+    });
+    setNormalAction("RECORD_REFUND");
+    if (item) {
+      setExistingRefundFactId(existingFactId);
+      setInitialSource(item);
+      if (groupDraft?.sourceBillId !== item.id) setGroupDraft(undefined);
+    }
+    // An existing refundable share is the natural path; only explicit backfill adds new collection facts.
+    setReconciling(!existingFactId);
+  }
+  if (props.action === "RECORD_REFUND" && props.view.channelOperating) return <ChannelRefundForm {...props} />;
+  if (reconciling) return <WecomRefundReconciliationForm view={props.view} draft={matchingDraft} editingDraft={groupDraft} initialSource={initialSource}
+    writeBlocked={props.writeBlocked || !mayReconcile} writeBlockedReason={props.writeBlockedReason}
+    onBack={saved => { setGroupDraft(saved); setReconciling(false); }} onClose={props.onClose} onSubmit={props.onSubmit} />;
+  return <NormalOrderFundsFormDialog key={`${normalAction}:${existingRefundFactId ?? ""}`} {...props} action={normalAction} {...(existingRefundFactId ? { initialFactId: existingRefundFactId } : {})}
+    editingDraft={normalDrafts[normalAction]} onReconcile={mayReconcile ? reconcile : undefined} />;
 }

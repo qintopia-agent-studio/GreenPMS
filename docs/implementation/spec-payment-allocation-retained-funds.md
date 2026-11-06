@@ -95,3 +95,7 @@ REFUND_RETAINED_FUNDS: propertyId,orderId（来源）,retainedFundId,amountMinor
 用户确认 `1b4281ff81ecab4d378e1c0008809e7cb682406c` 基线整体人工验收无问题，并要求提交新 PR 后自行上线。本轮撤回其后的工作台资金异常增量，保留本规格内的资金及 UI 行为；不改数据库迁移、业务守卫、资金命令或 AI 助手。历史自动验证与全量回归未决事项不改写为新一轮全绿。
 
 生产 Compose 增加 `PMS_PAYMENT_ALLOCATION_ENABLED` 透传，默认 false，且仅传给 app，不传给企微同步 worker。启用是生产配置动作，不能因合并代码或 Publish Release 自动视为已完成；当前 PR 不操作生产。069/070 迁移及文件哈希保持与验收基线相同，不能从仅含067的数据库直接切换镜像。发布核对及失败恢复边界见[本轮发布核对单](../operations/accepted-refresh-baseline-release.md)。
+
+## 2026-11-06 已确认的收退款补登记扩展
+
+用户已批准 [收退款业务匹配与异常闭环](spec-refund-business-reconciliation.md)：在原订单退款流程同一次确认补齐漏记收退款，允许已取消／已结束订单且不改变住宿、计价和库存。普通新增使用、留存和释放仍遵守未归属成功退款冻结规则；成组补登记仅按经验证的同源事实及金额守恒受控完成，不把真实退款恢复为可用资金。持续核对分别比较收款与退款，不以净额相抵代替归属。工程及人工验收状态以该规格和主验收计划为准。

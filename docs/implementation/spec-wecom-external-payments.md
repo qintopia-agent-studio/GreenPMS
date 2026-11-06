@@ -162,3 +162,7 @@ TEST_DATABASE_URL=postgres://qintopia@127.0.0.1:55448/qintopia_wecom_events_2026
 联合验证夹具为 `tests/joint/payment-events-local.mjs`，固定本机 PG55448 与独立 `qintopia_wecom_payment_joint`，HTTP入口18448；fixture只含模拟身份、演示凭证与订单，保存于忽略目录 `.local-workspace/payment-events/joint/fixture.json`。来源 `synthetic-pms-joint-20260924`，key ID `local-payment-joint`；签名值从本机受限文件读取，不进入版本库。接收HTTP计划18449，本机TLS代理计划18450；尚未完成双端联通。先setup生成未收款订单与head=0，岸岸持久初始化后再discover；`deliver`使用原HTTPS transport，`status`回读事件、发送回执与实际收款事实。人确认和登记链由岸岸真实宿主/授权链验证，PMS夹具不伪造确认。
 
 补充验证：首笔事件尚未提交时 head 为0且不等待写者；同物业两个并发事务提交后序号为1/2；早于采样时间开始的事务提交后仍可从采样H之后读出。两项定向PG18测试通过（收退款套件现17项，此前16项整套通过，新增/增强2项定向通过）。本机TLS代理已实际启动并验证临时CA握手，接收方尚未就绪，未产生模拟付款。联测工具显式 `resume/pause`，`deliver`不会解除持久暂停；保留head=0和已建模拟订单等待接收方基线。
+
+## 2026-11-06 收退款业务闭环
+
+沿用原订单收退款入口与一次核对确认；补齐退款关联展示、漏记收退款成组登记及跨日期持续核对，详见 [已确认实施规格](spec-refund-business-reconciliation.md)。同步仍不自动生成订单资金事实；缺少归属不猜测或自动造单，历史纳入范围不变。退款保持独立凭据及原收款关系，正常匹配、部分分配与成组补记统一由服务端校验。

@@ -726,7 +726,10 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
     "accessLevel", "allowedActions", "order", "occupants", "occupantCorrections", "stay", "currentSegment",
     "segments", "originalArrangement", "effectiveArrangement", "fulfillment", "arrangementHistory", "referencedInventoryUnits", "amendments",
     "pricingRevisions", "membershipConversion", "coverageSet", "collectionFacts", "cleaningTasks", "amounts"
-  ], ["channelOperating"]);
+  ], ["channelOperating", "refundReconciliationAvailable"]);
+  if (result.refundReconciliationAvailable !== undefined && typeof result.refundReconciliationAvailable !== "boolean") {
+    fail("refundReconciliationAvailable", "必须是布尔值");
+  }
   const order = record(result.order, "order");
   exactKeysWithOptional(order, "order", [
     "id", "property_id", "status", "stay_type", "arrival_date", "departure_date", "primary_guest_snapshot",
@@ -768,6 +771,10 @@ export function assertOrderView(value: unknown): asserts value is OrderViewDto {
   exactKeys(stay, "stay", ["id", "status"]);
   const accessLevel = stringValue(result.accessLevel, "accessLevel");
   if (accessLevel !== "READ" && accessLevel !== "WRITE") fail("accessLevel", "不是支持的权限");
+  if (result.refundReconciliationAvailable === true && (accessLevel !== "WRITE" || result.membershipConversion !== null
+    || order.stay_type === "FREE" || (order.booking_channel_code !== null && order.booking_channel_code !== "WECOM"))) {
+    fail("refundReconciliationAvailable", "与订单类型或权限不一致");
+  }
   const seenActionCodes = new Set<string>();
   const enabledDateActions: string[] = [];
   let moveUnitEnabled = false;
@@ -1320,6 +1327,9 @@ export function assertOrderViewAllowedActions(
   view: OrderViewDto,
   expectedAllowedActions: ReadonlySet<string>
 ): void {
+  if (view.refundReconciliationAvailable && (!expectedAllowedActions.has("RECORD_COLLECTION") || !expectedAllowedActions.has("RECORD_REFUND"))) {
+    fail("refundReconciliationAvailable", "同时需要收款及退款命令授权");
+  }
   for (const [index, action] of view.allowedActions.entries()) {
     if (action.enabled && !expectedAllowedActions.has(action.code)) {
       fail(`allowedActions[${index}].code`, "超出当前主体命令授权");

@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-05.4";
+export const assistantKnowledgeRevision = "2026-11-06.1";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -112,21 +112,22 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   {
     id: "payment-allocation", title: "一笔钱覆盖两个或多个预订", commands: ["RECORD_COLLECTION"],
     sources: ["docs/implementation/spec-historical-payment-reconciliation.md", "docs/implementation/spec-payment-allocation-retained-funds.md", "apps/web/src/components/OrderFundsFormDialog.tsx", "apps/web/src/components/ExternalPaymentPicker.tsx"],
-    content: `同店企微真实收款可分给多个普通直订住宿订单，不新增现金收入；会员订单收款仍整笔独占，不套用住宿订单拆分规则。分配功能开启且流水来源可用时才可办理；未开启则保留整笔匹配，联系管理员，不绕过。
-操作：分别打开订单记录收款表单，选企业微信及同一笔成功流水，填当前订单份额，逐单预览确认。核对已分配和剩余额度，不重复记整笔总额；无多订单一键提交。
+    content: `同店企微真实收款可按份额覆盖多张普通直订住宿单，不新增现金；会员订单收款仍整笔独占。分配和来源启用才可办理，未启用保留整笔匹配，不绕过。
+分别打开订单记录收款，选择同一成功流水，填写本单份额，逐单预览确认；核对已分配及剩余额度，不重复记整笔，无多订单一键提交。
 合付款保留各单真实合同金额，按真实份额分配；款记在另一单不能调0或改免费/权益绕过。历史归属及已退房零价错误交管理员核对，助手不承诺已修复。
-示例：收1000元，A订单分400元，确认后B订单选择同一流水分600元；三个或更多订单同理，合计不能超可分配余额。示例不是实时余额。
-现金、银行按实际方式及必填凭据/备注登记，不套用企微拆分。付款昵称、相同金额仅是线索，不证明款项归属。`
+例：收1000元，A订单分400元，B订单选择同一流水分600元；三个或更多订单同理，合计不超余额。示例不是实时余额。现金、银行按实际方式和凭据登记，不套用企微拆分；付款昵称、相同金额仅是线索，不证明款项归属。`
+  },
+  {
+    id: "refund-reconciliation", title: "收退款漏记补齐与持续核对", commands: [],
+    sources: ["docs/implementation/spec-refund-business-reconciliation.md", "apps/web/src/components/OrderFundsFormDialog.tsx", "packages/db/src/wecom-refund-reconciliation.ts"],
+    content: `原收退款都漏记：在原订单退款表单一起补齐真实收退款，需收款和退款两项权限及分配、流水来源启用。取消、未到、撤销入住、退房也可办理，不恢复订单、不改变住宿、计价或库存。优先已有可退原款补退款；另有漏记份额才补原款，按本单份额确认。收1000退1000保留两笔。
+工作台异常跨日期保留未处理项，收款与退款分别逐笔对平；净额相等不代表已对平。流水与业务缺失或金额矛盾须核对。同步延迟不能解释为无异常；只读核对不自动登记或发起退款。`
   },
   {
     id: "refunds", title: "部分退款、合并退款与真实退款登记", commands: ["RECORD_REFUND"],
     sources: ["docs/implementation/channel-refund-readback.md", "docs/implementation/october-sales-recognition.md", "apps/web/src/components/ChannelRefundForm.tsx", "docs/implementation/spec-payment-allocation-retained-funds.md", "apps/web/src/components/OrderFundsFormDialog.tsx"],
-    content: `外部渠道订单也使用原订单的退款入口：填写已发生的平台退款单号、本次应结减少金额、退款业务日期和说明；日期默认门店今天，已封账月份不能重复补登记。即使订单取消后合同为0，只要原渠道成交还有可退余额，仍可登记退款；不发起平台退款，不改变住宿或库存。误录可在渠道成交与退款记录中撤销并填写原因；有后续金额变化时先核对后续记录，不能无痕删除。
-渠道退款可以使应结归零；部分退款、全额退款及撤销后的订单详情应保留原成交、退款和计价历史。退款形成的零应结不等于允许普通企微新建或改价填0，也不证明平台实际到账。
-直订在需要退款的订单打开记录退款，选择该订单可退的原收款份额，核对实际退款方式、金额和原因。企微退款须选择已成功且关联正确原始交易的真实退款流水；先有外部实际退款，再在PMS登记。PMS不发起支付平台退款。
-启用分配后，同一笔合并退款可以按各订单对应的收款份额逐单登记；不得超过退款流水剩余可分配额或对应原收款的可退额度。退款不会恢复原收款流水的可分配余额，不能将退给客户的钱再次分配出去。
-例如A400+B600来自同一1000元收款，B取消并真实退600元后登记B退款，A仍400元，现金净额400元，原收款不能再拿600元去给C订单使用。
-存在尚未核对归属的成功退款时，来源新增使用或释放可能被冻结；先核对退款归属，不通过冲销或手工重记绕过。已预留为客户留存的部分应走留存退款入口，避免重复占用。`
+    content: `渠道使用原订单的退款入口，填写真实平台退款单号、本次应结减少金额、退款业务日期和说明；日期默认门店今天，已封账月份不能重复补登记。即使订单取消后合同为0，原成交有可退余额仍可登记退款；不发起平台退款，不改变住宿或库存。误录可撤销并填原因，有后续金额变化先核对；保留原成交、退款和计价历史。部分退款、全额退款及撤销均可追溯；退款形成零应结不等于允许普通企微新建或改价填0，也不证明平台实际到账。
+直订在原订单记录退款，选择本单可退原收款份额及实际成功退款流水，核对方式、金额、原因后确认。企微须关联正确原交易与独立退款号；先外部实际退款，再登记PMS。分配启用后可按各单份额登记合并退款，不能超过退款流水剩余额度或原款可退额。退款不恢复原收款可分配余额。例如原款1000分A400+B600，B取消实际退600并登记，A仍400，现金净额400元，不能再拿600元给C。未归属成功退款冻结来源普通新增使用与释放，不能冲销绕过；已留存部分走留存退款入口。`
   },
   {
     id: "retained-create", title: "取消后登记客户留存", commands: ["RETAIN_ORDER_FUNDS"],
@@ -152,7 +153,7 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
   {
     id: "reverse-facts", title: "资金更正与撤销分配", commands: ["REVERSE_FACT"],
     sources: ["docs/implementation/spec-payment-allocation-retained-funds.md", "apps/web/src/pages/OrderDetailPage.tsx"],
-    content: `误记资金通过订单资金记录的正式冲销/更正入口，选择原事实并说明原因，保留原记录和更正历史。普通冲销不会自动释放企微流水占用；若确需重新分配，核对“同时撤销流水归属以便重新分配”及服务端预览。
+    content: `误记资金（含撤销入住单）通过订单资金记录的正式冲销/更正入口，选择原事实并说明原因，保留原记录和更正历史。普通冲销不会自动释放企微流水占用；若确需重新分配，核对“同时撤销流水归属以便重新分配”及服务端预览。
 已有退款、留存、转会员或待核对退款占用等依赖时，收款分配不能直接撤销。撤销归属不改变实际收退款；撤销退款归属也不会恢复原收款可用额度。不要建议先删除历史再重录。`
   },
   {

@@ -599,6 +599,7 @@ export interface CleaningTaskSummaryDto {
 export interface OrderViewDto {
   accessLevel: AccessLevel;
   allowedActions: OrderAllowedActionDto[];
+  refundReconciliationAvailable?: boolean;
   order: OrderDetailRowDto;
   occupants: Array<{
     id: string;

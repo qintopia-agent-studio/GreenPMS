@@ -101,7 +101,8 @@ export const currentMigrationNames = [
   "077_owner_historical_payment_reprice.sql",
   "078_ai_question_progress.sql",
   "079_ai_provider_failover.sql",
-  "080_ai_provider_priority_swap.sql"
+  "080_ai_provider_priority_swap.sql",
+  "081_wecom_refund_reconciliation.sql"
 ] as const;
 
 export function databaseUrl(): string {

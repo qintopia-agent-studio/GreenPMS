@@ -54,6 +54,7 @@ import {
 import { applyCommand, lockCommandResources } from "./apply.ts";
 import { buildCommandEffect, normalizePhoneNumber, projectCommandEffectForRead, projectPrimaryGuestForRead } from "./effects.ts";
 import { isMemberCorrectionCommandType, normalizeMemberCorrectionInput } from "./member-corrections.ts";
+import { refundReconciliationOperation } from "../wecom-refund-reconciliation.ts";
 
 export interface ConfirmRequest {
   propertyId: string;
@@ -1374,6 +1375,7 @@ export function projectReceiptResultForRead(
     };
   }
   if (commandType === "RECORD_COLLECTION" || commandType === "RECORD_REFUND" || commandType === "REVERSE_FACT") {
+    if (result.operation === refundReconciliationOperation) return result;
     return {
       ...result,
       transactionReference: Object.hasOwn(result, "transactionReference") ? result.transactionReference : null
@@ -1603,6 +1605,10 @@ export async function createCommandPreview(db: Kysely<Database>, principal: Auth
       mode: "EXECUTE",
       ...(tokenLifecycleConstraint ? { tokenLifecycleConstraint } : {})
     });
+    if (normalizedEnvelope.commandType === "RECORD_REFUND" && normalizedEnvelope.input.reconciliation !== undefined) {
+      await authorizeCommandAccess(db, trx, principal, { propertyId: requestedPropertyId, commandType: "RECORD_COLLECTION",
+        stage: "PREVIEW", idempotencyKey: headers.idempotencyKey, correlationId: headers.correlationId, mode: "EXECUTE" });
+    }
     const replay = await replayOrConflict(trx, { subjectId: principal.subjectId, propertyId: requestedPropertyId, commandType: executionType, idempotencyKey: headers.idempotencyKey, requestHash });
     if (replay) return { preview: previewFromReceipt(replay), receipt: replay };
     const frozenInput = freezeCreateOrderOccupantIds(normalizedEnvelope.commandType, normalizedEnvelope.input);
@@ -1825,6 +1831,10 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
           ...(lockedTokenLifecycleConstraint ? { tokenLifecycleConstraint: lockedTokenLifecycleConstraint } : {})
         });
         const preflightEffect = asRecord(previewIdentity.effect);
+        if (commandType === "RECORD_REFUND" && normalizedInput.reconciliation !== undefined) {
+          await authorizeCommandAccess(db, trx, principal, { propertyId, commandType: "RECORD_COLLECTION", stage: "CONFIRM",
+            idempotencyKey: headers.idempotencyKey, correlationId: headers.correlationId, mode: "EXECUTE" });
+        }
         if (!preflightEffect) throw new DomainError("INTERNAL_ERROR", "Stored Preview effect is malformed", 500);
         const authorizationAttempt = {
           stage: "CONFIRM" as const,
@@ -1982,7 +1992,8 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
             input: preview.normalized_input,
             effect: rebuilt.effect,
             reason: confirmation.reason,
-            commandId: inserted.id
+            commandId: inserted.id,
+            previewId
           });
           await bindExternalPayments(trx, inserted.id, (rebuilt.basisVersions.externalPayments ?? []) as ExternalPaymentBasis[]);
           return { rebuilt, applied };
@@ -2000,7 +2011,9 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
         await trx.updateTable("command_previews").set({ status: "USED", used_at: new Date() }).where("id", "=", previewId).execute();
         await trx.updateTable("command_executions").set({ state: "APPLIED", completed_at: new Date() }).where("id", "=", inserted.id).execute();
         const receiptId = newId("receipt");
-        const persistedResult = strictRecoveryEvidence
+        const persistedResult = rebuilt.effect.operation === refundReconciliationOperation
+          ? { ...applied.persistedResult, effectHash: rebuilt.effectHash }
+          : strictRecoveryEvidence
           ? { ...applied.persistedResult, effectHash: persistedEffectHash }
           : applied.persistedResult;
         await trx.insertInto("command_receipts").values({
