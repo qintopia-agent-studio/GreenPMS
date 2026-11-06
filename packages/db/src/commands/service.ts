@@ -14,6 +14,7 @@ import {
   type HistoricalRecoverableCommandType,
   type PreviewDto,
   type QuoteReadDto,
+  type ReceiptCommandType,
   type ReceiptDto,
   type StoredQuoteDto
 } from "@qintopia/contracts";
@@ -1302,6 +1303,7 @@ async function receiptByCommand(
   const receipt: ReceiptReadDto = {
     receiptId: row.id,
     commandId: row.command_id,
+    commandType: row.command_type as ReceiptCommandType,
     executionStatus: row.execution_status,
     businessCommitted: row.business_committed,
     correlationId: row.correlation_id,

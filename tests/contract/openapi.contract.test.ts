@@ -276,8 +276,26 @@ describe("OpenAPI 3.1 command contract", () => {
     expect(resolveRequest.properties.commandType.anyOf.map((variant: { enum: string[] }) => variant.enum[0]).sort())
       .toEqual([...historicalRecoverableCommandTypes].sort());
     const commandSchema = document.paths["/api/v1/command-previews"].post.requestBody.content["application/json"].schema;
-    expect(commandSchema.anyOf).toHaveLength(publicCommandEnvelopeTypes.length);
-    const variants = new Map<string, JsonSchema>(commandSchema.anyOf.map((variant: JsonSchema) => {
+    // RECORD_REFUND has two disjoint public inputs: individual refund and grouped reconciliation.
+    expect(commandSchema.anyOf).toHaveLength(publicCommandEnvelopeTypes.length + 1);
+    const groupedRefunds = (commandSchema.anyOf as JsonSchema[]).filter((variant) => {
+      const properties = variant.properties as Record<string, JsonSchema>;
+      return (properties.commandType!.enum as string[])[0] === "RECORD_REFUND"
+        && (properties.input!.properties as Record<string, JsonSchema>).reconciliation !== undefined;
+    });
+    expect(groupedRefunds).toHaveLength(1);
+    const groupedInput = (groupedRefunds[0]!.properties as Record<string, JsonSchema>).input!;
+    expect(groupedInput).toMatchObject({ additionalProperties: false, required: ["propertyId", "orderId", "reconciliation"] });
+    expect(Object.keys(groupedInput.properties as object).sort()).toEqual(["orderId", "propertyId", "reconciliation"]);
+    const reconciliation = (groupedInput.properties as Record<string, JsonSchema>).reconciliation!;
+    expect(reconciliation).toMatchObject({ additionalProperties: false, required: ["source", "refunds", "note"] });
+    expect(Object.keys(reconciliation.properties as object).sort()).toEqual(["note", "refunds", "source"]);
+    const reconciliationProperties = reconciliation.properties as Record<string, JsonSchema>;
+    expect(reconciliationProperties.source).toMatchObject({ additionalProperties: false, required: ["externalPaymentBillId", "amountMinor"] });
+    expect(reconciliationProperties.refunds).toMatchObject({ type: "array", minItems: 1, maxItems: 50,
+      items: { additionalProperties: false, required: ["externalPaymentBillId", "amountMinor"] } });
+    const variants = new Map<string, JsonSchema>((commandSchema.anyOf as JsonSchema[])
+      .filter((variant) => variant !== groupedRefunds[0]).map((variant: JsonSchema) => {
       const properties = variant.properties as Record<string, JsonSchema>;
       return [((properties.commandType!.enum as string[])[0])!, variant];
     }));
@@ -297,6 +315,7 @@ describe("OpenAPI 3.1 command contract", () => {
       expect(variant.required, commandType).toEqual(["commandType", "input"]);
       if (commandType === "MANAGE_ROOM_CATALOG") {
         const shapes: Record<string, { required: string[]; optional?: string[] }> = {
+          SET_OPERATING_STATISTICS: { required: ["assetIds", "included"] },
           SET_BUILDING_ORDER: { required: ["buildingOrder"] },
           SAVE_TYPE: { required: ["name", "bathroom", "saleMode", "bedCount", "capacity"], optional: ["typeCode"] },
           DELETE_TYPE: { required: ["typeCode"] }, SET_TYPE_ACTIVE: { required: ["typeCode", "active"] },
@@ -329,6 +348,13 @@ describe("OpenAPI 3.1 command contract", () => {
     }
     const confirmReceiptSchema = document.paths["/api/v1/command-previews/{previewId}/confirm"]
       .post.responses["200"].content["application/json"].schema;
+    for (const variant of confirmReceiptSchema.anyOf) {
+      expect(variant.required).toContain("commandType");
+      expect(variant.properties.commandType.anyOf.map((item: { enum: string[] }) => item.enum[0]))
+        .toEqual(expect.arrayContaining(["CHECK_OUT", "PREVIEW:CHECK_OUT", "CREATE_QUOTE"]));
+    }
+    expect(document.paths["/api/v1/command-previews"].post.summary).toContain("without executing");
+    expect(document.paths["/api/v1/command-previews"].post.description).toContain("PREVIEW:*");
     const completeStayResultSchema = nestedSchemaObjects(confirmReceiptSchema).find((candidate) => {
       const properties = candidate.properties as Record<string, JsonSchema> | undefined;
       return properties?.orderId !== undefined
@@ -791,6 +817,7 @@ describe("OpenAPI 3.1 command contract", () => {
       receipt: {
         receiptId: historicalReceiptId,
         commandId: historicalCommandId,
+        commandType: "PREVIEW:CREATE_ORDER",
         correlationId: "contract-historical-nickname-original"
       }
     });
@@ -1133,6 +1160,7 @@ describe("OpenAPI 3.1 command contract", () => {
         receipt: {
           receiptId: previewReceiptId,
           commandId: previewCommandId,
+          commandType: `PREVIEW:${fixture.envelope.commandType}`,
           executionStatus: "EXECUTED",
           businessCommitted: true,
           correlationId: `original-${previewKey}`,
@@ -1160,6 +1188,7 @@ describe("OpenAPI 3.1 command contract", () => {
       expect(confirmReplay.json()).toEqual({
         receiptId: confirmReceiptId,
         commandId: confirmCommandId,
+        commandType: fixture.envelope.commandType,
         executionStatus: "EXECUTED",
         businessCommitted: true,
         correlationId: `original-${confirmKey}`,
@@ -1248,7 +1277,11 @@ describe("OpenAPI 3.1 command contract", () => {
     const errorSchema = document.paths["/api/v1/quotes"].post.responses["400"].content["application/json"].schema;
     expect(errorSchema.additionalProperties).toBe(false);
     const detailVariants = errorSchema.properties.details.anyOf as Array<{ required?: string[]; properties: Record<string, JsonSchema>; additionalProperties?: boolean }>;
-    expect(detailVariants).toHaveLength(20);
+    expect(detailVariants).toHaveLength(21);
+    const backupRetryDetails = detailVariants.filter((variant) => variant.properties.backupRetryAvailable);
+    expect(backupRetryDetails).toHaveLength(1);
+    expect(backupRetryDetails[0]).toEqual({ type: "object", additionalProperties: false,
+      required: ["backupRetryAvailable"], properties: { backupRetryAvailable: { type: "boolean", enum: [true] } } });
     const temporaryRoomDetails = detailVariants.filter((variant) => variant.properties.temporaryOtherRoomAvailable);
     expect(temporaryRoomDetails).toHaveLength(1);
     expect(temporaryRoomDetails[0]!.additionalProperties).toBe(false);

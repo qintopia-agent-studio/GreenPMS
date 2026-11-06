@@ -174,6 +174,7 @@ function normalizeCommandResult(
   return {
     receiptId: result.receiptId ?? "",
     commandId: result.commandId ?? "",
+    ...(result.commandType ? { commandType: result.commandType } : {}),
     executionStatus: result.executionStatus,
     businessCommitted: result.businessCommitted,
     correlationId: result.correlationId ?? "",

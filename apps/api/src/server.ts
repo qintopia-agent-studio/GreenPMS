@@ -964,7 +964,10 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
       commandPreviewRequestBodies.set(request, structuredClone(request.body));
     },
     config: { rateLimit: { max: positiveIntegerEnv("COMMAND_PREVIEW_RATE_LIMIT_MAX", 120), timeWindow: "1 minute", groupId: "command-previews" } },
-    schema: { tags: ["commands"], headers: WriteHeaders, body: CommandEnvelopeSchema, response: { 200: HistoricalCommandPreviewResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
+    schema: { tags: ["commands"],
+      summary: "Prepare a command preview without executing the business operation",
+      description: "Returns a prospective effect and a PREVIEW:* receipt. EXECUTED/businessCommitted=true refer only to saving that preview. To perform the business operation, use POST /api/v1/command-previews/{previewId}/confirm after checking the effect against the user's authorized intent and obtaining any required business confirmation. Required human confirmation may be obtained in conversation; no PMS UI visit is required. Use separate stable idempotency keys for preview and confirmation. Replaying this preview request never confirms it.",
+      headers: WriteHeaders, body: CommandEnvelopeSchema, response: { 200: HistoricalCommandPreviewResponseSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 422: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request) => {
     if (request.validationError) {
       const historicalEnvelope = commandPreviewRequestBodies.get(request);
@@ -1020,7 +1023,10 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
 
   app.post("/api/v1/command-previews/:previewId/confirm", {
     config: { rateLimit: { max: positiveIntegerEnv("COMMAND_CONFIRM_RATE_LIMIT_MAX", 120), timeWindow: "1 minute", groupId: "command-confirms" } },
-    schema: { tags: ["commands"], headers: WriteHeaders, params: PreviewParams, body: ConfirmSchema, response: { 200: HistoricalReceiptReadSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: Type.Union([HistoricalReceiptReadSchema, ErrorResponse]), 429: ErrorResponse, ...InternalErrorResponses } }
+    schema: { tags: ["commands"],
+      summary: "Execute the authorized business operation from an unchanged preview",
+      description: "Submit the preview's exact propertyId, commandType and effectHash as expectedEffectHash with confirmation=true and a structured reason. This is the technical commit step; it does not require repeating human consent already covering the specific effect. Do not infer missing required business confirmations. The server rechecks permission and business constraints atomically. A successful receipt.commandType matches the business operation without PREVIEW:. Verify its target resource and resulting business state before reporting completion. On timeout recover using the original confirmation command identity/idempotency key; do not issue another operation with a new key.",
+      headers: WriteHeaders, params: PreviewParams, body: ConfirmSchema, response: { 200: HistoricalReceiptReadSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: Type.Union([HistoricalReceiptReadSchema, ErrorResponse]), 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request, reply) => {
     const principal = await requirePrincipal(db, request);
     const previewId = (request.params as { previewId: string }).previewId;

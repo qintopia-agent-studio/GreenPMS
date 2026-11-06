@@ -702,7 +702,11 @@ export interface PreviewDto {
 export interface ReceiptDto {
   receiptId: string;
   commandId: string;
+  /** Exact persisted operation. PREVIEW:* never means the target business operation ran.
+   * New servers always return this; optional for clients reading older servers/cached receipts. */
+  commandType?: ReceiptCommandType;
   executionStatus: "EXECUTED" | "NOT_EXECUTED" | "UNKNOWN";
+  /** Commit status of commandType itself, including preview creation; not a generic business-success flag. */
   businessCommitted: boolean;
   correlationId: string;
   result?: Record<string, unknown>;
@@ -711,6 +715,8 @@ export interface ReceiptDto {
   factRefs: string[];
   committedAt?: string;
 }
+
+export type ReceiptCommandType = HistoricalRecoverableCommandType | `PREVIEW:${HistoricalCommandType}`;
 
 export interface CreateQuoteCommandResponseDto {
   quote: QuoteReadDto;

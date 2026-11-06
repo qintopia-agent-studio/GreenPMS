@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { ordinaryStaffCommandGrants } from "@qintopia/domain";
+import type { ReceiptCommandType } from "@qintopia/contracts";
 import {
   CommandEnvelopeSchema,
   CommandEffectSchema,
@@ -466,10 +467,11 @@ function preInHouseFulfillmentMoveResult() {
   };
 }
 
-function historicalReceipt(result: Record<string, unknown>) {
+function historicalReceipt(commandType: ReceiptCommandType, result: Record<string, unknown>) {
   return {
     receiptId: "receipt_historical",
     commandId: "command_historical",
+    commandType,
     executionStatus: "EXECUTED",
     businessCommitted: true,
     correlationId: "correlation-historical",
@@ -482,10 +484,11 @@ function historicalReceipt(result: Record<string, unknown>) {
   };
 }
 
-function currentReceipt(result: Record<string, unknown>) {
+function currentReceipt(commandType: ReceiptCommandType, result: Record<string, unknown>) {
   return {
     receiptId: "receipt_current",
     commandId: "command_current",
+    commandType,
     executionStatus: "EXECUTED",
     businessCommitted: true,
     correlationId: "correlation-current",
@@ -521,11 +524,11 @@ describe("pre-8.6 stay fulfillment protocol", () => {
   });
 
   it.each([
-    preInHouseFulfillmentShortenResult(),
-    preInHouseFulfillmentMoveResult()
-  ])("keeps a prior current executed result readable without accepting it as current", (result) => {
+    ["SHORTEN_STAY", preInHouseFulfillmentShortenResult()],
+    ["MOVE_UNIT", preInHouseFulfillmentMoveResult()]
+  ] as const)("keeps a prior current %s executed result readable without accepting it as current", (commandType, result) => {
     expect(Value.Check(ExecutedCommandResultSchema, result)).toBe(false);
-    expect(Value.Check(HistoricalReceiptReadSchema, historicalReceipt(result))).toBe(true);
+    expect(Value.Check(HistoricalReceiptReadSchema, historicalReceipt(commandType, result))).toBe(true);
   });
 
   it("requires the new entitlement evidence on current effects", () => {
@@ -854,7 +857,7 @@ describe("stay-to-membership conversion command schema", () => {
       conversionMode: "COMPLETED",
       conversionCoverageIds: []
     })).toBe(true);
-    const historical = historicalReceipt({
+    const historical = historicalReceipt("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", {
       ...result,
       conversionMode: "COMPLETED",
       conversionCoverageIds: []
@@ -1094,14 +1097,14 @@ describe("administrator correction receipt schema", () => {
   };
 
   it.each([
-    historicalArrangement,
-    profileCorrection,
-    effectiveDateCorrection,
-    historicalBackfill,
-    voidReconversion
-  ])("accepts the persisted Step 9 administrator correction result shape", (result) => {
+    ["CORRECT_HISTORICAL_STAY_ARRANGEMENTS", historicalArrangement],
+    ["CORRECT_MEMBER_PROFILE", profileCorrection],
+    ["CORRECT_MEMBERSHIP_EFFECTIVE_DATE", effectiveDateCorrection],
+    ["BACKFILL_HISTORICAL_MEMBERSHIP", historicalBackfill],
+    ["VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY", voidReconversion]
+  ] as const)("accepts the persisted Step 9 %s administrator correction result shape", (commandType, result) => {
     expect(Value.Check(ExecutedCommandResultSchema, result)).toBe(true);
-    expect(Value.Check(ReceiptSchema, currentReceipt(result))).toBe(true);
+    expect(Value.Check(ReceiptSchema, currentReceipt(commandType, result))).toBe(true);
   });
 
   it("does not accept invented lifecycle states in administrator correction results", () => {
@@ -1120,6 +1123,7 @@ describe("completed-stay backfill receipt schema", () => {
   const receipt = {
     receiptId: "receipt_backfill",
     commandId: "command_backfill",
+    commandType: "CREATE_ORDER",
     executionStatus: "EXECUTED",
     businessCommitted: true,
     correlationId: "correlation_backfill",
@@ -1162,6 +1166,7 @@ describe("complete-overdue-reserved-stay receipt schema", () => {
   const receipt = {
     receiptId: "receipt_complete_stay",
     commandId: "command_complete_stay",
+    commandType: "COMPLETE_STAY",
     executionStatus: "EXECUTED",
     businessCommitted: true,
     correlationId: "correlation_complete_stay",

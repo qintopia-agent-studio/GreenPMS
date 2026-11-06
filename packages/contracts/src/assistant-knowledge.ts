@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-06.4";
+export const assistantKnowledgeRevision = "2026-11-06.5";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -209,9 +209,9 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
   {
     id: "accounts-tokens", title: "工作人员账号与外部智能体访问", commands: ["ISSUE_TOKEN", "ROTATE_TOKEN", "REVOKE_TOKEN"],
     accountActions: ["CREATE_STAFF", "RESET_PASSWORD", "CHANGE_PASSWORD", "DISABLE_STAFF", "ENABLE_STAFF", "REVOKE_SESSIONS", "DELETE_STAFF"],
-    sources: ["apps/web/src/pages/AccountsPage.tsx", "apps/web/src/pages/TokensPage.tsx", "packages/domain/src/command-permissions.ts", "待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md"],
-    content: `工作人员通过网页登录账号使用PMS；管理员在设置→账号管理创建普通员工、重设密码、停用/启用和撤销会话；不是任意角色权限编辑器，不能新增管理员或管理其他管理员。工作人员可凭当前密码修改自己的密码。停用会让会话和Token失效，重新启用不恢复旧凭证；重设密码不自动启用停用账号。只有该管理页新建且从未使用的空员工账号可按条件删除，其他身份保留历史。遇到登录失效先重新登录，权限不足联系管理员，不共享他人账号。
-设置→智能体与外部访问管理API Key（Token）的范围、有效期、轮换和撤销。Token用于外部程序，不是员工登录密码；不能因新增功能自动给旧Token增加能力，需显式核对授权。不得把Token或模型密钥发给助手。助手只能说明此路径，不能直接打开这两个设置子页或代改权限。`
+    sources: ["apps/web/src/pages/AccountsPage.tsx", "apps/web/src/pages/TokensPage.tsx", "packages/domain/src/command-permissions.ts", "待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md", "docs/operations/agent-command-protocol.md"],
+    content: `设置→账号管理：管理员可建普通员工、重设密码、停用/启用、撤销会话；不能新增/管理其他管理员或自定角色权限。员工凭当前密码改密。停用使会话/Token失效；启用不恢复旧凭证，重设密码不启用。仅此页新建未用空账号可删，其他保留历史。失效重登，权限不足找管理员，不共享账号。
+设置→智能体与外部访问管理Token范围、有效期、轮换/撤销；不能因新增功能自动给旧Token增加能力。各外部智能体共用API，依Token身份/门店/命令权限办理；风险确认可通过对话，原指令覆盖必要事实不重复问，不代人同意。PREVIEW:*成功回执不代表业务完成；正式执行并回读一致才报完成，未知用原提交身份恢复。Token非登录密码；勿发Token/模型密钥给助手。内置助手不直开上述设置、不代改权限、不提交业务。`
   },
   {
     id: "assistant-help", title: "AI助手的使用、配置与不确定性", commands: [],
