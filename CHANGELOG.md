@@ -2,6 +2,13 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.20.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.19.1...v1.20.0) (2026-11-06)
+
+
+### Features
+
+* **api:** 增加通用业务 Skill 与可恢复执行器 ([#144](https://github.com/qintopia-agent-studio/GreenPMS/issues/144)) ([0c49b3d](https://github.com/qintopia-agent-studio/GreenPMS/commit/0c49b3d7012ea2a12458b9fefb8aa1a597de0f96))
+
 ## [1.19.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.19.0...v1.19.1) (2026-11-06)
 
 
