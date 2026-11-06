@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { workbenchExceptionGroupFor, type WorkbenchExceptionCode, type WorkbenchExceptionItem } from '@qintopia/contracts';
 import { workbenchExceptionReasons, type WorkbenchExceptionEvidence } from './workbench-exception-rules.ts';
+import { workbenchExceptionPage } from './workbench-exceptions.ts';
 
 const today = '2026-10-24';
 const base: WorkbenchExceptionEvidence = {
@@ -79,5 +81,48 @@ describe('workbench actionable exception rules', () => {
   it('includes every independent reason for one order', () => {
     expect(codes({ stayStatus: 'IN_HOUSE', lifecycleInconsistent: true, activeClaims: 3, heldCoverage: 2, netMinor: '600' })).toEqual(['LIFECYCLE_INCONSISTENT', 'INVENTORY_NOT_RELEASED', 'COVERAGE_NOT_RELEASED', 'REFUND_DUE']);
     expect(codes({ orderStatus: 'RESERVED', stayStatus: 'PLANNED', contractMinor: '100' })).toEqual(['OVERDUE_ARRIVAL', 'BALANCE_DUE']);
+  });
+});
+
+describe('business and financial workbench groups', () => {
+  const item = (id: string, reasonCodes: WorkbenchExceptionCode[]): WorkbenchExceptionItem => ({
+    orderId: id, orderStatus: 'RESERVED', stayStatus: 'PLANNED', guestName: '合成住客',
+    arrivalDate: '2026-10-20', departureDate: '2026-10-27', unitLabel: '合成房间', orderHref: `/orders/${id}`,
+    // DATA is intentionally shared: presentation classification must use the code.
+    reasons: reasonCodes.map(code => ({ code, category: 'DATA', message: code, amount: code === 'BALANCE_DUE' ? { currency: 'CNY', minorUnits: 2000 } : null }))
+  });
+  const all = [item('order-a', ['BALANCE_DUE']), item('order-b', ['OVERDUE_ARRIVAL', 'BALANCE_DUE']),
+    item('order-c', ['INVENTORY_NOT_RELEASED', 'LIFECYCLE_INCONSISTENT']), item('order-d', ['CHANNEL_DATA_REVIEW', 'FUNDS_INCONSISTENT'])];
+
+  it('counts overlapping orders once per group and filters reasons before cursor pagination', () => {
+    const first = workbenchExceptionPage(all, { group: 'BUSINESS', limit: 1 });
+    expect(first).toMatchObject({ totalOrders: 2, groupCounts: { BUSINESS: 2, FINANCIAL: 3 }, nextCursor: 'order-b' });
+    expect(first.items.map(row => row.orderId)).toEqual(['order-b']);
+    expect(first.items[0]?.reasons.map(reason => reason.code)).toEqual(['OVERDUE_ARRIVAL']);
+    const next = workbenchExceptionPage(all, { group: 'BUSINESS', limit: 1, afterId: first.nextCursor! });
+    expect(next).toMatchObject({ totalOrders: 2, groupCounts: first.groupCounts, nextCursor: null });
+    expect(next.items.map(row => row.orderId)).toEqual(['order-c']);
+    expect(next.items[0]?.reasons.map(reason => reason.code)).toEqual(['INVENTORY_NOT_RELEASED', 'LIFECYCLE_INCONSISTENT']);
+    expect(all[1]?.reasons).toHaveLength(2);
+  });
+
+  it('keeps money-related DATA reasons in finance and preserves their original amounts', () => {
+    expect(workbenchExceptionGroupFor('LIFECYCLE_INCONSISTENT')).toBe('BUSINESS');
+    for (const code of ['CHANNEL_DATA_REVIEW', 'CHANNEL_AMOUNT_MISMATCH', 'FUNDS_INCONSISTENT'] as const) expect(workbenchExceptionGroupFor(code)).toBe('FINANCIAL');
+    const financial = workbenchExceptionPage(all, { group: 'FINANCIAL' });
+    expect(financial.totalOrders).toBe(3);
+    expect(financial.groupCounts).toEqual({ BUSINESS: 2, FINANCIAL: 3 });
+    expect(financial.items.map(row => row.orderId)).toEqual(['order-a', 'order-b', 'order-d']);
+    expect(financial.items[1]?.reasons).toEqual([all[1]!.reasons[1]]);
+    expect(financial.items[1]?.reasons[0]?.amount).toEqual({ currency: 'CNY', minorUnits: 2000 });
+    expect(financial.items[2]?.reasons.map(reason => reason.code)).toEqual(['CHANNEL_DATA_REVIEW', 'FUNDS_INCONSISTENT']);
+  });
+
+  it('keeps unfiltered callers unchanged and distinguishes a zero group from later empty pages', () => {
+    expect(workbenchExceptionPage(all, {}).items).toEqual(all);
+    expect(workbenchExceptionPage(all, {}).totalOrders).toBe(4);
+    expect(workbenchExceptionPage(all, { group: 'BUSINESS', afterId: 'order-z' })).toMatchObject({ totalOrders: 2, items: [], nextCursor: null });
+    expect(workbenchExceptionPage([all[0]!], { group: 'BUSINESS' })).toMatchObject({ totalOrders: 0, items: [] });
+    expect(workbenchExceptionPage([], {})).toEqual({ totalOrders: 0, groupCounts: { BUSINESS: 0, FINANCIAL: 0 }, items: [], nextCursor: null });
   });
 });

@@ -4,7 +4,7 @@ import { createWorkbenchExceptionsReader } from "./workbenchExceptionsReader";
 
 afterEach(() => vi.useRealTimers());
 function response(overrides: Partial<WorkbenchExceptionsResponse> = {}): WorkbenchExceptionsResponse {
-  return { propertyId: "sample-property", businessDate: "2026-10-24", asOf: "2026-10-24T03:00:00Z", totalOrders: 73, items: [], nextCursor: "sample-order-050", ...overrides };
+  return { propertyId: "sample-property", businessDate: "2026-10-24", asOf: "2026-10-24T03:00:00Z", groupCounts: { BUSINESS: 73, FINANCIAL: 5 }, totalOrders: 73, items: [], nextCursor: "sample-order-050", ...overrides };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -15,6 +15,19 @@ function deferred<T>() {
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 describe("workbench exceptions page lifecycle", () => {
+  it("keeps the selected group through pagination and retry and starts a switched group at page one", async () => {
+    const read = vi.fn().mockResolvedValueOnce(response()).mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(response({ nextCursor: null })).mockResolvedValueOnce(response({ nextCursor: null, totalOrders: 1 }));
+    const business = createWorkbenchExceptionsReader("sample-property", read, 12_000, "BUSINESS");
+    business.refresh(); await flush(); business.nextPage(); await flush(); business.retry(); await flush(); business.cancel();
+    const financial = createWorkbenchExceptionsReader("sample-property", read, 12_000, "FINANCIAL");
+    financial.refresh(); await flush();
+    expect(read.mock.calls.map(([query]) => [query.group, query.afterId])).toEqual([
+      ["BUSINESS", undefined], ["BUSINESS", "sample-order-050"], ["BUSINESS", "sample-order-050"], ["FINANCIAL", undefined]
+    ]);
+    expect(financial.getSnapshot()).toMatchObject({ page: 1, data: { totalOrders: 1 } });
+    financial.cancel();
+  });
   it("uses authoritative totals, pages by cursor, retries the same page and refreshes from the beginning", async () => {
     const read = vi.fn().mockResolvedValueOnce(response()).mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValueOnce(response({ nextCursor: null })).mockResolvedValueOnce(response({ totalOrders: 0, nextCursor: null }));

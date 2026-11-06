@@ -59,11 +59,11 @@ export function usePaymentReconciliation(propertyId: string, refreshToken: numbe
 
 function Totals({ title, totals }: { title: string; totals: PaymentReconciliationTotals }) {
   return <section className="payment-reconciliation-total" aria-label={`${title}核对汇总`}><h4>{title}</h4>
-    <dl><dt>企微成功金额</dt><dd>{reconciliationMoney(totals.externalMinor)}</dd><dt>业务已登记</dt><dd>{reconciliationMoney(totals.businessMinor)}</dd>
-      <dt>流水待归属</dt><dd>{reconciliationMoney(totals.unassignedMinor)}</dd>
-      {BigInt(totals.excessMinor) > 0n ? <><dt>超额关联</dt><dd>{reconciliationMoney(totals.excessMinor)}</dd></> : null}
-      {BigInt(totals.unbackedMinor) > 0n ? <><dt>业务缺少流水依据</dt><dd>{reconciliationMoney(totals.unbackedMinor)}</dd></> : null}
-      {totals.unknownCount ? <><dt>来源待核实</dt><dd>{totals.unknownCount} 笔</dd></> : null}
+    <dl><dt>{title === "退款" ? "企微已退" : "企微已收"}</dt><dd>{reconciliationMoney(totals.externalMinor)}</dd><dt>已记到订单</dt><dd>{reconciliationMoney(totals.businessMinor)}</dd>
+      <dt>还没记到订单</dt><dd>{reconciliationMoney(totals.unassignedMinor)}</dd>
+      {BigInt(totals.excessMinor) > 0n ? <><dt>超过企微的金额</dt><dd>{reconciliationMoney(totals.excessMinor)}</dd></> : null}
+      {BigInt(totals.unbackedMinor) > 0n ? <><dt>订单已记、企微还没对上的金额</dt><dd>{reconciliationMoney(totals.unbackedMinor)}</dd></> : null}
+      {totals.unknownCount ? <><dt>结果不确定的记录</dt><dd>{totals.unknownCount} 笔</dd></> : null}
     </dl></section>;
 }
 
@@ -72,24 +72,24 @@ export function PaymentReconciliationQueue({ state, kind, setKind, retry, nextPa
   const delayed = data?.sync.lastSyncedAt && Date.parse(data.asOf) - Date.parse(data.sync.lastSyncedAt) > 5 * 60_000;
   const uncertain = Boolean(data && (!data.sync.enabled || !data.sync.lastSyncedAt || data.sync.hasError || delayed));
   return <section className="payment-reconciliation-queue" aria-labelledby="payment-reconciliation-heading">
-    <div className="queue-exceptions-context"><h3 id="payment-reconciliation-heading">收退款待核对{data ? ` · ${data.totalItems} 笔` : ""}</h3>
-      <p>收款与退款分别核对，未处理事项跨日期保留。这里只列待处理流水，不将订单应收或内部划转当作企微收款。</p>
-      {data ? <small>{!data.sync.enabled ? "企微同步未启用" : data.sync.lastSyncedAt ? `流水同步至 ${formatDateTime(data.sync.lastSyncedAt)}` : "尚无成功同步记录"}{data.sync.hasError || delayed ? " · 同步延迟，仍可能有尚未取得的流水" : ""}</small> : null}
+    <div className="queue-exceptions-context"><h3 id="payment-reconciliation-heading">企微收退款{data ? ` · ${data.totalItems} 笔` : ""}</h3>
+      <p>核对每笔钱是否记到了正确的订单。没处理完的记录会一直保留。</p>
+      {data ? <small>{!data.sync.enabled ? "尚未开始读取企微收退款" : data.sync.lastSyncedAt ? `企微记录更新于 ${formatDateTime(data.sync.lastSyncedAt)}` : "暂时还没有读到企微收退款"}</small> : null}
     </div>
-    <label className="filter-select-control"><span>流水类型</span><select value={kind} onChange={event => setKind(event.target.value as NonNullable<PaymentReconciliationQuery["kind"]>)}><option value="ALL">收款及退款</option><option value="COLLECTION">仅收款</option><option value="REFUND">仅退款</option></select></label>
-    {loading ? <LoadingBlock label="正在核对收退款流水" /> : error ? <div><InlineError context="read" error={error} title="收退款核对暂不可用" /><p>当前差额未知，不能据此认定已对平。</p><button type="button" className="button button-secondary" onClick={retry}>重试收退款核对</button></div> : data ? <>
-      <div className="payment-reconciliation-totals"><Totals title="收款" totals={data.summary.collections} /><Totals title="退款" totals={data.summary.refunds} /></div>
-      {uncertain ? <p role="status" className="form-field-note">同步依据尚未完整；以下为当前已知流水，不能认定全部收退款已对平。</p> : null}
-      {!data.items.length ? <p>{hasPrevious ? "本页没有待处理流水，请回到首页核对。" : uncertain ? "当前已知范围内没有待处理流水。" : "当前纳入核对范围的流水没有待处理差额。"}</p> : data.items.map(item => <article className="queue-row payment-reconciliation-row" key={item.id}>
-        <div className="queue-primary"><strong>{item.kind === "REFUND" ? "退款" : "收款"} · {item.nickname ?? "付款人昵称未取得"}</strong>
-          <span>{item.amountMinor === null ? "外部金额待核实" : `外部 ${formatMinor(item.amountMinor, item.currency)}`} · 业务已登记 {reconciliationMoney(item.businessMinor, item.currency)}</span>
-          <small>发生时间：{formatDateTime(item.occurredAt)}</small><small>{item.kind === "REFUND" ? "退款单号" : "收款单号"}：{item.reference ?? "待核对"}</small>
-          {item.originalTransactionReference && item.kind === "REFUND" ? <small>原收款：{item.originalTransactionReference}</small> : null}
+    <label className="filter-select-control"><span>查看</span><select value={kind} onChange={event => setKind(event.target.value as NonNullable<PaymentReconciliationQuery["kind"]>)}><option value="ALL">收款和退款</option><option value="COLLECTION">只看收款</option><option value="REFUND">只看退款</option></select></label>
+    {loading ? <LoadingBlock label="正在读取企微收退款" /> : error ? <div className="queue-exceptions-feedback"><InlineError context="read" error={error} title="暂时取不到企微收退款" /><p>还不能确认是否有漏记，请稍后重试。</p><button type="button" className="button button-secondary" onClick={retry}>重新读取</button></div> : data ? <>
+      {uncertain ? <p role="status" className="payment-reconciliation-notice">最新的企微收退款还没有取全，下面可能有遗漏，暂时不能确认账目都已对上。</p> : null}
+      <details className="payment-reconciliation-summary"><summary>查看收退款汇总</summary><div className="payment-reconciliation-totals"><Totals title="收款" totals={data.summary.collections} /><Totals title="退款" totals={data.summary.refunds} /></div></details>
+      {!data.items.length ? <p className="payment-reconciliation-notice">{hasPrevious ? "这一页已经没有需要处理的记录，请回到第一页查看。" : uncertain ? "已经读到的记录里，暂未发现需要处理的事项。" : "已读取的企微收退款中，没有需要处理的记录。"}</p> : data.items.map(item => <article className="queue-row payment-reconciliation-row" key={item.id}>
+        <div className="queue-primary"><strong>{item.kind === "REFUND" ? "退款" : "收款"} · {item.nickname ?? "未显示付款人昵称"}</strong>
+          <span>{item.amountMinor === null ? "企微金额还不确定" : `企微${item.kind === "REFUND" ? "退款" : "收款"} ${formatMinor(item.amountMinor, item.currency)}`} · 订单已记 {reconciliationMoney(item.businessMinor, item.currency)}</span>
+          <small>时间：{formatDateTime(item.occurredAt)}</small><small>{item.kind === "REFUND" ? "退款单号" : "收款单号"}：{item.reference ?? "暂时没有单号"}</small>
+          {item.originalTransactionReference && item.kind === "REFUND" ? <small>原收款单号：{item.originalTransactionReference}</small> : null}
           <ul className="queue-exception-reasons">{item.issues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.message}</li>)}</ul>
         </div>
-        <div className="queue-actions">{item.orderIds.length ? item.orderIds.map((orderId, index) => <Link className="button button-secondary button-small" key={orderId} to={`/orders/${encodeURIComponent(orderId)}?action=${item.kind === "REFUND" ? "RECORD_REFUND" : "RECORD_COLLECTION"}`}>{item.orderIds.length === 1 ? "打开订单核对" : `打开关联订单 ${index + 1}`}</Link>) : item.membershipOrderId ? <span>请在会员订单核对原收款</span> : <><Link className="button button-secondary button-small" to="/orders">查找所属订单</Link><small>核实归属后，从订单收款／退款入口选择这笔流水。</small></>}</div>
+        <div className="queue-actions">{item.orderIds.length ? item.orderIds.map((orderId, index) => <Link className="button button-secondary button-small" key={orderId} to={`/orders/${encodeURIComponent(orderId)}?action=${item.kind === "REFUND" ? "RECORD_REFUND" : "RECORD_COLLECTION"}`}>{item.orderIds.length === 1 ? "查看订单" : `查看订单 ${index + 1}`}</Link>) : item.membershipOrderId ? <span>请打开会员订单，核对这笔收款。</span> : <><Link className="button button-secondary button-small" to="/orders">查找订单</Link><small>先确认是哪张订单，再登记这笔{item.kind === "REFUND" ? "退款" : "收款"}。</small></>}</div>
       </article>)}
-      <div className="queue-exceptions-pagination"><span>本页 {data.items.length} 笔 · 共 {data.totalItems} 笔待核对</span><div><button type="button" className="button button-secondary button-small" disabled={!hasPrevious} onClick={firstPage}>回到首页</button><button type="button" className="button button-secondary button-small" disabled={!data.nextCursor} onClick={nextPage}>下一页流水</button></div></div>
+      <div className="queue-exceptions-pagination" aria-label="企微收退款分页"><span>本页 {data.items.length} 笔 · 共 {data.totalItems} 笔需要处理</span><div><button type="button" className="button button-secondary button-small" disabled={!hasPrevious} onClick={firstPage}>回到第一页</button><button type="button" className="button button-secondary button-small" disabled={!data.nextCursor} onClick={nextPage}>下一页</button></div></div>
     </> : null}
   </section>;
 }

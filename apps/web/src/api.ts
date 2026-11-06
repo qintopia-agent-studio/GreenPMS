@@ -193,6 +193,7 @@ export const api = {
   },
   workbenchExceptions: (query: WorkbenchExceptionsQuery, signal?: AbortSignal) => {
     const params = new URLSearchParams({ propertyId: query.propertyId });
+    if (query.group) params.set("group", query.group);
     if (query.afterId) params.set("afterId", query.afterId);
     if (query.limit !== undefined) params.set("limit", String(query.limit));
     return request<WorkbenchExceptionsResponse>(`/api/v1/workbench/exceptions?${params}`, signal ? { signal } : {});

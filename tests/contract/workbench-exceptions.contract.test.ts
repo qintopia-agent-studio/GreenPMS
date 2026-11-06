@@ -46,6 +46,10 @@ describe('workbench exception API contract', () => {
   it('requires authentication and property READ access', async () => {
     expect((await app.inject({ method: 'GET', url: path })).statusCode).toBe(401);
     expect((await app.inject({ method: 'GET', url: '/api/v1/workbench/exceptions?propertyId=other_property', headers })).statusCode).toBe(403);
+    for (const group of ['BUSINESS', 'FINANCIAL']) {
+      expect((await app.inject({ method: 'GET', url: `${path}&group=${group}` })).statusCode).toBe(401);
+      expect((await app.inject({ method: 'GET', url: `/api/v1/workbench/exceptions?propertyId=other_property&group=${group}`, headers })).statusCode).toBe(403);
+    }
   });
 
   it('serves the same structured reasons to a READ token, excludes private contact data and does not mutate business facts', async () => {
@@ -64,6 +68,20 @@ describe('workbench exception API contract', () => {
     expect(await owner.selectFrom('orders').select(['id', 'version', 'status']).orderBy('id').execute()).toEqual(before);
   });
 
+  it('filters by group while returning stable filtered totals and pagination', async () => {
+    const business = await app.inject({ method: 'GET', url: `${path}&group=BUSINESS&limit=1`, headers });
+    expect(business.statusCode, business.body).toBe(200);
+    expect(business.json()).toMatchObject({ totalOrders: 0, groupCounts: { BUSINESS: 0, FINANCIAL: 2 }, items: [], nextCursor: null });
+    const financial = await app.inject({ method: 'GET', url: `${path}&group=FINANCIAL&limit=1`, headers });
+    expect(financial.statusCode, financial.body).toBe(200);
+    const first = financial.json();
+    expect(first).toMatchObject({ totalOrders: 2, groupCounts: { BUSINESS: 0, FINANCIAL: 2 } });
+    expect(first.items).toHaveLength(1);
+    const next = (await app.inject({ method: 'GET', url: `${path}&group=FINANCIAL&limit=1&afterId=${encodeURIComponent(first.nextCursor)}`, headers })).json();
+    expect(next).toMatchObject({ totalOrders: 2, groupCounts: first.groupCounts, nextCursor: null });
+    expect([first.items[0].orderId, next.items[0].orderId]).toEqual([...ids].sort());
+  });
+
   it('paginates without changing the total or repeating an order', async () => {
     const first = (await app.inject({ method: 'GET', url: `${path}&limit=1`, headers })).json();
     expect(first.totalOrders).toBe(2); expect(first.items).toHaveLength(1);
@@ -73,7 +91,7 @@ describe('workbench exception API contract', () => {
     expect([first.items[0].orderId, next.items[0].orderId]).toEqual([...ids].sort());
   });
 
-  it.each(['limit=0', 'limit=101', 'limit=1.5', 'afterId=x'] )('rejects invalid pagination: %s', async query => {
+  it.each(['limit=0', 'limit=101', 'limit=1.5', 'afterId=x', 'group=SYSTEM', 'group=business', 'group='] )('rejects invalid query values: %s', async query => {
     expect((await app.inject({ method: 'GET', url: `${path}&${query}`, headers })).statusCode).toBe(400);
   });
 

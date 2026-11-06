@@ -138,7 +138,7 @@ it("reads the initial count once and polls only the visible exceptions tab", asy
   const response: PaymentReconciliationResponse = {
     propertyId: "property_1", asOf: "2026-11-06T08:00:00Z",
     sync: { enabled: true, lastSyncedAt: "2026-11-06T08:00:00Z", hasError: false },
-    summary: { collections: { ...totals }, refunds: { ...totals } }, items: [], totalItems: 0, nextCursor: null
+    summary: { collections: { ...totals }, refunds: { ...totals } }, items: [], totalItems: 0, totalOpenItems: 0, nextCursor: null
   };
   const read = vi.fn().mockResolvedValue(response);
   let active = false;

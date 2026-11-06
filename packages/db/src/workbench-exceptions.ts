@@ -1,5 +1,5 @@
 import { sql, type Kysely } from 'kysely';
-import { DomainError, type WorkbenchExceptionsQuery, type WorkbenchExceptionsResponse, type WorkbenchExceptionItem } from '@qintopia/contracts';
+import { DomainError, workbenchExceptionGroupFor, type WorkbenchExceptionsQuery, type WorkbenchExceptionsResponse, type WorkbenchExceptionItem } from '@qintopia/contracts';
 import type { Database } from './schema.ts';
 import { propertyLocalClockAt } from './members.ts';
 import { workbenchExceptionReasons, type WorkbenchExceptionEvidence } from './workbench-exception-rules.ts';
@@ -10,10 +10,24 @@ interface EvidenceRow extends WorkbenchExceptionEvidence {
   unitLabel: string | null;
 }
 
+/** Filter reasons before paginating; an order can have a task in both groups. */
+export function workbenchExceptionPage(all: readonly WorkbenchExceptionItem[], query: Pick<WorkbenchExceptionsQuery, 'group' | 'afterId' | 'limit'>) {
+  const groupCounts = { BUSINESS: 0, FINANCIAL: 0 };
+  for (const item of all) {
+    for (const group of new Set(item.reasons.map(reason => workbenchExceptionGroupFor(reason.code)))) groupCounts[group]++;
+  }
+  const grouped = query.group ? all.map(item => ({ ...item, reasons: item.reasons.filter(reason => workbenchExceptionGroupFor(reason.code) === query.group) }))
+    .filter(item => item.reasons.length > 0) : all;
+  const candidates = query.afterId ? grouped.filter(item => item.orderId > query.afterId!) : grouped;
+  const items = candidates.slice(0, query.limit ?? 50);
+  return { totalOrders: grouped.length, groupCounts, items, nextCursor: candidates.length > items.length ? items.at(-1)!.orderId : null };
+}
+
 /** One property-wide snapshot; no business mutations or per-order lifecycle projections. */
 export async function getWorkbenchExceptions(db: Kysely<Database>, query: WorkbenchExceptionsQuery): Promise<WorkbenchExceptionsResponse> {
   const limit = query.limit ?? 50;
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new DomainError('VALIDATION_ERROR', '每页数量必须在 1 至 100 之间', 400);
+  if (query.group !== undefined && query.group !== 'BUSINESS' && query.group !== 'FINANCIAL') throw new DomainError('VALIDATION_ERROR', '请选择业务异常或财务异常', 400);
   return db.transaction().setIsolationLevel('repeatable read').execute(async trx => {
     await sql`SET TRANSACTION READ ONLY`.execute(trx);
     const property = await trx.selectFrom('properties').select(['timezone', sql<Date>`transaction_timestamp()`.as('asOf')])
@@ -118,9 +132,7 @@ export async function getWorkbenchExceptions(db: Kysely<Database>, query: Workbe
         guestName: row.guestName, arrivalDate: row.arrivalDate, departureDate: row.departureDate,
         unitLabel: row.unitLabel, orderHref: `/orders/${encodeURIComponent(row.orderId)}`, reasons });
     }
-    const candidates = query.afterId ? all.filter(item => item.orderId > query.afterId!) : all;
-    const items = candidates.slice(0, limit);
-    return { propertyId: query.propertyId, businessDate, asOf, totalOrders: all.length, items,
-      nextCursor: candidates.length > limit ? items.at(-1)!.orderId : null };
+    return { propertyId: query.propertyId, businessDate, asOf,
+      ...workbenchExceptionPage(all, query) };
   });
 }

@@ -39,6 +39,8 @@ export interface PaymentReconciliationResponse {
   sync: { enabled: boolean; lastSyncedAt: string | null; hasError: boolean };
   summary: { collections: PaymentReconciliationTotals; refunds: PaymentReconciliationTotals };
   totalItems: number;
+  /** All unresolved property records, independent of kind, status, order and page filters. */
+  totalOpenItems: number;
   nextCursor: string | null;
   items: PaymentReconciliationItem[];
 }

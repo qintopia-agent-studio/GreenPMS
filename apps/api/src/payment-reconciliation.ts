@@ -20,7 +20,7 @@ const totals = Type.Object({ externalMinor: amount, businessMinor: amount, unass
 export const PaymentReconciliationResponseSchema = Type.Object({ propertyId: Id, asOf: DateTime,
   sync: Type.Object({ enabled: Type.Boolean(), lastSyncedAt: nullable(DateTime), hasError: Type.Boolean() }, { additionalProperties: false }),
   summary: Type.Object({ collections: totals, refunds: totals }, { additionalProperties: false }),
-  totalItems: nonnegative, nextCursor: nullable(Type.String({ minLength: 1, maxLength: 220 })),
+  totalItems: nonnegative, totalOpenItems: nonnegative, nextCursor: nullable(Type.String({ minLength: 1, maxLength: 220 })),
   items: Type.Array(Type.Object({ id: Type.String(), kind: Type.Union([Type.Literal('COLLECTION'), Type.Literal('REFUND')]),
     billId: nullable(Id), factId: nullable(Id), orderId: nullable(Id), membershipOrderId: nullable(Id), orderIds: Type.Array(Id),
     reference: nullable(Type.String()), originalTransactionReference: nullable(Type.String()), nickname: nullable(Type.String()), currency: Type.String(),

@@ -25,7 +25,8 @@ for (const loseResponse of [false, true]) test(`取消单收退补齐：${loseRe
   const login = await page.request.post("/api/v1/auth/login", { data: { username: "admin", password: "demo-pass-2026" } });
   expect(login.ok()).toBe(true);
   await page.goto("/today"); await page.getByRole("tab", { name: /异常/ }).click();
-  const queue = page.getByRole("region", { name: /收退款待核对/ });
+  await page.getByRole("button", { name: /^财务异常/ }).click();
+  const queue = page.getByRole("region", { name: /企微收退款/ });
   await expect(queue.locator(".payment-reconciliation-row").filter({ hasText: fixture.reference })).toHaveCount(2);
   await page.screenshot({ path: info.outputPath("refund-reconciliation-open-exceptions.png"), fullPage: true });
   await page.getByLabel("营业日期").fill("2026-01-01");
@@ -95,7 +96,8 @@ for (const loseResponse of [false, true]) test(`取消单收退补齐：${loseRe
   expect(updated.collectionFacts.filter((fact: { fact_type: string }) => fact.fact_type === "REFUND")).toHaveLength(1);
   expect(updated.amounts.netRecordedCollection.minorUnits).toBe(0);
   await page.goto("/today"); await page.getByRole("tab", { name: /异常/ }).click();
-  await expect(queue.getByRole("heading", { name: /收退款待核对/ })).toBeVisible();
+  await page.getByRole("button", { name: /^财务异常/ }).click();
+  await expect(queue.getByRole("heading", { name: /企微收退款/ })).toBeVisible();
   await expect(queue.locator(".payment-reconciliation-row").filter({ hasText: fixture.reference })).toHaveCount(0);
   await page.screenshot({ path: info.outputPath("refund-reconciliation-complete.png"), fullPage: true });
   expect(errors).toEqual([]);
