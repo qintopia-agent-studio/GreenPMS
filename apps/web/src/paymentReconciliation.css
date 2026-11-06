@@ -4,6 +4,60 @@
 .payment-reconciliation-total { border: 1px solid #d5dfd9; border-radius: 8px; padding: 14px; background: #f9fbf9; }
 .payment-reconciliation-total dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; margin: 10px 0 0; }
 .payment-reconciliation-total dd { margin: 0; font-variant-numeric: tabular-nums; }
-.payment-reconciliation-row .queue-primary, .payment-reconciliation-row .queue-actions { min-width: 0; overflow-wrap: anywhere; }
-.payment-reconciliation-row .queue-actions { display: grid; gap: 6px; max-width: 240px; }
-@media (max-width: 600px) { .payment-reconciliation-totals { grid-template-columns: 1fr; } .payment-reconciliation-row { display: grid; } .payment-reconciliation-row .queue-actions { max-width: none; } }
+/* Payment rows have two children; the shared order row reserves a 38px icon column. */
+.queue-row.payment-reconciliation-row {
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 220px);
+  align-items: start;
+  gap: 16px 24px;
+  padding: 18px 14px;
+}
+
+.payment-reconciliation-row .queue-primary {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+
+.payment-reconciliation-row .queue-primary > strong {
+  font-size: 15px;
+}
+
+.payment-reconciliation-row .queue-primary > span,
+.payment-reconciliation-row .queue-exception-reasons li {
+  font-size: 14px;
+}
+
+.payment-reconciliation-row .queue-primary > small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.payment-reconciliation-row .queue-exception-reasons {
+  margin-top: 2px;
+  color: var(--warning);
+}
+
+.payment-reconciliation-row .queue-actions {
+  min-width: 0;
+  display: grid;
+  grid-column: auto;
+  grid-row: auto;
+  gap: 8px;
+  align-content: start;
+  justify-content: stretch;
+  overflow-wrap: anywhere;
+}
+
+.payment-reconciliation-row .queue-actions small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 620px) {
+  .payment-reconciliation-totals { grid-template-columns: minmax(0, 1fr); }
+  .queue-row.payment-reconciliation-row { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .payment-reconciliation-row .queue-actions { grid-column: 1 / -1; grid-row: auto; }
+}

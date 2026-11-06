@@ -1,7 +1,7 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Link, MemoryRouter, Route, Routes, useParams } from "react-router-dom";
-import type { WorkbenchExceptionItem, WorkbenchExceptionsResponse } from "@qintopia/contracts";
+import type { PaymentReconciliationItem, PaymentReconciliationResponse, PaymentReconciliationTotals, WorkbenchExceptionItem, WorkbenchExceptionsResponse } from "@qintopia/contracts";
 import { api } from "../api";
 import { TodayPage } from "../pages/TodayPage";
 import { useWorkspace, WorkspaceProvider } from "../session";
@@ -69,6 +69,60 @@ api.workbenchExceptions = async (query, signal): Promise<WorkbenchExceptionsResp
   const items = Array.from({ length: Math.min(query.limit ?? 50, Math.max(totalOrders - start, 0)) }, (_, i) => sampleItem(start + i, query.propertyId));
   return { propertyId: query.propertyId, businessDate, asOf: new Date().toISOString(), totalOrders, items, nextCursor: start + items.length < totalOrders ? items.at(-1)!.orderId : null };
 };
+function samplePayments(propertyId: string): PaymentReconciliationItem[] {
+  const pairReference = "SAMPLE-COLLECTION-20261105-LOCAL-PREVIEW-000000000000000001";
+  const base = {
+    factId: null, membershipOrderId: null, currency: "CNY", excessMinor: "0",
+    occurredAt: "2026-11-05T06:30:00Z", discoveredAt: "2026-11-05T06:35:00Z"
+  };
+  const items: PaymentReconciliationItem[] = [
+    { ...base, id: "sample-payment-001", billId: "sample-bill-001", kind: "COLLECTION", reference: pairReference,
+      originalTransactionReference: null, nickname: "样本付款人甲（收退均漏记）", orderId: null, orderIds: [],
+      amountMinor: 90000, allocatedMinor: "0", businessMinor: "0", unassignedMinor: "90000",
+      issues: [{ code: "UNASSIGNED", message: "该笔收款尚未关联业务，需核实所属订单并登记" }] },
+    { ...base, id: "sample-payment-002", billId: "sample-bill-002", kind: "REFUND",
+      reference: "SAMPLE-REFUND-20261105-LOCAL-PREVIEW-ORIGINAL-COLLECTION-000000000000000001",
+      originalTransactionReference: pairReference, nickname: "样本付款人甲（收退均漏记）", orderId: null, orderIds: [],
+      amountMinor: 90000, allocatedMinor: "0", businessMinor: "0", unassignedMinor: "90000",
+      occurredAt: "2026-11-05T07:10:00Z", discoveredAt: "2026-11-05T07:15:00Z",
+      issues: [{ code: "UNASSIGNED", message: "该笔退款尚未关联业务；收退净额为零仍须分别核对" }] },
+    { ...base, id: "sample-payment-003", billId: "sample-bill-003", kind: "COLLECTION",
+      reference: "SAMPLE-COLLECTION-20261105-LOCAL-PREVIEW-PARTIAL-000000000000000003",
+      originalTransactionReference: null, nickname: "样本付款人乙", orderId: "sample-order-001", orderIds: ["sample-order-001"],
+      amountMinor: 128000, allocatedMinor: "80000", businessMinor: "80000", unassignedMinor: "48000",
+      issues: [{ code: "UNASSIGNED", message: "该笔收款已登记一部分，剩余份额仍待核实业务归属" }] },
+    { ...base, id: "sample-payment-004", billId: "sample-bill-004", kind: "REFUND",
+      reference: "SAMPLE-REFUND-20261105-LOCAL-PREVIEW-PARTIAL-000000000000000004",
+      originalTransactionReference: "SAMPLE-COLLECTION-20261101-LOCAL-PREVIEW-000000000000000004",
+      nickname: "样本付款人丙", orderId: "sample-order-000", orderIds: ["sample-order-000"],
+      amountMinor: 24000, allocatedMinor: "8000", businessMinor: "8000", unassignedMinor: "16000",
+      issues: [{ code: "UNASSIGNED", message: "该笔退款已登记一部分，请核对原收款及本单退款份额" }] }
+  ];
+  return propertyId === "sample-b" ? items.slice(-1) : items;
+}
+function samplePaymentTotals(items: PaymentReconciliationItem[], kind: PaymentReconciliationItem["kind"]): PaymentReconciliationTotals {
+  const selected = items.filter((item) => item.kind === kind);
+  const sum = (value: (item: PaymentReconciliationItem) => string) => selected.reduce((total, item) => total + BigInt(value(item)), 0n).toString();
+  return {
+    externalMinor: sum((item) => String(item.amountMinor ?? 0)), businessMinor: sum((item) => item.businessMinor),
+    unassignedMinor: sum((item) => item.unassignedMinor ?? "0"), excessMinor: "0", unbackedMinor: "0", unknownCount: 0
+  };
+}
+api.paymentReconciliation = async (query, signal): Promise<PaymentReconciliationResponse> => {
+  const requestedScenario = scenario;
+  await delay(requestedScenario === "slow" ? 16000 : 250, signal);
+  if (requestedScenario === "error" || requestedScenario === "page-error" && query.afterId) throw new Error("虚构失败场景：收退款核对暂不可用");
+  const all = (requestedScenario === "empty" ? [] : samplePayments(query.propertyId))
+    .filter((item) => (!query.kind || query.kind === "ALL" || item.kind === query.kind) && (!query.orderId || item.orderIds.includes(query.orderId)));
+  const remaining = query.afterId ? all.filter((item) => item.id > query.afterId!) : all;
+  const items = remaining.slice(0, query.limit ?? 50);
+  const asOf = new Date().toISOString();
+  return {
+    propertyId: query.propertyId, asOf, sync: { enabled: true, lastSyncedAt: asOf, hasError: false },
+    summary: { collections: samplePaymentTotals(all, "COLLECTION"), refunds: samplePaymentTotals(all, "REFUND") },
+    totalItems: all.length, items, nextCursor: remaining.length > items.length ? items.at(-1)!.id : null
+  };
+};
 function Preview() {
   const [activeScenario, setActiveScenario] = useState<Scenario>("complete");
   const { propertyId, setPropertyId } = useWorkspace();
@@ -76,11 +130,14 @@ function Preview() {
     <aside className="workbench-preview-banner"><strong>虚构样本 · 只读预览</strong><span>无登录、无生产连接；展示真实工作台组件。</span>
       <label>门店<select aria-label="样本门店" value={propertyId} onChange={(event) => setPropertyId(event.target.value)}>{meta.properties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
       <label>场景<select aria-label="样本场景" value={activeScenario} onChange={(event) => { scenario = event.target.value as Scenario; setActiveScenario(scenario); }}>
-        <option value="complete">完整异常 · 51 笔分页</option><option value="empty">正常取消 · 零异常</option><option value="error">请求失败</option><option value="page-error">第二页失败</option><option value="slow">超时请求</option>
+        <option value="complete">完整异常 · 51 单分页 / 4 笔流水</option><option value="empty">正常取消 · 零异常</option><option value="error">请求失败</option><option value="page-error">订单第二页失败</option><option value="slow">超时请求</option>
       </select></label>
     </aside>
-    <Routes><Route path="/" element={<TodayPage key={activeScenario} />} /><Route path="/orders/:orderId" element={<SampleOrder />} /></Routes>
+    <Routes><Route path="/" element={<TodayPage key={activeScenario} />} /><Route path="/orders" element={<SampleOrderSearch />} /><Route path="/orders/:orderId" element={<SampleOrder />} /></Routes>
   </main>;
+}
+function SampleOrderSearch() {
+  return <section className="today-queue workbench-preview-record"><h1>查找所属订单 · 虚构只读示例</h1><p>此入口仅验证页面跳转，不自动认定流水归属，也不登记收款或退款。正式界面需核实客人、住期和付款依据后再选择订单。</p><Link className="button button-secondary" to="/orders/sample-order-000">查看虚构订单示例</Link><Link className="button button-secondary" to="/">返回工作台</Link></section>;
 }
 function SampleOrder() {
   const { orderId } = useParams();
