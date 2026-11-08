@@ -69,6 +69,7 @@ import {
   propertyRecoveryCoordinationScope,
   quoteRecoveryStorageKey,
   readPersistedCommandRecovery,
+  receiptCommandTypeMatches,
   RECOVERY_STORAGE_SYNC_EVENT,
   recoveryCommandRequest,
   recoveryStorageEventMatchesScope,
@@ -1160,8 +1161,9 @@ function validQuoteMoney(value: unknown): boolean {
     && Number.isSafeInteger(money.minorUnits));
 }
 
-function quoteFromReceipt(receipt: ReceiptDto, pending: PendingQuoteCommand): QuoteDto {
-  if (receipt.executionStatus !== "EXECUTED"
+export function quoteFromReceipt(receipt: ReceiptDto, pending: PendingQuoteCommand): QuoteDto {
+  if (!receiptCommandTypeMatches(receipt, "CREATE_QUOTE")
+    || receipt.executionStatus !== "EXECUTED"
     || receipt.businessCommitted !== true
     || !receipt.receiptId
     || !receipt.commandId
@@ -1223,8 +1225,9 @@ function quoteFromReceipt(receipt: ReceiptDto, pending: PendingQuoteCommand): Qu
   return record as unknown as QuoteDto;
 }
 
-function quoteNotExecutedReceiptIsCoherent(receipt: ReceiptDto): boolean {
-  return receipt.executionStatus === "NOT_EXECUTED"
+export function quoteNotExecutedReceiptIsCoherent(receipt: ReceiptDto): boolean {
+  return receiptCommandTypeMatches(receipt, "CREATE_QUOTE")
+    && receipt.executionStatus === "NOT_EXECUTED"
     && receipt.businessCommitted === false
     && Boolean(receipt.receiptId && receipt.commandId && receipt.correlationId)
     && receipt.result === undefined

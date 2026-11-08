@@ -172,17 +172,14 @@ function normalizeCommandResult(
   result: Partial<ReceiptDto> & Pick<ReceiptDto, "executionStatus" | "businessCommitted">
 ): ReceiptDto {
   return {
+    // Keep command identity, historical protocol markers and unexpected fields
+    // intact so receipt validation cannot mistake malformed data for an old response.
+    ...result,
     receiptId: result.receiptId ?? "",
     commandId: result.commandId ?? "",
-    ...(result.commandType ? { commandType: result.commandType } : {}),
-    executionStatus: result.executionStatus,
-    businessCommitted: result.businessCommitted,
     correlationId: result.correlationId ?? "",
-    ...(result.result ? { result: result.result } : {}),
-    ...(result.error ? { error: result.error } : {}),
     resourceRefs: result.resourceRefs ?? [],
-    factRefs: result.factRefs ?? [],
-    ...(result.committedAt ? { committedAt: result.committedAt } : {})
+    factRefs: result.factRefs ?? []
   };
 }
 

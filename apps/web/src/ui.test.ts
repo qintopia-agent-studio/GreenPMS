@@ -2,13 +2,70 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import type { PreviewDto, ReceiptDto } from "@qintopia/contracts";
+import { commandTypes, type PreviewDto, type ReceiptDto } from "@qintopia/contracts";
 import { ApiError } from "./api.ts";
 import { createOrderPricingDecision, enumerateServiceDates } from "@qintopia/domain";
 import { channelPriceDifferenceReasonRequired, InlineError } from "./uiBasic";
 import type { CommandRequest } from "./types";
 import { CommandDialog, fundsCommandCanReturnToEdit, returnCommandDraftAfterClose } from "./ui.tsx";
 import { administratorMembershipPreviewHasEvidence, businessErrorMessage, businessStatusLabel, clearCorruptPersistedCommandRecovery, clearPersistedCommandRecovery, clearPersistedCommandRecoveryIfMatches, clearTerminalPersistedCommandRecoveryIfPresent, CommandRecoveryBar, commandDialogBusinessErrorMessage, commandPreviewFailureCanReload, commandRecoveryConflictStorageKeys, commandRecoverySnapshotIsBlocked, commandRecoveryStorageHasConflict, commandRecoveryStorageKey, completedStayBackfillPreviewHasEvidence, completedStayBackfillReceiptHasEvidence, conversionPreviewHasEvidence, conversionReceiptHasEvidence, createSharedCommandRecoveryStorage, EffectSummary, formatDateTime, fulfillmentAuditNote, fulfillmentReceiptCopy, fulfillmentTransitionIsExpected, guestNicknameLabel, historicalStayCorrectionPreviewHasEvidence, knownCommittedCommandMessage, lodgingReceiptCopy, notifyKnownCommittedCommand, occupantSummaryItems, planBDateChangeTimeline, propertyRecoveryCoordinationScope, QuoteRecoveryConflictNotice, quoteRecoveryStorageKey, readCommandRecoveryConflict, readPersistedCommandRecovery, ReceiptPanel, receiptExecutionSemanticsAreCoherent, receiptHasCommandEvidence, receiptTransactionReferenceLabel, recoveryCommandRequest, recoveryStorageEventMatchesScope, recoveryStorageSyncEventMatchesScope, runRecoveryCheckedPreview, savePersistedCommandRecovery, sharedRecoveryMarkerKey, stayDateFundsAreOperatorFacing, stayDatePreviewPricingSummary, temporaryOtherRoomArrangementPresentation, transitionPersistedCommandRecovery, u1PreviewHasBusinessEvidence } from "./ui.tsx";
+
+// The server now includes the persisted operation identity on every receipt.
+// Keep old cached receipts readable, but never mistake a preview or another command for success.
+function expectCurrentReceiptIdentity(
+  commandType: Parameters<typeof receiptHasCommandEvidence>[0],
+  receipt: ReceiptDto,
+  validate: (receipt: ReceiptDto) => boolean
+) {
+  expect(validate(receipt), `${commandType}: legacy receipt`).toBe(true);
+  const current = { ...receipt, commandType };
+  expect(validate(current), `${commandType}: current API receipt`).toBe(true);
+  expect(validate({ ...current, commandType: `PREVIEW:${commandType}` as NonNullable<ReceiptDto["commandType"]> }), `${commandType}: preview identity`).toBe(false);
+  expect(validate({ ...current, commandType: commandType === "EXTEND_STAY" ? "SHORTEN_STAY" : "EXTEND_STAY" }), `${commandType}: different operation`).toBe(false);
+}
+
+describe("Receipt operation identity across business commands", () => {
+  it.each(commandTypes)("matches %s for unresolved and not-executed receipts without accepting previews", (commandType) => {
+    const unknown: ReceiptDto = { receiptId: "", commandId: "", correlationId: "", executionStatus: "UNKNOWN", businessCommitted: false, resourceRefs: [], factRefs: [] };
+    const rejected: ReceiptDto = {
+      receiptId: "receipt_rejected", commandId: "command_rejected", correlationId: "correlation_rejected",
+      executionStatus: "NOT_EXECUTED", businessCommitted: false, resourceRefs: [], factRefs: [], committedAt: "2026-11-08T01:00:00Z",
+      error: { code: "PREVIEW_STALE", message: "Preview stale", retryable: false,
+        receiptId: "receipt_rejected", commandId: "command_rejected", correlationId: "correlation_rejected" }
+    };
+    for (const receipt of [unknown, rejected]) {
+      expectCurrentReceiptIdentity(commandType, receipt, candidate => receiptHasCommandEvidence(commandType, candidate, {}));
+    }
+  });
+
+  it("does not treat a legacy preview payload as a committed business operation", () => {
+    const receipt: ReceiptDto = {
+      receiptId: "receipt_preview", commandId: "command_preview", correlationId: "correlation_preview",
+      executionStatus: "EXECUTED", businessCommitted: true, resourceRefs: ["preview_1"], factRefs: [],
+      committedAt: "2026-11-08T01:00:00Z", result: { preview: { previewId: "preview_1", commandType: "RECORD_COLLECTION" } }
+    };
+    expect(receiptHasCommandEvidence("RECORD_COLLECTION", receipt, { orderId: "order_1" })).toBe(false);
+    expect(receiptHasCommandEvidence("RECORD_COLLECTION", { ...receipt, commandType: "RECORD_COLLECTION" }, { orderId: "order_1" })).toBe(false);
+  });
+
+  it.each(["CANCEL_ORDER", "MARK_NO_SHOW", "REVOKE_CHECK_IN"] as const)("restores %s only with the matching operation and unchanged linked evidence", (commandType) => {
+    const effectHash = "a".repeat(64);
+    const revoke = commandType === "REVOKE_CHECK_IN";
+    const receipt: ReceiptDto = {
+      receiptId: "receipt_lifecycle", commandId: "command_lifecycle", correlationId: "correlation_lifecycle",
+      executionStatus: "EXECUTED", businessCommitted: true, resourceRefs: ["order_lifecycle", "amendment_lifecycle", "revision_lifecycle"], factRefs: [],
+      committedAt: "2026-11-08T01:00:00Z",
+      result: { orderId: "order_lifecycle", amendmentId: "amendment_lifecycle", pricingRevisionId: "revision_lifecycle", effectHash,
+        status: commandType === "CANCEL_ORDER" ? "CANCELLED" : commandType === "MARK_NO_SHOW" ? "NO_SHOW" : "CHECK_IN_REVOKED",
+        entitlementTransition: { from: revoke ? "CONSUMED" : "HELD", to: revoke ? "RESTORED" : "RELEASED", coverageCount: 1 },
+        ...(revoke ? { fulfillmentTiming: { effectiveDate: "2026-11-08", recordedBusinessDate: "2026-11-08", recordingMode: "ON_SCHEDULE" } } : {}) }
+    };
+    const input = { orderId: "order_lifecycle" };
+    expectCurrentReceiptIdentity(commandType, receipt, candidate => receiptHasCommandEvidence(commandType, candidate, input, undefined, effectHash));
+    expect(receiptHasCommandEvidence(commandType, { ...receipt, commandType }, input, undefined, "b".repeat(64))).toBe(false);
+    expect(receiptHasCommandEvidence(commandType, { ...receipt, commandType, resourceRefs: [] }, input, undefined, effectHash)).toBe(false);
+  });
+});
 
 describe("room rename confirmation evidence", () => {
   const input = { propertyId: "property_1", action: "RENAME_ROOM", expectedVersion: 3, roomId: "room_1", code: "F01" };
@@ -1161,7 +1218,7 @@ describe("historical stay arrangement correction presentation", () => {
       factRefs: ["correction_peng"],
       committedAt: "2026-09-02T08:00:00.000Z"
     };
-    expect(receiptHasCommandEvidence("CORRECT_HISTORICAL_STAY_ARRANGEMENTS", receipt, input, effect, effectHash)).toBe(true);
+    expectCurrentReceiptIdentity("CORRECT_HISTORICAL_STAY_ARRANGEMENTS", receipt, candidate => receiptHasCommandEvidence("CORRECT_HISTORICAL_STAY_ARRANGEMENTS", candidate, input, effect, effectHash));
     const attacks: ReceiptDto[] = [
       { ...receipt, result: { ...result, effectHash: undefined } },
       { ...receipt, result: { ...result, effectHash: "8".repeat(64) } },
@@ -1997,7 +2054,7 @@ describe("administrator membership correction presentation", () => {
       { commandType: "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY" as const, receipt: rebuildReceipt, input: rebuildInput, effect: rebuildEffect }
     ];
     for (const candidate of cases) {
-      expect(receiptHasCommandEvidence(candidate.commandType, candidate.receipt, candidate.input, candidate.effect, effectHash), candidate.commandType).toBe(true);
+      expectCurrentReceiptIdentity(candidate.commandType, candidate.receipt, receipt => receiptHasCommandEvidence(candidate.commandType, receipt, candidate.input, candidate.effect, effectHash));
       expect(receiptHasCommandEvidence(candidate.commandType, { ...candidate.receipt, factRefs: [] }, candidate.input, candidate.effect, effectHash), `${candidate.commandType}: facts`).toBe(false);
       expect(receiptHasCommandEvidence(candidate.commandType, { ...candidate.receipt, resourceRefs: [] }, candidate.input, candidate.effect, effectHash), `${candidate.commandType}: resources`).toBe(false);
       expect(receiptHasCommandEvidence(candidate.commandType, { ...candidate.receipt, result: { ...candidate.receipt.result, effectHash: undefined } }, candidate.input, candidate.effect, effectHash), `${candidate.commandType}: missing hash`).toBe(false);
@@ -2518,7 +2575,7 @@ describe("completed-stay backfill presentation and recovery", () => {
       factRefs: ["fact_backfill_collection"],
       committedAt: "2026-08-14T09:00:00.000Z"
     };
-    expect(completedStayBackfillReceiptHasEvidence(receipt, input, effect, effectHash)).toBe(true);
+    expectCurrentReceiptIdentity("CREATE_ORDER", receipt, candidate => completedStayBackfillReceiptHasEvidence(candidate, input, effect, effectHash));
     expect(receiptHasCommandEvidence("CREATE_ORDER", receipt, input, effect, effectHash)).toBe(true);
     expect(completedStayBackfillReceiptHasEvidence({
       ...receipt,
@@ -2579,20 +2636,16 @@ describe("completed-stay backfill presentation and recovery", () => {
       factRefs: [],
       committedAt: "2026-08-14T09:00:00.000Z"
     };
-    expect(receiptHasCommandEvidence("CREATE_ORDER", rejected, input, effect, effectHash)).toBe(true);
+    expectCurrentReceiptIdentity("CREATE_ORDER", rejected, candidate => receiptHasCommandEvidence("CREATE_ORDER", candidate, input, effect, effectHash));
     expect(receiptHasCommandEvidence("CREATE_ORDER", {
       ...rejected,
       resourceRefs: ["unexpected_partial_write"]
     }, input, effect, effectHash)).toBe(false);
-    expect(receiptHasCommandEvidence("CREATE_ORDER", {
-      receiptId: "",
-      commandId: "",
-      executionStatus: "UNKNOWN",
-      businessCommitted: false,
-      correlationId: "",
-      resourceRefs: [],
-      factRefs: []
-    }, input, effect, effectHash)).toBe(true);
+    const unknown: ReceiptDto = {
+      receiptId: "", commandId: "", executionStatus: "UNKNOWN", businessCommitted: false,
+      correlationId: "", resourceRefs: [], factRefs: []
+    };
+    expectCurrentReceiptIdentity("CREATE_ORDER", unknown, candidate => receiptHasCommandEvidence("CREATE_ORDER", candidate, input, effect, effectHash));
     expect(receiptHasCommandEvidence("CREATE_ORDER", {
       receiptId: "",
       commandId: "",
@@ -3124,7 +3177,7 @@ describe("stay collection upgrade membership evidence", () => {
   it("accepts only coherent Preview and committed Receipt evidence through both command-shell entry points", () => {
     expect(conversionPreviewHasEvidence(previewEffect, input)).toBe(true);
     expect(u1PreviewHasBusinessEvidence("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", previewEffect, input)).toBe(true);
-    expect(conversionReceiptHasEvidence(receipt, input, previewEffect, effectHash)).toBe(true);
+    expectCurrentReceiptIdentity("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", receipt, candidate => conversionReceiptHasEvidence(candidate, input, previewEffect, effectHash));
     expect(receiptHasCommandEvidence(
       "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP",
       receipt,
@@ -3284,7 +3337,7 @@ describe("stay collection upgrade membership evidence", () => {
       resourceRefs: receipt.resourceRefs.filter((reference) => !conversionResult.conversionCoverageIds.includes(reference))
     };
 
-    expect(conversionReceiptHasEvidence(historicalReceipt, input, previewEffect, effectHash)).toBe(true);
+    expectCurrentReceiptIdentity("CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", historicalReceipt, candidate => conversionReceiptHasEvidence(candidate, input, previewEffect, effectHash));
     expect(conversionReceiptHasEvidence(
       historicalReceipt,
       { propertyId: input.propertyId, orderId: input.orderId },
@@ -3517,7 +3570,7 @@ describe("Order lifecycle evidence", () => {
       factRefs: [],
       committedAt: "2026-08-01T10:00:00.000Z"
     };
-    expect(receiptHasCommandEvidence("CANCEL_ORDER", receipt, { orderId: "order_cancel" }, cancelEffect)).toBe(true);
+    expectCurrentReceiptIdentity("CANCEL_ORDER", receipt, candidate => receiptHasCommandEvidence("CANCEL_ORDER", candidate, { orderId: "order_cancel" }, cancelEffect));
     expect(receiptHasCommandEvidence("CANCEL_ORDER", {
       ...receipt,
       result: { ...result, ...temporaryOtherRoomLifecycleEvidence }
@@ -4012,6 +4065,20 @@ describe("U1 confirmation evidence", () => {
       newDepartureDate: afterDepartureDate
     };
     expect(u1PreviewHasBusinessEvidence(commandType, effect, input)).toBe(true);
+    const effectHash = "a".repeat(64);
+    const { operation: _operation, inventoryUnitId: _inventoryUnitId, ...effectResult } = effect;
+    const receipt: ReceiptDto = {
+      receiptId: "receipt_dates", commandId: "command_dates", correlationId: "correlation_dates",
+      executionStatus: "EXECUTED", businessCommitted: true, committedAt: "2026-08-01T10:00:00Z",
+      result: { ...effectResult, arrivalDate: effect.after.arrivalDate, departureDate: effect.after.departureDate,
+        amendmentId: "amendment_dates", staySegmentId: "segment_dates", pricingRevisionId: "revision_dates", effectHash },
+      resourceRefs: ["order_1", "stay_1", "amendment_dates", "segment_dates", "revision_dates"], factRefs: []
+    };
+    expectCurrentReceiptIdentity(commandType, receipt, candidate => receiptHasCommandEvidence(commandType, candidate, input, effect, effectHash));
+    expectCurrentReceiptIdentity(commandType, receipt, candidate => receiptHasCommandEvidence(commandType, candidate, { orderId: input.orderId }, undefined, effectHash));
+    expect(receiptHasCommandEvidence(commandType, { ...receipt, commandType }, input, effect, "b".repeat(64))).toBe(false);
+    expect(receiptHasCommandEvidence(commandType, { ...receipt, commandType, resourceRefs: [] }, input, effect, effectHash)).toBe(false);
+
     const fractional = { ...effect, after: { ...effect.after, pricing: { ...effect.after.pricing, currentContractAmount: money(38750) } },
       pricingDecision: { ...effect.pricingDecision, pricingBasis: "MANUAL_ADJUSTMENT", targetCurrentContractAmount: money(38750), differenceFromPolicy: money(8750), manualAdjustmentMinor:8750, differenceExceedsThreshold:true, reason:{code:`${commandType}_MANUAL_PRICE`,note:"实际约定387.50元"} },
       fundsSummary:{...effect.fundsSummary,collectionDifference:money(28750)} };
@@ -4253,7 +4320,8 @@ describe("U1 confirmation evidence", () => {
       factRefs: [],
       committedAt: "2026-08-03T10:00:00.000Z"
     };
-    expect(receiptHasCommandEvidence("SHORTEN_STAY", receipt, input, effect, effectHash)).toBe(true);
+    expectCurrentReceiptIdentity("SHORTEN_STAY", receipt, candidate => receiptHasCommandEvidence("SHORTEN_STAY", candidate, input, effect, effectHash));
+    expectCurrentReceiptIdentity("SHORTEN_STAY", receipt, candidate => receiptHasCommandEvidence("SHORTEN_STAY", candidate, { orderId: input.orderId }, undefined, effectHash));
     expect(u1PreviewHasBusinessEvidence("SHORTEN_STAY", {
       ...effect,
       ...temporaryOtherRoomLifecycleEvidence

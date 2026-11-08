@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-06.5";
+export const assistantKnowledgeRevision = "2026-11-08.1";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -43,9 +43,9 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   },
   {
     id: "workspace", title: "工作区、权限与安全提交", commands: [],
-    sources: ["apps/web/src/session.tsx", "packages/domain/src/command-permissions.ts"],
-    content: `先确认当前门店。房态、订单、会员、工作台、经营概览和设置的数据与权限以当前工作区为准，换店后重新查询；只读账号不能提交业务。按钮隐藏或禁用可能由权限、订单状态、功能开关或未完成的核对流程导致，应查看页面具体原因，不教员工绕过限制。
-所有业务变更都在正式页面填写、查看预览并由员工确认；预览不是提交成功。结果不明先查订单或恢复提示，不重复登记收款、退款或预订。不要求员工提供登录密码、API Key、完整证件号。`
+    sources: ["apps/web/src/session.tsx", "apps/web/src/ui.tsx", "docs/operations/agent-command-protocol.md", "packages/domain/src/command-permissions.ts"],
+    content: `确认门店，切换后重查；数据权限以当前门店为准，只读账号不能写入。按钮不可用按页面说明核对权限、订单状态、开关或未完成操作，不绕过。
+业务变更在正式页面预览并由员工确认；预览不是提交成功。结果不明先查订单或恢复提示，不重复登记收款、退款或预订。恢复期间新操作可能暂时暂停；点击查询原操作结果。订单已经生效时不要重新办理；持续“无法核对”请管理员排查，不要清空浏览器记录来绕过。不索要登录密码、API Key、完整证件号。`
   },
   {
     id: "room-status", title: "房态查询与同日退房交接", commands: [],

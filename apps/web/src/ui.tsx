@@ -599,6 +599,26 @@ function hasOnlyKeys(value: Record<string, unknown>, required: readonly string[]
     && Object.keys(value).every((key) => allowed.has(key));
 }
 
+export function receiptCommandTypeMatches(value: unknown, commandType: HistoricalRecoverableCommandType): boolean {
+  if (!isRecord(value)) return false;
+  // Older servers/cached receipts may omit the identity, but a preview is never
+  // evidence that the requested business operation completed.
+  if (isRecord(value.result) && Object.hasOwn(value.result, "preview")) return false;
+  return !Object.hasOwn(value, "commandType") || value.commandType === commandType;
+}
+
+function hasExecutedReceiptKeys(
+  value: Record<string, unknown>,
+  commandType: HistoricalRecoverableCommandType,
+  optional: readonly string[] = []
+): boolean {
+  return receiptCommandTypeMatches(value, commandType)
+    && hasOnlyKeys(value, [
+      "receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId",
+      "result", "resourceRefs", "factRefs", "committedAt"
+    ], ["commandType", "error", ...optional]);
+}
+
 function evidenceValuesEqual(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -1205,7 +1225,7 @@ export function moveUnitReceiptHasEvidence(
     : undefined;
   if (!receiptExecutionSemanticsAreCoherent(value) || !isRecord(value)
     || value.executionStatus !== "EXECUTED" || value.businessCommitted !== true
-    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !hasExecutedReceiptKeys(value, "MOVE_UNIT")
     || !nonblankString(value.receiptId) || !nonblankString(value.commandId) || !nonblankString(value.correlationId)
     || typeof value.committedAt !== "string" || Number.isNaN(Date.parse(value.committedAt))
     || value.error !== undefined
@@ -1836,7 +1856,7 @@ export function conversionReceiptHasEvidence(
 
   if (!receiptExecutionSemanticsAreCoherent(value) || !isRecord(value)
     || value.executionStatus !== "EXECUTED" || value.businessCommitted !== true
-    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error", "protocolVersion", "recoveryMode"])
+    || !hasExecutedReceiptKeys(value, "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP", ["protocolVersion", "recoveryMode"])
     || !nonblankString(value.receiptId) || !nonblankString(value.commandId) || !nonblankString(value.correlationId)
     || typeof value.committedAt !== "string" || Number.isNaN(Date.parse(value.committedAt))
     || value.error !== undefined || !isRecord(value.result)) return false;
@@ -4537,7 +4557,7 @@ function dateChangeReceiptHasEvidence(
 ): boolean {
   if (!isRecord(value)
     || value.executionStatus !== "EXECUTED" || value.businessCommitted !== true
-    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !hasExecutedReceiptKeys(value, commandType)
     || !nonblankString(value.receiptId) || !nonblankString(value.commandId) || !nonblankString(value.correlationId)
     || typeof value.committedAt !== "string" || Number.isNaN(Date.parse(value.committedAt))
     || value.error !== undefined
@@ -4642,7 +4662,7 @@ function orderLifecycleReceiptHasEvidence(
 ): boolean {
   if (!isRecord(value)
     || value.executionStatus !== "EXECUTED" || value.businessCommitted !== true
-    || !hasOnlyKeys(value, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !hasExecutedReceiptKeys(value, commandType)
     || !nonblankString(value.receiptId) || !nonblankString(value.commandId) || !nonblankString(value.correlationId)
     || typeof value.committedAt !== "string" || Number.isNaN(Date.parse(value.committedAt))
     || value.error !== undefined
@@ -4707,7 +4727,7 @@ export function completedStayBackfillReceiptHasEvidence(
     || !terminalReceiptHasDurableIdentity(value)
     || value.executionStatus !== "EXECUTED"
     || value.businessCommitted !== true
-    || !hasOnlyKeys(value as unknown as Record<string, unknown>, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !hasExecutedReceiptKeys(value as unknown as Record<string, unknown>, "CREATE_ORDER")
     || value.error !== undefined
     || !isRecord(value.result)) return false;
 
@@ -4922,7 +4942,7 @@ function historicalStayCorrectionReceiptHasEvidence(
 ): boolean {
   if (!isEffectHash(expectedEffectHash)
     || !isRecord(receipt.result)
-    || !hasOnlyKeys(receipt as unknown as Record<string, unknown>, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !hasExecutedReceiptKeys(receipt as unknown as Record<string, unknown>, "CORRECT_HISTORICAL_STAY_ARRANGEMENTS")
     || receipt.executionStatus !== "EXECUTED"
     || receipt.businessCommitted !== true
     || receipt.error !== undefined) return false;
@@ -5099,7 +5119,7 @@ function administratorMembershipCorrectionReceiptHasEvidence(
   if (!isAdministratorMembershipCorrection(commandType)
     || !isEffectHash(expectedEffectHash)
     || !isRecord(receipt.result)
-    || !hasOnlyKeys(receipt as unknown as Record<string, unknown>, ["receiptId", "commandId", "executionStatus", "businessCommitted", "correlationId", "result", "resourceRefs", "factRefs", "committedAt"], ["error"])
+    || !hasExecutedReceiptKeys(receipt as unknown as Record<string, unknown>, commandType)
     || receipt.executionStatus !== "EXECUTED"
     || receipt.businessCommitted !== true
     || receipt.error !== undefined) return false;
@@ -5263,7 +5283,8 @@ export function receiptHasCommandEvidence(
   previewEffect?: Record<string, unknown>,
   expectedEffectHash?: string
 ): boolean {
-  if (!receiptExecutionSemanticsAreCoherent(receipt) || !terminalReceiptHasDurableIdentity(receipt)) return false;
+  if (!receiptCommandTypeMatches(receipt, commandType)
+    || !receiptExecutionSemanticsAreCoherent(receipt) || !terminalReceiptHasDurableIdentity(receipt)) return false;
   if (commandType === "RECORD_REFUND" && receipt.businessCommitted
     && (isRefundReconciliationInput(input) || (isRecord(receipt.result) && receipt.result.operation === "RECONCILE_WECOM_REFUNDS"))) {
     return refundReconciliationReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
@@ -5301,7 +5322,7 @@ export function receiptHasCommandEvidence(
       return completedStayBackfillReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
     }
     if (receipt.executionStatus === "UNKNOWN") {
-      return hasExactKeys(receipt as unknown as Record<string, unknown>, [
+      return hasOnlyKeys(receipt as unknown as Record<string, unknown>, [
         "receiptId",
         "commandId",
         "executionStatus",
@@ -5309,12 +5330,12 @@ export function receiptHasCommandEvidence(
         "correlationId",
         "resourceRefs",
         "factRefs"
-      ])
+      ], ["commandType"])
         && receipt.resourceRefs.length === 0
         && receipt.factRefs.length === 0;
     }
     return receipt.executionStatus === "NOT_EXECUTED"
-      && hasExactKeys(receipt as unknown as Record<string, unknown>, [
+      && hasOnlyKeys(receipt as unknown as Record<string, unknown>, [
         "receiptId",
         "commandId",
         "executionStatus",
@@ -5324,7 +5345,7 @@ export function receiptHasCommandEvidence(
         "resourceRefs",
         "factRefs",
         "committedAt"
-      ])
+      ], ["commandType"])
       && receipt.resourceRefs.length === 0
       && receipt.factRefs.length === 0;
   }
@@ -6530,9 +6551,10 @@ export function CommandDialog({
   const completeStay = request.commandType === "COMPLETE_STAY" && request.presentation === "COMPLETE_STAY";
   const strictAdministratorCorrection = isStrictAdministratorCorrection(request.commandType);
   const reconciledRefund = request.commandType === "RECORD_REFUND" && isRefundReconciliationInput(request.input);
-  const initialReceiptHasEvidence = (!backfillStay && !completeStay && !strictAdministratorCorrection && !reconciledRefund)
-    || !initialReceipt
-    || receiptHasCommandEvidence(request.commandType, initialReceipt, request.input, undefined, request.recoveryEffectHash);
+  const initialReceiptHasEvidence = !initialReceipt
+    || (receiptCommandTypeMatches(initialReceipt, request.commandType)
+      && ((!backfillStay && !completeStay && !strictAdministratorCorrection && !reconciledRefund)
+        || receiptHasCommandEvidence(request.commandType, initialReceipt, request.input, undefined, request.recoveryEffectHash)));
   const [preview, setPreview] = useState<PreviewDto>();
   const [receipt, setReceipt] = useState<ReceiptDto | undefined>(initialReceiptHasEvidence ? initialReceipt : undefined);
   const [error, setError] = useState<unknown>();

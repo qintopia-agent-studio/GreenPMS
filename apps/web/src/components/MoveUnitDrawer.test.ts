@@ -402,6 +402,13 @@ describe("move unit drawer", () => {
     };
 
     expect(moveUnitReceiptHasEvidence(receipt, input, effect, result.effectHash)).toBe(true);
+    const currentReceipt = { ...receipt, commandType: "MOVE_UNIT" as const };
+    expect(moveUnitReceiptHasEvidence(currentReceipt, input, effect, result.effectHash)).toBe(true);
+    expect(moveUnitReceiptHasEvidence(currentReceipt, { orderId: input.orderId }, undefined, result.effectHash)).toBe(true);
+    expect(moveUnitReceiptHasEvidence({ ...currentReceipt, commandType: "PREVIEW:MOVE_UNIT" }, input, effect, result.effectHash)).toBe(false);
+    expect(moveUnitReceiptHasEvidence({ ...currentReceipt, commandType: "EXTEND_STAY" }, input, effect, result.effectHash)).toBe(false);
+    expect(moveUnitReceiptHasEvidence({ ...currentReceipt, resourceRefs: [] }, input, effect, result.effectHash)).toBe(false);
+
     expect(moveUnitReceiptHasEvidence(receipt, input, effect, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).toBe(false);
     expect(moveUnitReceiptHasEvidence({ ...receipt, result: {} }, input, effect)).toBe(false);
     expect(moveUnitReceiptHasEvidence({
