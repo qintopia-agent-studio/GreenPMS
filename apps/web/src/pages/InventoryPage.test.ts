@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { ReceiptDto } from "../types";
 import {
   QuoteRequestGuard,
   RoomStatusCommandAttemptGuard,
@@ -34,6 +35,8 @@ import {
   parseYuanAmountToMinor,
   quoteRecoveryInputForCurrentContext,
   quoteRecoveryMemberSelectionForUnit,
+  quoteFromReceipt,
+  quoteNotExecutedReceiptIsCoherent,
   quotePricingSummary,
   QuoteRecoveryPageEntry,
   staffQuoteError,
@@ -175,6 +178,67 @@ const pending = {
   },
   state: "SENDING"
 } as const;
+
+describe("quote recovery receipt identity", () => {
+  const quote = {
+    ...pending.input,
+    quoteId: "quote_recovery",
+    coverageSet: [],
+    cashLines: [],
+    cashRemainder: { currency: "CNY", minorUnits: 0 },
+    currentContractAmount: { currency: "CNY", minorUnits: 0 },
+    expiresAt: "2026-10-10T10:15:00.000Z",
+    inputHash: "a".repeat(64)
+  };
+  const completed: ReceiptDto = {
+    receiptId: "receipt_quote",
+    commandId: "command_quote",
+    commandType: "CREATE_QUOTE",
+    executionStatus: "EXECUTED",
+    businessCommitted: true,
+    correlationId: "correlation_quote",
+    result: { quote },
+    resourceRefs: [quote.quoteId],
+    factRefs: [],
+    committedAt: "2026-10-10T10:00:00.000Z"
+  };
+  const interrupted: ReceiptDto = {
+    receiptId: "receipt_interrupted",
+    commandId: "command_interrupted",
+    commandType: "CREATE_QUOTE",
+    executionStatus: "NOT_EXECUTED",
+    businessCommitted: false,
+    correlationId: "correlation_interrupted",
+    error: {
+      code: "COMMAND_INTERRUPTED",
+      message: "Original quote was not executed",
+      correlationId: "correlation_interrupted",
+      commandId: "command_interrupted",
+      receiptId: "receipt_interrupted",
+      retryable: false
+    },
+    resourceRefs: [],
+    factRefs: [],
+    committedAt: "2026-10-10T10:00:00.000Z"
+  };
+
+  it("accepts matching current receipts and older receipts without commandType", () => {
+    expect(quoteFromReceipt(completed, pending)).toEqual(quote);
+    expect(quoteNotExecutedReceiptIsCoherent(interrupted)).toBe(true);
+    const { commandType: _completedType, ...legacyCompleted } = completed;
+    const { commandType: _interruptedType, ...legacyInterrupted } = interrupted;
+    expect(quoteFromReceipt(legacyCompleted, pending)).toEqual(quote);
+    expect(quoteNotExecutedReceiptIsCoherent(legacyInterrupted)).toBe(true);
+  });
+
+  it.each(["PREVIEW:CREATE_ORDER", "CREATE_ORDER", "", null, undefined])(
+    "does not resolve a quote using an explicit %s command identity",
+    (commandType) => {
+      expect(() => quoteFromReceipt({ ...completed, commandType } as ReceiptDto, pending)).toThrow("原报价结果缺少可核对的执行凭证");
+      expect(quoteNotExecutedReceiptIsCoherent({ ...interrupted, commandType } as ReceiptDto)).toBe(false);
+    }
+  );
+});
 
 describe("selected order command authorization scope", () => {
   it("requires every command to keep its bound principal scope", () => {

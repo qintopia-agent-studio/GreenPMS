@@ -4,6 +4,7 @@ import type { Kysely } from "kysely";
 import type { CommandType, PreviewDto, ReceiptDto } from "@qintopia/contracts";
 import type { Database } from "@qintopia/db";
 import { buildServer } from "../../apps/api/src/server.ts";
+import { receiptHasCommandEvidence } from "../../apps/web/src/ui.tsx";
 import { withPropertyClockForTesting } from "../../packages/db/src/members.ts";
 import { demo } from "../../packages/db/src/seed.ts";
 import { resetTestDatabase } from "../helpers/database.ts";
@@ -49,12 +50,12 @@ async function assertReceiptReads(receipt: ReceiptDto) {
   }
 }
 
-async function createInHouseOrder(unitId: string) {
-  return clock("2026-11-05", async () => {
+async function createInHouseOrder(unitId: string, arrivalDate = "2026-11-05", departureDate = "2026-11-06") {
+  return clock(arrivalDate, async () => {
     const key = `receipt-identity-${++sequence}`;
     const response = await app.inject({ method: "POST", url: "/api/v1/quotes", headers: metadata(`${key}-quote`),
       payload: { propertyId: demo.propertyId, inventoryUnitId: unitId, stayType: "FREE",
-        arrivalDate: "2026-11-05", departureDate: "2026-11-06", pricingPolicyVersionId: demo.freePolicyId } });
+        arrivalDate, departureDate, pricingPolicyVersionId: demo.freePolicyId } });
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json().receipt.commandType).toBe("CREATE_QUOTE");
     const prepared = await preview("CREATE_ORDER", { quoteId: response.json().quote.quoteId,
@@ -83,6 +84,7 @@ describe("command identity across the public API", () => {
       const prepared = await preview("CHECK_OUT", { orderId }, "identity-checkout-preview");
       expect(prepared.receipt).toMatchObject({ commandType: "PREVIEW:CHECK_OUT", executionStatus: "EXECUTED",
         businessCommitted: true, result: { preview: { previewId: prepared.preview.previewId } } });
+      expect(receiptHasCommandEvidence("CHECK_OUT", prepared.receipt, { orderId }, prepared.preview.effect, prepared.preview.effectHash)).toBe(false);
       expect(prepared.preview.effect).toMatchObject({ orderId, fromStatus: "CHECKED_IN", toStatus: "CHECKED_OUT" });
       const afterPreview = await readOrder(orderId);
       expect(afterPreview.order).toEqual(before.order);
@@ -97,10 +99,12 @@ describe("command identity across the public API", () => {
         result: { orderId, status: "CHECKED_OUT", amendmentId: expect.any(String) } });
       expect(receipt.commandId).not.toBe(prepared.receipt.commandId);
       expect(receipt.result).not.toHaveProperty("preview");
+      expect(receiptHasCommandEvidence("CHECK_OUT", receipt, { orderId }, prepared.preview.effect, prepared.preview.effectHash)).toBe(true);
       // Lost confirm responses are recovered by the original confirmation identity, not the preview ID.
       const recovered = await app.inject({ url: `/api/v1/command-results?propertyId=${demo.propertyId}&commandType=CHECK_OUT&idempotencyKey=identity-checkout-confirm`, headers });
       expect(recovered.statusCode, recovered.body).toBe(200);
       expect(recovered.json()).toEqual(receipt);
+      expect(receiptHasCommandEvidence("CHECK_OUT", recovered.json<ReceiptDto>(), { orderId }, undefined, prepared.preview.effectHash)).toBe(true);
       expect(await confirm(prepared.preview, "identity-checkout-confirm")).toEqual(receipt);
       await assertReceiptReads(receipt);
       // The preview's permanent receipt remains a preview after confirmation.
@@ -113,6 +117,47 @@ describe("command identity across the public API", () => {
       expect(await db.selectFrom("inventory_claims").select("id").where("active", "=", true)
         .where("source_type", "=", "ORDER_SEGMENT")
         .where("source_id", "in", order.segments.map((item: { id: string }) => item.id)).execute()).toHaveLength(0);
+    });
+  });
+
+  it("accepts real extension receipts in the UI and recovers the same committed operation without extending twice", async () => {
+    const orderId = await createInHouseOrder(demo.roomId, "2026-11-08", "2026-11-09");
+    await clock("2026-11-08", async () => {
+      const input = { propertyId: demo.propertyId, orderId, newDepartureDate: "2026-11-10" };
+      const before = await readOrder(orderId);
+      const prepared = await preview("EXTEND_STAY", input, "identity-extension-preview");
+      expect(prepared.receipt.commandType).toBe("PREVIEW:EXTEND_STAY");
+      expect(receiptHasCommandEvidence("EXTEND_STAY", prepared.receipt, input, prepared.preview.effect, prepared.preview.effectHash)).toBe(false);
+      expect((await readOrder(orderId)).amendments).toEqual(before.amendments);
+
+      const receipt = await confirm(prepared.preview, "identity-extension-confirm");
+      expect(receipt).toMatchObject({ commandType: "EXTEND_STAY", executionStatus: "EXECUTED", businessCommitted: true,
+        result: { orderId, departureDate: input.newDepartureDate, effectHash: prepared.preview.effectHash } });
+      expect(receiptHasCommandEvidence("EXTEND_STAY", receipt, input, prepared.preview.effect, prepared.preview.effectHash)).toBe(true);
+      expect(receiptHasCommandEvidence("EXTEND_STAY", { ...receipt, commandType: "CHECK_OUT" }, input, prepared.preview.effect, prepared.preview.effectHash)).toBe(false);
+      expect(receiptHasCommandEvidence("EXTEND_STAY", { ...receipt, commandType: "PREVIEW:EXTEND_STAY" }, input, prepared.preview.effect, prepared.preview.effectHash)).toBe(false);
+
+      const query = new URLSearchParams({ propertyId: demo.propertyId, commandType: "EXTEND_STAY", idempotencyKey: "identity-extension-confirm" });
+      const recovered = await app.inject({ url: `/api/v1/command-results?${query}`, headers });
+      expect(recovered.statusCode, recovered.body).toBe(200);
+      expect(recovered.json()).toEqual(receipt);
+      expect(receiptHasCommandEvidence("EXTEND_STAY", recovered.json<ReceiptDto>(), { orderId }, undefined, prepared.preview.effectHash)).toBe(true);
+
+      const resolved = await app.inject({ method: "POST", url: "/api/v1/command-results/resolve",
+        headers: metadata("identity-extension-resolve"), payload: {
+          propertyId: demo.propertyId, commandType: "EXTEND_STAY", idempotencyKey: "identity-extension-confirm"
+        } });
+      expect(resolved.statusCode, resolved.body).toBe(200);
+      expect(resolved.json()).toEqual(receipt);
+      expect(receiptHasCommandEvidence("EXTEND_STAY", resolved.json<ReceiptDto>(), { orderId }, undefined, prepared.preview.effectHash)).toBe(true);
+      expect(await confirm(prepared.preview, "identity-extension-confirm")).toEqual(receipt);
+      await assertReceiptReads(receipt);
+
+      const order = await readOrder(orderId);
+      expect(order.order.status).toBe("CHECKED_IN");
+      expect(order.order.departure_date).toBe(input.newDepartureDate);
+      expect(order.amendments).toHaveLength(before.amendments.length + 1);
+      expect(order.amendments.filter((item: { amendment_type: string }) => item.amendment_type === "EXTEND_STAY")).toHaveLength(1);
     });
   });
 
@@ -132,6 +177,8 @@ describe("command identity across the public API", () => {
       expect(prepared.receipt.commandType).toBe("PREVIEW:CHECK_OUT");
       expect(receipt).toMatchObject({ commandType: "CHECK_OUT", executionStatus: "NOT_EXECUTED",
         businessCommitted: false, error: { code: "PREVIEW_STALE" } });
+      expect(receiptHasCommandEvidence("CHECK_OUT", receipt, { orderId }, prepared.preview.effect, prepared.preview.effectHash)).toBe(true);
+      expect(receiptHasCommandEvidence("CHECK_OUT", { ...receipt, commandType: "EXTEND_STAY" }, { orderId }, prepared.preview.effect, prepared.preview.effectHash)).toBe(false);
       await assertReceiptReads(receipt);
       const order = await readOrder(orderId);
       expect(order.order.status).toBe("CHECKED_IN");
