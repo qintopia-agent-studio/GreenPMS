@@ -1,7 +1,8 @@
 import Fastify from "fastify";
 import fastJsonStringify, { type Schema } from "fast-json-stringify";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { Type } from "@sinclair/typebox";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createReceiptSerializerCompiler } from "./receipt-serializer.ts";
 import {
   ErrorResponse, HistoricalCommandConfirmConflictResponseSchema, HistoricalCommandPreviewResponseSchema,
@@ -78,6 +79,11 @@ const serialize = compile({ schema: HistoricalCommandResultRecoverySchema, metho
   url: "/api/v1/command-results/resolve", httpStatus: "200" });
 
 describe("receipt response serialization", () => {
+  // The previous production serializer compiles large unions synchronously.
+  // Let the worker process pending runner messages between cases instead of
+  // starving IPC for the cumulative duration of all cold-compilation checks.
+  afterEach(async () => { await yieldToEventLoop(); });
+
   it.each([
     ["current extension", current],
     ["historical extension", historical],
