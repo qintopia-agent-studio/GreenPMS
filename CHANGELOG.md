@@ -2,6 +2,14 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.20.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.20.0...v1.20.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **api:** bind skill confirmations and avoid repeated discovery ([#146](https://github.com/qintopia-agent-studio/GreenPMS/issues/146)) ([c226aa1](https://github.com/qintopia-agent-studio/GreenPMS/commit/c226aa1788e191de3134a7787373bedcee6df4bb))
+* **web:** 校准业务回执身份并恢复已提交操作 ([#148](https://github.com/qintopia-agent-studio/GreenPMS/issues/148)) ([c98f213](https://github.com/qintopia-agent-studio/GreenPMS/commit/c98f2139c1398171a260b183409e8a1bdeeed54a))
+
 ## [1.20.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.19.1...v1.20.0) (2026-11-06)
 
 
