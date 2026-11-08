@@ -2411,6 +2411,11 @@ export const HistoricalReceiptReadSchema = Type.Union([
   PreInHouseMembershipConversionReceiptReadSchema
 ]);
 
+export const HistoricalCommandConfirmConflictResponseSchema = Type.Union([
+  ...HistoricalReceiptReadSchema.anyOf,
+  ErrorResponse
+]);
+
 const CurrentCommandPreviewResponseSchema = strictObject({
   preview: PreviewSchema,
   receipt: ReceiptSchema
@@ -2480,7 +2485,9 @@ export const CommandResultRecoverySchema = Type.Union([
 ]);
 
 export const HistoricalCommandResultRecoverySchema = Type.Union([
-  HistoricalReceiptReadSchema,
+  // A nested union repeats the large current receipt validator's cold compile.
+  // Preserve the same alternatives and their order in one response union.
+  ...HistoricalReceiptReadSchema.anyOf,
   strictObject({
     executionStatus: Type.Literal("UNKNOWN"),
     businessCommitted: Type.Literal(false),

@@ -281,6 +281,7 @@ describe("Command effect HTTP contract", () => {
     const receipt = {
       receiptId: "receipt_move_contract",
       commandId: "command_move_contract",
+      commandType: "MOVE_UNIT",
       executionStatus: "EXECUTED",
       businessCommitted: true,
       correlationId: "move-unit-result-contract",

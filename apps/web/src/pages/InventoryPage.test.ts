@@ -79,6 +79,7 @@ import {
   roomStatusProjectionRefreshDecision,
   roomStatusQueryFailureRetryDelay,
   roomStatusCommittedRefreshScopeIsCurrent,
+  roomStatusCanReuseCommittedRefresh,
   roomStatusProjectionWritable,
   roomStatusQuoteActionCodeForUnit,
   roomStatusQuoteCommandMatchesTarget,
@@ -1689,6 +1690,68 @@ describe("Room-status query attempt lifecycle", () => {
       capturedOrder,
       currentOrder: capturedOrder
     })).toBe(false);
+  });
+
+  const committedRefresh = () => {
+    const board = { propertyId: "property_1", projectionState: "READY" as const };
+    const order = { orderId: "order_1", stayId: "stay_1" };
+    return {
+      receipt: { receiptId: "receipt_1", businessCommitted: true },
+      refreshed: { receiptId: "receipt_1", propertyId: "property_1", principalScope: "subject_1:WRITE",
+        queryKey: "range_1:all-rooms", board, order },
+      propertyId: "property_1", principalScope: "subject_1:WRITE",
+      queryKey: "range_1:all-rooms", installedQueryKey: "range_1:all-rooms",
+      board, order, permissionDenied: false, queryError: undefined
+    };
+  };
+
+  it("reuses the installed post-commit board when closing the same successful operation", () => {
+    const current = committedRefresh();
+    expect(roomStatusCanReuseCommittedRefresh(current)).toBe(true);
+    // Restored operations need no selected order; the original target stays in
+    // the recovery receipt rather than an unrelated visible order context.
+    expect(roomStatusCanReuseCommittedRefresh({ ...current, order: undefined,
+      refreshed: { ...current.refreshed, order: undefined } })).toBe(true);
+  });
+
+  it("retains the fallback read for terminal closes without a receipt or a successful refresh", () => {
+    const current = committedRefresh();
+    expect(roomStatusCanReuseCommittedRefresh({ ...current, receipt: undefined })).toBe(false);
+    expect(roomStatusCanReuseCommittedRefresh({ ...current, refreshed: undefined })).toBe(false);
+    expect(roomStatusCanReuseCommittedRefresh({ ...current,
+      receipt: { receiptId: "receipt_2", businessCommitted: true } })).toBe(false);
+    expect(roomStatusCanReuseCommittedRefresh({ ...current,
+      receipt: { ...current.receipt, businessCommitted: false } })).toBe(false);
+    expect(roomStatusCanReuseCommittedRefresh({ ...current, queryError: new Error("refresh failed") })).toBe(false);
+  });
+
+  it("does not reuse a committed board after navigation, authorization or projection replacement", () => {
+    const current = committedRefresh();
+    for (const changed of [
+      { propertyId: "property_2" },
+      { principalScope: "subject_2:WRITE" },
+      { principalScope: "subject_1:READ" },
+      { queryKey: "range_2:all-rooms" },
+      { queryKey: "range_1:filtered-rooms" },
+      { installedQueryKey: "range_2:all-rooms" },
+      { board: undefined },
+      { board: { ...current.board } },
+      { permissionDenied: true }
+    ]) expect(roomStatusCanReuseCommittedRefresh({ ...current, ...changed })).toBe(false);
+    const partial = { ...current.board, projectionState: "PARTIAL" as const };
+    expect(roomStatusCanReuseCommittedRefresh({ ...current, board: partial,
+      refreshed: { ...current.refreshed, board: partial } })).toBe(false);
+  });
+
+  it("does not let an old committed refresh substitute for a changed order selection", () => {
+    const current = committedRefresh();
+    expect(roomStatusCanReuseCommittedRefresh({ ...current, order: undefined })).toBe(false);
+    expect(roomStatusCanReuseCommittedRefresh({ ...current,
+      order: { orderId: "order_2", stayId: "stay_2" } })).toBe(false);
+    expect(roomStatusCanReuseCommittedRefresh({ ...current,
+      order: { orderId: "order_1", stayId: "stay_2" } })).toBe(false);
+    expect(roomStatusCanReuseCommittedRefresh({ ...current,
+      refreshed: { ...current.refreshed, order: undefined } })).toBe(false);
   });
 
   it("does not reload an open order context for a freshness-only renewal", () => {

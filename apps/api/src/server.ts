@@ -4,6 +4,7 @@ import { registerPaymentReconciliation } from './payment-reconciliation.ts';
 import { registerPaymentAllocationEvents } from "./payment-allocation-events.ts";
 import { registerPaymentAllocation } from "./payment-allocation.ts";
 import { publicCommandErrorPayload } from "./public-error.ts";
+import { createReceiptSerializerCompiler } from "./receipt-serializer.ts";
 import { registerAssistant } from "./assistant.ts";
 import type { ModelTransport } from "./assistant-model.ts";
 import { projectCatalogUnitNames } from "../../../packages/db/src/room-catalog-labels.ts";
@@ -78,6 +79,7 @@ import {
   AuditResponseSchema,
   AvailabilityUnitSchema,
   CommandEnvelopeSchema,
+  HistoricalCommandConfirmConflictResponseSchema,
   HistoricalCommandPreviewResponseSchema,
   HistoricalCommandResultRecoverySchema,
   ConfirmSchema,
@@ -549,6 +551,7 @@ async function replayHistoricalCreateOrderPreview(
 export async function buildServer(db: Kysely<Database>, options: { assistantTransport?: ModelTransport } = {}) {
   const allowedWebOrigins = webOriginAllowlist();
   const app = Fastify({ ajv: { customOptions: { discriminator: true } }, logger: { level: process.env.LOG_LEVEL ?? "info" }, genReqId: () => crypto.randomUUID() });
+  const receiptSerializerCompiler = createReceiptSerializerCompiler();
   app.addHook("preSerialization", async (_request, _reply, payload) => publicCommandErrorPayload(payload));
   await app.register(compress, { global: true, threshold: 1_024 });
   await app.register(cookie);
@@ -806,6 +809,7 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   });
 
   app.post("/api/v1/quotes", {
+    serializerCompiler: receiptSerializerCompiler,
     config: { rateLimit: { max: positiveIntegerEnv("QUOTE_RATE_LIMIT_MAX", 120), timeWindow: "1 minute", groupId: "quotes" } },
     schema: {
       tags: ["commands"],
@@ -959,6 +963,7 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   });
 
   app.post("/api/v1/command-previews", {
+    serializerCompiler: receiptSerializerCompiler,
     attachValidation: true,
     preValidation: async (request) => {
       commandPreviewRequestBodies.set(request, structuredClone(request.body));
@@ -1022,11 +1027,12 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   });
 
   app.post("/api/v1/command-previews/:previewId/confirm", {
+    serializerCompiler: receiptSerializerCompiler,
     config: { rateLimit: { max: positiveIntegerEnv("COMMAND_CONFIRM_RATE_LIMIT_MAX", 120), timeWindow: "1 minute", groupId: "command-confirms" } },
     schema: { tags: ["commands"],
       summary: "Execute the authorized business operation from an unchanged preview",
       description: "Submit the preview's exact propertyId, commandType and effectHash as expectedEffectHash with confirmation=true and a structured reason. This is the technical commit step; it does not require repeating human consent already covering the specific effect. Do not infer missing required business confirmations. The server rechecks permission and business constraints atomically. A successful receipt.commandType matches the business operation without PREVIEW:. Verify its target resource and resulting business state before reporting completion. On timeout recover using the original confirmation command identity/idempotency key; do not issue another operation with a new key.",
-      headers: WriteHeaders, params: PreviewParams, body: ConfirmSchema, response: { 200: HistoricalReceiptReadSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: Type.Union([HistoricalReceiptReadSchema, ErrorResponse]), 429: ErrorResponse, ...InternalErrorResponses } }
+      headers: WriteHeaders, params: PreviewParams, body: ConfirmSchema, response: { 200: HistoricalReceiptReadSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: HistoricalCommandConfirmConflictResponseSchema, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request, reply) => {
     const principal = await requirePrincipal(db, request);
     const previewId = (request.params as { previewId: string }).previewId;
@@ -1038,15 +1044,16 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
     return receipt;
   });
 
-  app.get("/api/v1/receipts/:id", { schema: { tags: ["receipts"], params: IdParams, response: { 200: HistoricalReceiptReadSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
+  app.get("/api/v1/receipts/:id", { serializerCompiler: receiptSerializerCompiler, schema: { tags: ["receipts"], params: IdParams, response: { 200: HistoricalReceiptReadSchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
     return getReceipt(db, principal, (request.params as { id: string }).id);
   });
-  app.get("/api/v1/commands/:id", { schema: { tags: ["receipts"], params: IdParams, response: { 200: HistoricalCommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
+  app.get("/api/v1/commands/:id", { serializerCompiler: receiptSerializerCompiler, schema: { tags: ["receipts"], params: IdParams, response: { 200: HistoricalCommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } } }, async (request) => {
     const principal = await requirePrincipal(db, request);
     return getCommand(db, principal, (request.params as { id: string }).id);
   });
   app.get("/api/v1/command-results", {
+    serializerCompiler: receiptSerializerCompiler,
     schema: { tags: ["receipts"], querystring: Type.Object({ propertyId: Id, commandType: HistoricalRecoverableCommandTypeSchema, idempotencyKey: Type.String({ minLength: 1, maxLength: 160 }) }, { additionalProperties: false }), response: { 200: HistoricalCommandResultRecoverySchema, 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 429: ErrorResponse, ...InternalErrorResponses } }
   }, async (request) => {
     const principal = await requirePrincipal(db, request);
@@ -1055,6 +1062,7 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   });
 
   app.post("/api/v1/command-results/resolve", {
+    serializerCompiler: receiptSerializerCompiler,
     config: { rateLimit: { max: positiveIntegerEnv("COMMAND_RESULT_RESOLVE_RATE_LIMIT_MAX", 120), timeWindow: "1 minute", groupId: "command-result-resolutions" } },
     schema: {
       tags: ["receipts"],
