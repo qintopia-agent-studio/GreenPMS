@@ -2765,6 +2765,44 @@ export function roomStatusCommittedRefreshScopeIsCurrent(input: {
     && input.capturedOrder?.stayId === input.currentOrder?.stayId;
 }
 
+interface CommittedRoomStatusRefresh {
+  receiptId: string;
+  propertyId: string;
+  principalScope: string;
+  queryKey: string;
+  board: Pick<RoomStatusBoardDto, "propertyId" | "projectionState">;
+  order: Pick<RoomStatusOrderIdentity, "orderId" | "stayId"> | undefined;
+}
+
+export function roomStatusCanReuseCommittedRefresh(input: {
+  receipt: Pick<ReceiptDto, "receiptId" | "businessCommitted"> | undefined;
+  refreshed: CommittedRoomStatusRefresh | undefined;
+  propertyId: string;
+  principalScope: string;
+  queryKey: string;
+  installedQueryKey: string | undefined;
+  board: Pick<RoomStatusBoardDto, "propertyId" | "projectionState"> | undefined;
+  order: Pick<RoomStatusOrderIdentity, "orderId" | "stayId"> | undefined;
+  permissionDenied: boolean;
+  queryError: unknown;
+}): boolean {
+  const refreshed = input.refreshed;
+  return Boolean(input.receipt?.businessCommitted && refreshed
+    && input.receipt.receiptId === refreshed.receiptId
+    && !input.permissionDenied && !input.queryError
+    && input.propertyId === refreshed.propertyId
+    && input.principalScope === refreshed.principalScope
+    && input.queryKey === refreshed.queryKey
+    && input.installedQueryKey === refreshed.queryKey
+    // Reuse only the exact validated projection that was installed for this
+    // receipt. A replacement query or selection must keep its normal refresh.
+    && input.board === refreshed.board
+    && input.board.propertyId === input.propertyId
+    && input.board.projectionState === "READY"
+    && input.order?.orderId === refreshed.order?.orderId
+    && input.order?.stayId === refreshed.order?.stayId);
+}
+
 export function roomStatusOrderContextNeedsReload(
   previous: Pick<RoomStatusBoardDto, "propertyId" | "revision" | "businessDate" | "accessLevel"> | undefined,
   next: Pick<RoomStatusBoardDto, "propertyId" | "revision" | "businessDate" | "accessLevel">
@@ -3401,7 +3439,7 @@ export function InventoryPage() {
   const selectedMemberRequestGuard = selectedMemberRequestGuardRef.current;
 
   const commandQueryKeyRef = useRef<string | undefined>(undefined);
-  const refreshedReceiptIdRef = useRef<string | undefined>(undefined);
+  const committedRoomStatusRefreshRef = useRef<CommittedRoomStatusRefresh | undefined>(undefined);
   const focusAfterNextBoard = useRef(false);
   const returnedOrderCellFocus = useRef<{ unitId: string; serviceDate: string } | undefined>(undefined);
   const pendingMobileTaskFocus = useRef<PendingMobileTaskFocus | undefined>(undefined);
@@ -5649,8 +5687,24 @@ export function InventoryPage() {
           focus: { unitId: viewState.selection.unitId, serviceDate: viewState.selection.arrivalDate }
         });
       }
-      focusAfterNextBoard.current = true;
-      setRefreshToken((value) => value + 1);
+      if (roomStatusCanReuseCommittedRefresh({
+        receipt: context?.receipt,
+        refreshed: committedRoomStatusRefreshRef.current,
+        propertyId: currentPropertyIdRef.current,
+        principalScope: currentOrderPrincipalScopeRef.current,
+        queryKey: desiredBoardQueryKeyRef.current,
+        installedQueryKey: boardQueryKeyRef.current,
+        board: boardRef.current,
+        order: currentSelectedOrderIdentityRef.current,
+        permissionDenied: permissionDeniedRef.current,
+        queryError: queryErrorRef.current
+      })) {
+        focusAfterNextBoard.current = false;
+        setFocusRequestToken((value) => value + 1);
+      } else {
+        focusAfterNextBoard.current = true;
+        setRefreshToken((value) => value + 1);
+      }
     } else if (commandContextInvalidated) {
       setFocusRequestToken((value) => value + 1);
     }
@@ -5719,7 +5773,19 @@ export function InventoryPage() {
   }
 
   async function refreshCommittedRoomStatus(receipt: ReceiptDto) {
-    if (!receipt.businessCommitted || refreshedReceiptIdRef.current === receipt.receiptId) return;
+    if (!receipt.businessCommitted) return;
+    if (roomStatusCanReuseCommittedRefresh({
+      receipt,
+      refreshed: committedRoomStatusRefreshRef.current,
+      propertyId: currentPropertyIdRef.current,
+      principalScope: currentOrderPrincipalScopeRef.current,
+      queryKey: desiredBoardQueryKeyRef.current,
+      installedQueryKey: boardQueryKeyRef.current,
+      board: boardRef.current,
+      order: currentSelectedOrderIdentityRef.current,
+      permissionDenied: permissionDeniedRef.current,
+      queryError: queryErrorRef.current
+    })) return;
     setCommandPhase("SETTLED");
     const refreshPropertyId = propertyId;
     const refreshPrincipalScope = orderPrincipalScope;
@@ -5795,7 +5861,14 @@ export function InventoryPage() {
           setFocusRequestToken((value) => value + 1);
         }
       }
-      refreshedReceiptIdRef.current = receipt.receiptId;
+      committedRoomStatusRefreshRef.current = {
+        receiptId: receipt.receiptId,
+        propertyId: refreshPropertyId,
+        principalScope: refreshPrincipalScope,
+        queryKey,
+        board: response,
+        order: refreshOrderIdentity
+      };
     } finally {
       window.clearTimeout(timeout);
       queryAttemptGuard.finish(requestId);

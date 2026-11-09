@@ -1428,7 +1428,11 @@ describe("OpenAPI 3.1 command contract", () => {
     ]);
     expect((occupantProperties.sourceReference!.properties as Record<string, JsonSchema>).type).toMatchObject({ enum: ["ORDER"] });
     const confirmConflictSchema = document.paths["/api/v1/command-previews/{previewId}/confirm"].post.responses["409"].content["application/json"].schema;
-    expect(confirmConflictSchema.anyOf).toHaveLength(2);
+    const confirmErrorSchema = document.paths["/api/v1/command-previews/{previewId}/confirm"].post.responses["400"].content["application/json"].schema;
+    const readableReceiptSchema = document.paths["/api/v1/receipts/{id}"].get.responses["200"].content["application/json"].schema;
+    // Conflict responses retain every readable receipt protocol plus the
+    // structured error, without requiring another nested union wrapper.
+    expect(confirmConflictSchema.anyOf).toEqual([...(readableReceiptSchema.anyOf as JsonSchema[]), confirmErrorSchema]);
     expect(arbitraryRecordLocations(confirmConflictSchema)).toEqual([]);
   });
 
