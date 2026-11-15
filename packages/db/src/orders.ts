@@ -67,6 +67,7 @@ export interface OrderMembershipConversion {
   commandId: string;
   allowedInventoryKind: "ROOM" | "BED";
   allowedRoomTypeCode: string;
+  allowedRoomTypeCodes?: string[];
   entitlementUnitKind: "ROOM_NIGHT" | "BED_NIGHT";
 }
 
@@ -393,6 +394,7 @@ export async function loadOrderMembershipConversion(
       "membership_order.status as membership_order_status",
       "membership_order.allowed_inventory_kind",
       "membership_order.allowed_room_type_code",
+      "membership_order.allowed_room_type_codes",
       "membership_order.entitlement_unit_kind",
       "membership_order.entitlement_units",
       "lot.id as lot_id",
@@ -472,6 +474,7 @@ export async function loadOrderMembershipConversion(
     commandId: amendment.command_id,
     allowedInventoryKind: linked.allowed_inventory_kind,
     allowedRoomTypeCode: linked.allowed_room_type_code,
+    ...(linked.allowed_room_type_codes ? { allowedRoomTypeCodes: linked.allowed_room_type_codes } : {}),
     entitlementUnitKind: linked.entitlement_unit_kind
   };
 }

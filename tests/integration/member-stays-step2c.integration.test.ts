@@ -20,6 +20,7 @@ const principal: AuthPrincipal = {
 
 const products = {
   sharedSingle: "membership_product_shared_bath_single_v1",
+  privateShared: "membership_product_private_bath_shared_v1",
   privateSingle: "membership_product_private_bath_single_v1",
   sharedQuad: "membership_product_shared_bath_quad_v1"
 } as const;
@@ -72,7 +73,7 @@ async function createMember(memberId: string) {
 async function activateProduct(memberId: string, productId: string, prefix: string) {
   const order = await confirm({
     commandType: "CREATE_MEMBERSHIP_ORDER",
-    input: { propertyId: demo.propertyId, memberId, membershipProductId: productId, agreedPriceMinor: productId === products.sharedQuad ? 93_600 : productId === products.privateSingle ? 216_000 : 162_000 }
+    input: { propertyId: demo.propertyId, memberId, membershipProductId: productId, agreedPriceMinor: productId === products.privateShared ? 280_000 : productId === products.sharedQuad ? 93_600 : productId === products.privateSingle ? 216_000 : 162_000 }
   }, `${prefix}-order`);
   const membershipOrderId = order.result!.membershipOrderId as string;
   await confirm({
@@ -90,7 +91,7 @@ async function activateProduct(memberId: string, productId: string, prefix: stri
   };
 }
 
-async function insertLegacyActiveMembershipChain(sourceMembershipOrderId: string, prefix: string) {
+async function insertLegacyActiveMembershipChain(sourceMembershipOrderId: string, prefix: string, validity?: { from: string; until: string }) {
   const source = await db.selectFrom("membership_orders")
     .selectAll()
     .where("id", "=", sourceMembershipOrderId)
@@ -115,6 +116,7 @@ async function insertLegacyActiveMembershipChain(sourceMembershipOrderId: string
     entitlement_unit_kind: source.entitlement_unit_kind,
     entitlement_units: source.entitlement_units,
     allowed_room_type_code: source.allowed_room_type_code,
+    allowed_room_type_codes: source.allowed_room_type_codes,
     allowed_inventory_kind: source.allowed_inventory_kind,
     status: "DRAFT",
     activated_at: null,
@@ -132,8 +134,8 @@ async function insertLegacyActiveMembershipChain(sourceMembershipOrderId: string
     member_id: source.member_id,
     member_name: `Legacy ${prefix}`,
     status: "ACTIVE",
-    valid_from: source.valid_from,
-    valid_until: source.valid_until,
+    valid_from: validity?.from ?? source.valid_from,
+    valid_until: validity?.until ?? source.valid_until,
     version: 1,
     membership_order_id: orderId
   }).execute();
@@ -142,14 +144,14 @@ async function insertLegacyActiveMembershipChain(sourceMembershipOrderId: string
     contract_id: contractId,
     unit_kind: source.entitlement_unit_kind,
     total_units: source.entitlement_units,
-    expires_on: source.valid_until,
+    expires_on: validity?.until ?? source.valid_until,
     version: 1
   }).execute();
   await db.updateTable("membership_orders").set({
     status: "ACTIVE",
     activated_at: new Date(),
-    valid_from: source.valid_from,
-    valid_until: source.valid_until,
+    valid_from: validity?.from ?? source.valid_from,
+    valid_until: validity?.until ?? source.valid_until,
     contract_id: contractId,
     entitlement_lot_id: lotId,
     version: 2,
@@ -159,6 +161,10 @@ async function insertLegacyActiveMembershipChain(sourceMembershipOrderId: string
 
 async function unitId(code: string) {
   return (await db.selectFrom("inventory_units").select("id").where("property_id", "=", demo.propertyId).where("code", "=", code).executeTakeFirstOrThrow()).id;
+}
+
+async function roomForType(type: string) {
+  return (await db.selectFrom("inventory_units").select("id").where("property_id", "=", demo.propertyId).where("room_type_code", "=", type).where("kind", "=", "ROOM").where("active", "=", true).executeTakeFirstOrThrow()).id;
 }
 
 async function memberQuote(memberId: string, inventoryUnitId: string, arrivalDate: string, departureDate: string) {
@@ -192,6 +198,58 @@ afterEach(async () => {
 });
 
 describe("step 2C member balances and stays", () => {
+  it("shares one thirty-night lot across private standard and king stays and releases cancelled holds", async () => {
+    const memberId = "member_shared_private_bath";
+    await createMember(memberId);
+    const membership = await activateProduct(memberId, products.privateShared, "private-shared");
+    const snapshot = await db.selectFrom("membership_orders").selectAll().where("id", "=", membership.membershipOrderId).executeTakeFirstOrThrow();
+    expect(snapshot.allowed_room_type_codes).toEqual(["private_bath_standard", "private_bath_king"]);
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const standard = await db.selectFrom("inventory_units").select("id").where("property_id", "=", demo.propertyId).where("room_type_code", "=", "private_bath_standard").where("kind", "=", "ROOM").where("active", "=", true).executeTakeFirstOrThrow();
+    const king = await db.selectFrom("inventory_units").select("id").where("property_id", "=", demo.propertyId).where("room_type_code", "=", "private_bath_king").where("kind", "=", "ROOM").where("active", "=", true).executeTakeFirstOrThrow();
+    const first = await memberQuote(memberId, standard.id, shiftDate(today, 5), shiftDate(today, 10));
+    const firstStay = await createStay(first.quoteId, "shared-standard");
+    const second = await memberQuote(memberId, king.id, shiftDate(today, 10), shiftDate(today, 13));
+    await createStay(second.quoteId, "shared-king");
+    let view = await getMemberView(db, demo.propertyId, memberId);
+    expect(view.lots).toHaveLength(1);
+    expect(view.availableBalance).toEqual({ ROOM_NIGHT: 22, BED_NIGHT: 0 });
+    const coverage = await db.selectFrom("coverage_items").selectAll().where("lot_id", "=", membership.lotId).execute();
+    expect(coverage).toHaveLength(8);
+    expect(new Set(coverage.map((item) => item.contract_id))).toEqual(new Set([membership.contractId]));
+    await expect(db.updateTable("membership_orders").set({ allowed_room_type_codes: ["shared_bath_single"] }).where("id", "=", membership.membershipOrderId).execute()).rejects.toThrow();
+    await expect(memberQuote(memberId, await unitId("D01"), shiftDate(today, 15), shiftDate(today, 16))).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT" });
+    await confirm({ commandType: "CANCEL_ORDER", input: { propertyId: demo.propertyId, orderId: firstStay.result!.orderId as string } }, "shared-cancel");
+    view = await getMemberView(db, demo.propertyId, memberId);
+    expect(view.availableBalance.ROOM_NIGHT).toBe(27);
+  });
+
+  it("moves a checked-in shared membership to the other applicable type without consuming any night twice", async () => {
+    const memberId = "member_shared_private_move";
+    await createMember(memberId);
+    const realToday = await propertyLocalToday(db, demo.propertyId);
+    const membership = await activateProduct(memberId, products.privateShared, "shared-move");
+    await insertLegacyActiveMembershipChain(membership.membershipOrderId, "expired-shared", { from: shiftDate(realToday, -400), until: shiftDate(realToday, -35) });
+    await insertLegacyActiveMembershipChain(membership.membershipOrderId, "future-shared", { from: shiftDate(realToday, 800), until: shiftDate(realToday, 1165) });
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const standard = await roomForType("private_bath_standard");
+    const king = await roomForType("private_bath_king");
+    const quote = await memberQuote(memberId, standard, today, shiftDate(today, 3));
+    const stay = await createStay(quote.quoteId, "shared-move");
+    const orderId = stay.result!.orderId as string;
+    await confirm({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "shared-move-in");
+    const before = await db.selectFrom("entitlement_ledger").selectAll().where("order_id", "=", orderId).execute();
+    const move = await confirm({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId, newInventoryUnitId: king, effectiveDate: shiftDate(today, 1) } }, "shared-move-king");
+    expect(move.businessCommitted, JSON.stringify(move.error)).toBe(true);
+    const after = await db.selectFrom("entitlement_ledger").selectAll().where("order_id", "=", orderId).execute();
+    expect(after).toEqual(before);
+    expect((await getMemberView(db, demo.propertyId, memberId)).lotBalances.find((lot) => lot.lotId === membership.lotId)?.availableUnits).toBe(27);
+    const extended = await confirm({ commandType: "EXTEND_STAY", input: { propertyId: demo.propertyId, orderId, newDepartureDate: shiftDate(today, 4) } }, "shared-move-extend");
+    expect(extended.businessCommitted, JSON.stringify(extended.error)).toBe(true);
+    expect((await getMemberView(db, demo.propertyId, memberId)).lotBalances.find((lot) => lot.lotId === membership.lotId)?.availableUnits).toBe(26);
+    expect(await db.selectFrom("coverage_items").select("id").where("lot_id", "=", membership.lotId).where("status", "=", "CONSUMED").execute()).toHaveLength(4);
+  });
+
   it("seeds only formally classified demo entitlements", async () => {
     const view = await getMemberView(db, demo.propertyId, demo.memberId);
     const membership = view.membershipOrders.find(({ order }) => order.id === demo.membershipOrderId);
@@ -432,18 +490,18 @@ describe("step 2C member balances and stays", () => {
     ]);
   });
 
-  it("serializes two stays competing for the final member night", async () => {
+  it.each([products.sharedSingle, products.privateShared])("serializes two stays competing for the final night of %s", async (productId) => {
     const today = await propertyLocalToday(db, demo.propertyId);
     const arrival = shiftDate(today, 40);
     const departure = shiftDate(arrival, 1);
     const memberId = "member_step2c_last_night";
     await createMember(memberId);
-    const membership = await activateProduct(memberId, products.sharedSingle, "last-night");
+    const membership = await activateProduct(memberId, productId, "last-night");
     await confirm({
       commandType: "CORRECT_MEMBER_ENTITLEMENT_BALANCE",
       input: { propertyId: demo.propertyId, entitlementLotId: membership.lotId, expectedAvailableBalance: 30, targetAvailableBalance: 1, adjustmentReason: "并发只保留最后一间夜" }
     }, "last-night-balance");
-    const [d01, d04] = await Promise.all([unitId("D01"), unitId("D04")]);
+    const [d01, d04] = await Promise.all(productId === products.privateShared ? [roomForType("private_bath_standard"), roomForType("private_bath_king")] : [unitId("D01"), unitId("D04")]);
     const [quoteA, quoteB] = await Promise.all([
       memberQuote(memberId, d01, arrival, departure),
       memberQuote(memberId, d04, arrival, departure)

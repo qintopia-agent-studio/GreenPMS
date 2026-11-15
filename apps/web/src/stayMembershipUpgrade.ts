@@ -84,7 +84,7 @@ export function membershipProductMatchesCurrentStay(
     const unit = unitMap.get(unitId);
     return unit
       && unit.kind === product.allowed_inventory_kind
-      && unit.room_type_code === product.allowed_room_type_code
+      && (product.allowed_room_type_codes ?? [product.allowed_room_type_code]).includes(unit.room_type_code!)
       && (unit.kind === "ROOM" ? product.entitlement_unit_kind === "ROOM_NIGHT" : product.entitlement_unit_kind === "BED_NIGHT");
   });
 }
@@ -95,7 +95,7 @@ export function membershipProductAllowsTemporaryUpgrade(
   const unitIds = [...new Set(view.effectiveArrangement.intervals.map((interval) => interval.inventoryUnitId))];
   const units = unitIds.map((unitId) => unitMap.get(unitId)).filter((unit): unit is InventoryUnitDto => Boolean(unit));
   const allRooms = units.length === unitIds.length && units.every((unit) => unit.kind === "ROOM");
-  const targetRoomTypePresent = units.some((unit) => unit.room_type_code === product.allowed_room_type_code);
+  const targetRoomTypePresent = units.some((unit) => (product.allowed_room_type_codes ?? [product.allowed_room_type_code]).includes(unit.room_type_code!));
   return view.order.status === "CHECKED_IN" && unitIds.length > 0
     && allRooms
     && product.allowed_inventory_kind === "ROOM" && product.entitlement_unit_kind === "ROOM_NIGHT"

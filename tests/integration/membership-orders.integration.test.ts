@@ -105,7 +105,7 @@ afterEach(async () => {
 });
 
 describe("2B membership orders and WeCom collections", () => {
-  it("seeds the three fixed products and requires a reason only when the agreed price changes", async () => {
+  it("preserves three original products and adds the shared product, requiring a reason only for a price change", async () => {
     const catalog = await db.selectFrom("membership_products").selectAll().orderBy("list_price_minor").execute();
     expect(catalog.map((product) => ({
       id: product.id,
@@ -116,7 +116,8 @@ describe("2B membership orders and WeCom collections", () => {
     }))).toEqual([
       { id: products.sharedQuad, price: 93600, unit: "BED_NIGHT", units: 30, inventoryKind: "BED" },
       { id: products.sharedSingle, price: 162000, unit: "ROOM_NIGHT", units: 30, inventoryKind: "ROOM" },
-      { id: products.privateSingle, price: 216000, unit: "ROOM_NIGHT", units: 30, inventoryKind: "ROOM" }
+      { id: products.privateSingle, price: 216000, unit: "ROOM_NIGHT", units: 30, inventoryKind: "ROOM" },
+      { id: "membership_product_private_bath_shared_v1", price: 280000, unit: "ROOM_NIGHT", units: 30, inventoryKind: "ROOM" }
     ]);
 
     await expect(preview({
@@ -135,6 +136,21 @@ describe("2B membership orders and WeCom collections", () => {
       entitlement_units: 30,
       entitlement_unit_kind: "ROOM_NIGHT"
     });
+  });
+
+  it("requires an explicit immutable shared scope and rejects malformed product arrays", async () => {
+    const orderId = await createMembershipOrder("membership_product_private_bath_shared_v1", 280000);
+    const source = await db.selectFrom("membership_orders").selectAll().where("id", "=", orderId).executeTakeFirstOrThrow();
+    expect(source.allowed_room_type_codes).toEqual(["private_bath_standard", "private_bath_king"]);
+    for (const scope of [null, ["private_bath_standard"], ["private_bath_standard", "private_bath_king", "private_bath_single"]]) {
+      await expect(db.insertInto("membership_orders").values({ ...source, id: `${orderId}_tamper`, allowed_room_type_codes: scope }).execute()).rejects.toThrow("membership scope must match its immutable product");
+    }
+    await expect(db.updateTable("membership_orders").set({ allowed_room_type_codes: ["private_bath_standard"] }).where("id", "=", orderId).execute()).rejects.toThrow("membership scope snapshot is immutable");
+    const product = await db.selectFrom("membership_products").selectAll().where("id", "=", source.product_id).executeTakeFirstOrThrow();
+    for (const scope of [[], ["private_bath_standard", "private_bath_standard"], ["private_bath_king"], ["private_bath_standard", ""]]) {
+      await expect(db.insertInto("membership_products").values({ ...product, id: "invalid_scope", code: "INVALID_SCOPE", allowed_room_type_codes: scope }).execute()).rejects.toThrow();
+    }
+    expect(await db.selectFrom("membership_orders").select("id").where("id", "=", `${orderId}_tamper`).execute()).toHaveLength(0);
   });
 
   it("rejects activation without payment and activates a mismatched multi-payment order exactly once", async () => {

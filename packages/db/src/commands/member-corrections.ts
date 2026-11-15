@@ -193,6 +193,7 @@ function membershipProductEffect(
     entitlementUnits: product.entitlement_units,
     validityPeriod: product.validity_period,
     allowedRoomTypeCode: product.allowed_room_type_code,
+    ...(product.allowed_room_type_codes ? { allowedRoomTypeCodes: product.allowed_room_type_codes } : {}),
     allowedInventoryKind: product.allowed_inventory_kind
   };
 }
@@ -621,7 +622,7 @@ async function buildEffectiveDateCorrection(db: DbExecutor, input: Record<string
       || (ownership.order_member_id !== null && ownership.order_member_id !== order.member_id)
       || ownership.order_contract_id !== contract.id
       || ownership.inventory_kind !== order.allowed_inventory_kind
-      || ownership.inventory_room_type_code !== order.allowed_room_type_code
+      || !(order.allowed_room_type_codes ?? [order.allowed_room_type_code]).includes(ownership.inventory_room_type_code!)
       || item.service_date < actualMembershipDate
       || item.service_date > validUntil) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "已有权益使用记录的归属、房型或有效期不完整，不能修改生效日", 409);
@@ -1390,7 +1391,7 @@ async function buildMembershipVoidReconversion(db: DbExecutor, input: Record<str
   const units = await db.selectFrom("inventory_units").select(["id", "kind", "room_type_code"])
     .where("id", "in", inventoryUnitIds).orderBy("id").execute();
   if (units.length !== inventoryUnitIds.length || units.some((unit) => unit.kind !== oldOrder.allowed_inventory_kind
-    || unit.room_type_code !== oldOrder.allowed_room_type_code)) {
+    || !(oldOrder.allowed_room_type_codes ?? [oldOrder.allowed_room_type_code]).includes(unit.room_type_code!))) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "源住宿房型与旧会员产品不匹配", 409);
   }
   const existingConversionAmendment = sourceView.amendments.find((item) =>
@@ -1942,6 +1943,7 @@ async function applyHistoricalMembershipBackfill(
     entitlement_unit_kind: entitlementUnitKind,
     entitlement_units: entitlementUnits,
     allowed_room_type_code: allowedRoomTypeCode,
+    allowed_room_type_codes: productEffect.allowedRoomTypeCodes === undefined ? null : stringArray(productEffect.allowedRoomTypeCodes),
     allowed_inventory_kind: allowedInventoryKind,
     status: "DRAFT",
     activated_at: null,
@@ -2025,6 +2027,7 @@ async function applyHistoricalMembershipBackfill(
     entitlement_units: entitlementUnits,
     validity_period: validityPeriod,
     allowed_room_type_code: allowedRoomTypeCode,
+    allowed_room_type_codes: productEffect.allowedRoomTypeCodes === undefined ? null : stringArray(productEffect.allowedRoomTypeCodes),
     allowed_inventory_kind: allowedInventoryKind,
     evidence_note: effectString(effect, "evidenceNote"),
     command_id: commandId
@@ -2165,6 +2168,7 @@ async function applyMembershipVoidReconversion(
     entitlement_unit_kind: oldOrder.entitlement_unit_kind,
     entitlement_units: oldOrder.entitlement_units,
     allowed_room_type_code: oldOrder.allowed_room_type_code,
+    allowed_room_type_codes: oldOrder.allowed_room_type_codes,
     allowed_inventory_kind: oldOrder.allowed_inventory_kind,
     status: "DRAFT",
     activated_at: null,

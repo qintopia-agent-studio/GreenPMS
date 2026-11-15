@@ -1698,7 +1698,7 @@ export function conversionPreviewHasEvidence(
       || product?.allowedInventoryKind !== "ROOM" || product.entitlementUnitKind !== "ROOM_NIGHT"
       || crossRoom.originalRoomTypeCode !== product.allowedRoomTypeCode
       || !nonblankString(crossRoom.actualInventoryUnitId) || !nonblankString(crossRoom.actualRoomTypeCode)
-      || (crossRoom.kind === "TEMPORARY_OTHER_ROOM_UPGRADE" && crossRoom.actualRoomTypeCode === crossRoom.originalRoomTypeCode)
+      || (crossRoom.kind === "TEMPORARY_OTHER_ROOM_UPGRADE" && (Array.isArray(product.allowedRoomTypeCodes) ? product.allowedRoomTypeCodes : [product.allowedRoomTypeCode]).includes(crossRoom.actualRoomTypeCode))
       || localDateNightCount(crossRoom.arrivalDate, crossRoom.departureDate) === undefined
       || !entitlementServiceDates || entitlementServiceDates.length === 0
       || crossRoom.arrivalDate !== entitlementServiceDates[0]
@@ -1714,8 +1714,8 @@ export function conversionPreviewHasEvidence(
     for (let index = 1; index < crossRoom.segments.length; index += 1) {
       if (crossRoom.segments[index]?.arrivalDate !== crossRoom.segments[index - 1]?.departureDate) return false;
     }
-    if (!crossRoom.segments.some((segment) => segment.roomTypeCode === product?.allowedRoomTypeCode)
-      || !crossRoom.segments.some((segment) => segment.roomTypeCode !== product?.allowedRoomTypeCode)) return false;
+    if (!crossRoom.segments.some((segment) => (Array.isArray(product?.allowedRoomTypeCodes) ? product.allowedRoomTypeCodes : [product?.allowedRoomTypeCode]).includes(segment.roomTypeCode))
+      || !crossRoom.segments.some((segment) => !(Array.isArray(product?.allowedRoomTypeCodes) ? product.allowedRoomTypeCodes : [product?.allowedRoomTypeCode]).includes(segment.roomTypeCode))) return false;
     if (crossRoom.kind !== "TEMPORARY_ROOM_SEQUENCE_UPGRADE") return false;
   } else if (crossRoom?.kind === "TEMPORARY_ROOM_SEQUENCE_UPGRADE") {
     return false;
@@ -1729,7 +1729,7 @@ export function conversionPreviewHasEvidence(
     || !entitlement || !before || !decision || !pricing
     || !hasExactKeys(primaryOccupant, ["fullName", "nickname", "phone"])
     || !hasExactKeys(member, ["memberId", "fullName", "phone"])
-    || !hasExactKeys(product, ["productId", "code", "version", "name", "entitlementUnitKind", "entitlementUnits", "allowedRoomTypeCode", "allowedInventoryKind"])
+    || !hasExactKeys(product, ["productId", "code", "version", "name", "entitlementUnitKind", "entitlementUnits", "allowedRoomTypeCode", "allowedInventoryKind", ...(Object.hasOwn(product, "allowedRoomTypeCodes") ? ["allowedRoomTypeCodes"] : [])])
     || !hasExactKeys(transfer, ["collections", "total"])
     || !hasExactKeys(membershipPricing, ["listedPrice", "agreedPrice", "adjustment", "adjustmentReason"])
     || !hasExactKeys(entitlement, ["entitlementUnitKind", "entitlementUnits", "consumedUnits", "remainingUnits", "serviceDates", "validFrom", "validUntil"])
@@ -1743,6 +1743,7 @@ export function conversionPreviewHasEvidence(
     || conversionIdentity(member.phone) !== conversionIdentity(primaryOccupant.phone)
     || !nonblankString(product.code) || !nonblankString(product.name)
     || !nonblankString(product.allowedRoomTypeCode)
+    || (product.allowedRoomTypeCodes !== undefined && (!exactNonblankStringList(product.allowedRoomTypeCodes)?.length || !(product.allowedRoomTypeCodes as string[]).includes(String(product.allowedRoomTypeCode))))
     || (product.allowedInventoryKind !== "ROOM" && product.allowedInventoryKind !== "BED")
     || (product.entitlementUnitKind !== "ROOM_NIGHT" && product.entitlementUnitKind !== "BED_NIGHT")
     || product.entitlementUnitKind !== entitlement.entitlementUnitKind
@@ -2429,7 +2430,7 @@ export function administratorMembershipPreviewHasEvidence(
     if (!hasExactKeys(effect, ["operation", "evidenceNote", "member", "product", "payment", "validFrom", "validUntil", "entitlementUnitKind", "entitlementUnits", "status"])
       || !member || !product || !payment || !inputPayment
       || !hasExactKeys(member, ["memberId", "fullName"])
-      || !hasExactKeys(product, ["productId", "code", "version", "name", "listedPrice", "agreedPrice", "entitlementUnitKind", "entitlementUnits", "validityPeriod", "allowedRoomTypeCode", "allowedInventoryKind"])
+      || !hasExactKeys(product, ["productId", "code", "version", "name", "listedPrice", "agreedPrice", "entitlementUnitKind", "entitlementUnits", "validityPeriod", "allowedRoomTypeCode", "allowedInventoryKind", ...(Object.hasOwn(product, "allowedRoomTypeCodes") ? ["allowedRoomTypeCodes"] : [])])
       || !hasExactKeys(payment, ["amount", "businessDate", "transactionReference", "note"])
       || member.memberId !== input.memberId || product.productId !== input.membershipProductId
       || effect.validFrom !== input.actualMembershipDate || effect.status !== "ACTIVE"
@@ -2444,6 +2445,7 @@ export function administratorMembershipPreviewHasEvidence(
       || product.validityPeriod !== "P1Y"
       || (product.allowedInventoryKind !== "ROOM" && product.allowedInventoryKind !== "BED")
       || !nonblankString(product.allowedRoomTypeCode)
+      || (product.allowedRoomTypeCodes !== undefined && (!exactNonblankStringList(product.allowedRoomTypeCodes)?.length || !(product.allowedRoomTypeCodes as string[]).includes(String(product.allowedRoomTypeCode))))
       || !hasMoney(payment.amount) || payment.amount.minorUnits <= 0 || payment.amount.minorUnits !== inputPayment.amountMinor
       || payment.businessDate !== inputPayment.businessDate
       || localDateEpoch(payment.businessDate) === undefined

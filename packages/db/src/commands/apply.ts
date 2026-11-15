@@ -721,6 +721,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       entitlement_unit_kind: entitlementUnitKind,
       entitlement_units: entitlementUnits as number,
       allowed_room_type_code: requireString(product, "allowedRoomTypeCode"),
+      allowed_room_type_codes: product.allowedRoomTypeCodes === undefined ? null : stringArray(product, "allowedRoomTypeCodes"),
       allowed_inventory_kind: allowedInventoryKind,
       status: "DRAFT",
       activated_at: null,
@@ -1516,6 +1517,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       entitlement_unit_kind: entitlementUnitKind,
       entitlement_units: entitlementUnits as number,
       allowed_room_type_code: requireString(product, "allowedRoomTypeCode"),
+      allowed_room_type_codes: product.allowedRoomTypeCodes === undefined ? null : stringArray(product, "allowedRoomTypeCodes"),
       allowed_inventory_kind: allowedInventoryKind,
       status: "DRAFT",
       activated_at: null,
@@ -2224,7 +2226,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       const pricingCoverage = new Map(pricing.coverageSet.map((item) => [item.serviceDate, item]));
       if (context.order.status !== "CHECKED_IN"
         || unit.kind !== membershipConversion.allowedInventoryKind
-        || unit.roomTypeCode !== membershipConversion.allowedRoomTypeCode
+        || !(membershipConversion.allowedRoomTypeCodes ?? [membershipConversion.allowedRoomTypeCode]).includes(unit.roomTypeCode!)
         || coverageRows.length !== expectedDates.length
         || pricing.coverageSet.length !== expectedDates.length
         || pricingCoverage.size !== expectedDates.length

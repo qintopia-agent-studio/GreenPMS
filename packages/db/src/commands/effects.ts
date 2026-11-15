@@ -844,8 +844,8 @@ async function priceStayTimeline(db: DbExecutor, options: {
   const preserved = await activeCoverageCandidates(db, options.orderId, expectedDates);
   const allocationDates = options.coverageAllocationDates ?? expectedDates;
   const firstUnit = units.get(options.timeline[0]!.inventoryUnitId)!;
-  if (options.memberId && [...units.values()].some((unit) => unit.kind !== firstUnit.kind || unit.roomTypeCode !== firstUnit.roomTypeCode)) {
-    throw new DomainError("ENTITLEMENT_CONFLICT", "会员住宿不能跨越不同会员产品对应的房型", 409);
+  if (options.memberId && [...units.values()].some((unit) => !unit.roomTypeCode)) {
+    throw new DomainError("ENTITLEMENT_CONFLICT", "所选房源缺少会员房型信息，不能使用会员权益", 409);
   }
   const allocated = options.preservedCoverageOnly
     ? preserved
@@ -855,6 +855,7 @@ async function priceStayTimeline(db: DbExecutor, options: {
       memberId: options.memberId,
       inventoryUnitKind: firstUnit.kind,
       roomTypeCode: firstUnit.roomTypeCode,
+      requiredRoomTypeCodes: [...units.values()].map((unit) => unit.roomTypeCode!).filter(Boolean),
       dates: allocationDates,
       // Preserve consumed history as eligibility evidence when an in-house
       // membership expires and newly added nights must fall back to cash.
@@ -1151,6 +1152,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
         entitlementUnitKind: product.entitlement_unit_kind,
         entitlementUnits: product.entitlement_units,
         allowedRoomTypeCode: product.allowed_room_type_code,
+        ...(product.allowed_room_type_codes ? { allowedRoomTypeCodes: product.allowed_room_type_codes } : {}),
         allowedInventoryKind: product.allowed_inventory_kind
       },
       pricing: {
@@ -2019,7 +2021,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     const timelineUnits = await Promise.all(timelineUnitIds.map((unitId) => loadInventoryUnit(db, propertyId, unitId)));
     const unitMismatch = timelineUnits.some((unit) => (
       unit.kind !== product.allowed_inventory_kind
-      || unit.roomTypeCode !== product.allowed_room_type_code
+      || !(product.allowed_room_type_codes ?? [product.allowed_room_type_code]).includes(unit.roomTypeCode!)
       || entitlementKindFor(unit.kind) !== product.entitlement_unit_kind
     ));
     const crossRoomReason = optionalString(input, "temporaryOtherRoomReason");
@@ -2030,7 +2032,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       throw new DomainError("VALIDATION_ERROR", "当前房型已匹配会员产品，不需要临时安排");
     }
     const allTimelineRooms = timelineUnits.every((unit) => unit.kind === "ROOM");
-    const targetRoomTypePresent = timelineUnits.some((unit) => unit.roomTypeCode === product.allowed_room_type_code);
+    const targetRoomTypePresent = timelineUnits.some((unit) => (product.allowed_room_type_codes ?? [product.allowed_room_type_code]).includes(unit.roomTypeCode!));
     const crossRoomEligible = context.order.status === "CHECKED_IN" && context.stay.status === "IN_HOUSE"
       && allTimelineRooms
       && product.allowed_inventory_kind === "ROOM" && product.entitlement_unit_kind === "ROOM_NIGHT";
@@ -2180,6 +2182,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
         entitlementUnitKind: product.entitlement_unit_kind,
         entitlementUnits,
         allowedRoomTypeCode: product.allowed_room_type_code,
+        ...(product.allowed_room_type_codes ? { allowedRoomTypeCodes: product.allowed_room_type_codes } : {}),
         allowedInventoryKind: product.allowed_inventory_kind
       },
       transfer: {
@@ -2846,7 +2849,8 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     if (context.order.member_id || context.order.member_contract_id) {
       const currentUnits = await Promise.all([...new Set(currentTimeline.map((item) => item.inventoryUnitId))]
         .map((unitId) => loadInventoryUnit(db, propertyId, unitId)));
-      if (currentUnits.some((unit) => unit.kind !== newUnit.kind || unit.roomTypeCode !== newUnit.roomTypeCode)) {
+      const scopeMatch = await sql<{ matches: boolean }>`SELECT bool_and(qintopia_order_room_types_match(${orderId}, prior.room_type_code, ${newUnit.roomTypeCode})) AS matches FROM inventory_units prior WHERE prior.id = ANY(${currentUnits.map((unit) => unit.id)}::text[])`.execute(db);
+      if (currentUnits.some((unit) => unit.kind !== newUnit.kind) || !scopeMatch.rows[0]?.matches) {
         throw new DomainError("ENTITLEMENT_CONFLICT", "会员住宿只能更换到同一会员产品适用的房型", 409);
       }
     }
@@ -2862,7 +2866,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
     }
     if (membershipConversion && (context.order.status !== "CHECKED_IN"
       || newUnit.kind !== membershipConversion.allowedInventoryKind
-      || newUnit.roomTypeCode !== membershipConversion.allowedRoomTypeCode)) {
+      || !(membershipConversion.allowedRoomTypeCodes ?? [membershipConversion.allowedRoomTypeCode]).includes(newUnit.roomTypeCode!))) {
       throw new DomainError("ENTITLEMENT_CONFLICT", "升级会员后的住宿只能更换到会员产品适用的房型", 409);
     }
     const fingerprint = await inventoryFingerprint(db, propertyId, newUnit.id, effectiveDate, context.order.departure_date, context.segmentIds);

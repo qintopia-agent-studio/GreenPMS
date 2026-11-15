@@ -232,6 +232,7 @@ export interface MembershipProductDto {
   entitlement_units: number;
   validity_period: "P1Y";
   allowed_room_type_code: string;
+  allowed_room_type_codes?: string[] | null;
   allowed_inventory_kind: "ROOM" | "BED";
   status: "PUBLISHED";
   created_at: string;
@@ -254,6 +255,7 @@ export interface MembershipOrderDto {
   entitlement_units: number;
   validity_period: "P1Y";
   allowed_room_type_code: string;
+  allowed_room_type_codes?: string[] | null;
   allowed_inventory_kind: "ROOM" | "BED";
   status: "DRAFT" | "ACTIVE" | "VOIDED";
   activated_at: string | null;
@@ -355,6 +357,7 @@ export interface HistoricalMembershipBackfillDto extends MemberCorrectionAuditDt
   entitlement_units: number;
   validity_period: "P1Y";
   allowed_room_type_code: string;
+  allowed_room_type_codes?: string[] | null;
   allowed_inventory_kind: "ROOM" | "BED";
   actual_membership_date: string;
   valid_until: string;

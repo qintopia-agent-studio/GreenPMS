@@ -933,6 +933,7 @@ const AdminMembershipProductEffectSchema = strictObject({
   entitlementUnits: Type.Integer({ minimum: 1 }),
   validityPeriod: Type.Literal("P1Y"),
   allowedRoomTypeCode: ShortText,
+  allowedRoomTypeCodes: Type.Optional(Type.Array(ShortText, { minItems: 1, uniqueItems: true })),
   allowedInventoryKind: InventoryUnitKindSchema
 });
 
@@ -1043,6 +1044,7 @@ export const CommandEffectSchema = Type.Union([
       entitlementUnitKind: EntitlementUnitKindSchema,
       entitlementUnits: Type.Integer({ minimum: 1 }),
       allowedRoomTypeCode: ShortText,
+      allowedRoomTypeCodes: Type.Optional(Type.Array(ShortText, { minItems: 1, uniqueItems: true })),
       allowedInventoryKind: InventoryUnitKindSchema
     }),
     pricing: strictObject({
@@ -1468,6 +1470,7 @@ export const CommandEffectSchema = Type.Union([
       entitlementUnitKind: EntitlementUnitKindSchema,
       entitlementUnits: Type.Integer({ minimum: 1 }),
       allowedRoomTypeCode: ShortText,
+      allowedRoomTypeCodes: Type.Optional(Type.Array(ShortText, { minItems: 1, uniqueItems: true })),
       allowedInventoryKind: InventoryUnitKindSchema
     }),
     transfer: strictObject({
@@ -2844,6 +2847,7 @@ const MembershipProductRowSchema = strictObject({
   entitlement_units: Type.Integer({ minimum: 1 }),
   validity_period: Type.Literal("P1Y"),
   allowed_room_type_code: ShortText,
+  allowed_room_type_codes: Type.Optional(Type.Union([Type.Array(ShortText, { minItems: 1, uniqueItems: true }), Type.Null()])),
   allowed_inventory_kind: InventoryUnitKindSchema,
   status: Type.Literal("PUBLISHED"),
   created_at: DateTime
@@ -3400,6 +3404,7 @@ const MembershipOrderRowSchema = strictObject({
   entitlement_units: Type.Integer({ minimum: 1 }),
   validity_period: Type.Literal("P1Y"),
   allowed_room_type_code: ShortText,
+  allowed_room_type_codes: Type.Optional(Type.Union([Type.Array(ShortText, { minItems: 1, uniqueItems: true }), Type.Null()])),
   allowed_inventory_kind: InventoryUnitKindSchema,
   status: Type.Union([Type.Literal("DRAFT"), Type.Literal("ACTIVE"), Type.Literal("VOIDED")]),
   activated_at: nullable(DateTime),
@@ -3503,6 +3508,7 @@ const HistoricalMembershipBackfillRowSchema = strictObject({
   entitlement_units: Type.Integer({ minimum: 1 }),
   validity_period: Type.Literal("P1Y"),
   allowed_room_type_code: ShortText,
+  allowed_room_type_codes: Type.Optional(Type.Union([Type.Array(ShortText, { minItems: 1, uniqueItems: true }), Type.Null()])),
   allowed_inventory_kind: InventoryUnitKindSchema,
   actual_membership_date: LocalDate,
   valid_until: LocalDate,
