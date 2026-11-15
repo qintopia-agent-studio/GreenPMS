@@ -3107,6 +3107,39 @@ describe("4.7 stay collection conversion to membership", () => {
 });
 
 
+describe("shared private-bath membership upgrade", () => {
+  it("upgrades a continuous standard/king sequence as ordinary matching and moves without duplicate consumption", async () => {
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftDate(businessDate, -5);
+    const departureDate = shiftDate(businessDate, 2);
+    const standard = await db.selectFrom("inventory_units").select("id").where("room_type_code", "=", "private_bath_standard").where("active", "=", true).where("kind", "=", "ROOM").executeTakeFirstOrThrow();
+    const king = await db.selectFrom("inventory_units").select("id").where("room_type_code", "=", "private_bath_king").where("active", "=", true).where("kind", "=", "ROOM").executeTakeFirstOrThrow();
+    const prefix = "shared-private-sequence";
+    const memberId = await createMember(`STAGE86-${prefix.toUpperCase()}-ID`, prefix);
+    const stay = await createCheckedOutStay({ prefix, documentNumber: `STAGE86-${prefix.toUpperCase()}-ID`, skipCheckOut: true,
+      unitId: standard.id, arrivalDate, departureDate, collectionAmountMinor: 72_000, transactionReference: "WX-SHARED-PRIVATE-SEQUENCE" });
+    const move = await execute({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId: stay.orderId,
+      newInventoryUnitId: king.id, effectiveDate: businessDate } }, `${prefix}-move`);
+    expect(move.businessCommitted, JSON.stringify(move.error)).toBe(true);
+    const envelope = conversionEnvelope({ orderId: stay.orderId, memberId, collectionFactId: stay.collectionFactId,
+      membershipProductId: "membership_product_private_bath_shared_v1", agreedPriceMinor: 280_000, remainingPaymentTransactionReference: "WX-SHARED-PRIVATE-REMAINING" });
+    const prepared = await preview(envelope, `${prefix}-upgrade`);
+    expect(prepared.preview.effect).not.toHaveProperty("crossRoomUpgrade");
+    expect(prepared.preview.effect.product).toMatchObject({ allowedRoomTypeCodes: ["private_bath_standard", "private_bath_king"] });
+    const receipt = await confirmPrepared(envelope, prepared, `${prefix}-upgrade`);
+    expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+    const lotId = receipt.result!.entitlementLotId as string;
+    expect(await conversionEntitlementBalance(lotId)).toBe(23);
+    const consumedBefore = await db.selectFrom("entitlement_ledger").selectAll().where("lot_id", "=", lotId).execute();
+    const returnMove = await execute({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId: stay.orderId,
+      newInventoryUnitId: standard.id, effectiveDate: shiftDate(businessDate, 1) } }, `${prefix}-return`);
+    expect(returnMove.businessCommitted, JSON.stringify(returnMove.error)).toBe(true);
+    expect(await db.selectFrom("entitlement_ledger").selectAll().where("lot_id", "=", lotId).execute()).toEqual(consumedBefore);
+    expect(await conversionEntitlementBalance(lotId)).toBe(23);
+    await assertConversionCommandStillValid(receipt.commandId);
+  });
+});
+
 describe("cross-room membership upgrade", () => {
   it("retains the actual room and real funds, atomically consumes seven nights, and supports shortening and checkout", async () => {
     const businessDate = await propertyLocalToday(db, demo.propertyId);

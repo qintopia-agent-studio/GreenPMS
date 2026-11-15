@@ -274,10 +274,9 @@ function entitlementLabel(unitKind: "ROOM_NIGHT" | "BED_NIGHT", units: number): 
   return `${units} ${unitKind === "ROOM_NIGHT" ? "间夜" : "床夜"}`;
 }
 
-function productScopeLabel(product: Pick<MembershipProductDto, "code">): string {
-  if (product.code === "SHARED_BATH_SINGLE_30") return "公卫单人间";
-  if (product.code === "PRIVATE_BATH_SINGLE_30") return "独卫单人间";
-  return "公卫四人间单床";
+function productScopeLabel(product: MembershipProductDto): string {
+  const names: Record<string, string> = { shared_bath_single: "公卫单人间", private_bath_single: "独卫单人间", shared_bath_quad: "公卫四人间", private_bath_standard: "独卫标间", private_bath_king: "独卫大床" };
+  return (product.allowed_room_type_codes ?? [product.allowed_room_type_code]).map((code) => names[code] ?? code).join("／") + (product.allowed_inventory_kind === "BED" ? "单床" : "");
 }
 
 function CreateMemberDialog({ propertyId, draft, prefill, onCorrectSource, onClose, onSubmit }: {

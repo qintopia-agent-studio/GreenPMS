@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthPrincipal, CommandEnvelope, ReceiptDto } from "@qintopia/contracts";
 import {
   confirmCommandPreview,
+  resolveCommandResult,
   createDatabase,
   createCommandPreview,
   getMemberView,
@@ -1269,7 +1270,7 @@ describe("step 9 administrator membership corrections", () => {
     const query = { propertyId: demo.propertyId };
     expect((await listOrders(db, { ...query, funds: "BALANCE_DUE" })).orders.map((row) => row.id)).toEqual([due.orderId]);
     expect((await listOrders(db, { ...query, funds: "OVERPAID" })).orders.map((row) => row.id)).toEqual([over.orderId]);
-    await confirm(envelope("RECORD_REFUND", { propertyId: demo.propertyId, orderId: over.orderId, amountMinor: 10_000, method: "WECOM", referencesFactId: over.collectionFactId, note: "核对后退回多收款" }), "funds-refund", ordinaryStaff);
+    await confirm(envelope("RECORD_REFUND", { propertyId: demo.propertyId, orderId: over.orderId, amountMinor: 10_000, method: "WECOM", referencesFactId: over.collectionFactId, refundReference: "TEST-FUNDS-REFUND-001", note: "核对后退回多收款" }), "funds-refund", ordinaryStaff);
     expect((await listOrders(db, { ...query, funds: "OVERPAID" })).orders).toEqual([]);
     await expect(listOrders(db, { ...query, funds: "BALANCE_DUE", workDate: "2026-09-09" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
@@ -3848,6 +3849,38 @@ describe("step 9 administrator membership corrections", () => {
     } finally {
       await clearMembershipCommandScopeAttackTrigger();
     }
+  });
+
+  it("preserves shared membership scope through historical backfill, receipt and recovery", async () => {
+    const memberId = await createMember("shared-scope-backfill");
+    const actualMembershipDate = shiftLocalDate(await propertyLocalToday(db, demo.propertyId), -20);
+    const scope = ["private_bath_standard", "private_bath_king"];
+    const command = envelope("BACKFILL_HISTORICAL_MEMBERSHIP", {
+      propertyId: demo.propertyId, memberId, membershipProductId: "membership_product_private_bath_shared_v1",
+      actualMembershipDate,
+      payment: { amountMinor: 280_000, businessDate: actualMembershipDate, transactionReference: "WECOM-SHARED-SCOPE-BACKFILL" },
+      evidenceNote: "合成通用会员历史合同与收款核对"
+    });
+    const prepared = await preview(command, "shared-scope-backfill");
+    expect(prepared.preview.effect).toMatchObject({ product: { allowedRoomTypeCodes: scope } });
+    const confirmationMetadata = metadata("shared-scope-backfill-confirm");
+    const receipt = await confirmCommandPreview(db, administrator, prepared.preview.previewId, {
+      propertyId: demo.propertyId, commandType: command.commandType, confirmation: true,
+      expectedEffectHash: prepared.preview.effectHash,
+      reason: { code: "DATA_ENTRY_CORRECTION", note: "核对合成历史会员" }
+    }, confirmationMetadata);
+    expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+    expect(receipt.result).toMatchObject({ product: { allowedRoomTypeCodes: scope }, effectHash: prepared.preview.effectHash });
+    const orderId = receipt.result!.membershipOrderId as string;
+    expect(await db.selectFrom("membership_orders").select("allowed_room_type_codes").where("id", "=", orderId).executeTakeFirstOrThrow())
+      .toEqual({ allowed_room_type_codes: scope });
+    expect(await db.selectFrom("historical_membership_backfills").select("allowed_room_type_codes").where("membership_order_id", "=", orderId).executeTakeFirstOrThrow())
+      .toEqual({ allowed_room_type_codes: scope });
+    const recovered = await resolveCommandResult(db, administrator, {
+      propertyId: demo.propertyId, commandType: command.commandType, idempotencyKey: confirmationMetadata.idempotencyKey
+    }, metadata("shared-scope-backfill-recover"));
+    expect(recovered).toMatchObject({ businessCommitted: true, receiptId: receipt.receiptId, result: receipt.result });
+    expect(await db.selectFrom("member_contracts").select("id").where("membership_order_id", "=", orderId).execute()).toHaveLength(1);
   });
 
   it("backfills one still-active historical purchase while keeping membership and payment dates independent", async () => {

@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-08.1";
+export const assistantKnowledgeRevision = "2026-11-15.1";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -166,29 +166,32 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
   },
   {
     id: "membership-sale", title: "会员订单、收款、生效、更正与空白订单取消", commands: ["CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "CORRECT_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER", "CANCEL_MEMBERSHIP_ORDER"],
-    sources: ["docs/implementation/spec-cancel-empty-membership-order.md", "docs/implementation/spec-step-2b-membership-orders.md", "apps/web/src/pages/MembersPage.tsx", "docs/implementation/spec-payment-allocation-retained-funds.md"],
-    content: `在会员档案创建会员订单，选择页面当前发布的产品，核对权益类型、房型、价格及有效期；成交价偏离默认价时填写原因，不让助手给固定价格承诺。登记真实企微收款并核对流水归属；会员收款仍整笔独占，不使用住宿多订单分配方式。
-收款后仍需明确办理会员订单生效，不能把已建档、已创建会员订单或已收款等同于权益已生效。至少有一笔有效收款才能生效；收款与成交价有差额时按页面核对，不据此自动改价或宣称结清。
-误建的空白会员订单可在会员档案对应订单点击“取消订单”，填写原因，核对后确认。仅待生效、从未有任何收款记录、未关联合同或权益的订单允许取消；收款已冲销为零也不属于空白订单。取消后保留订单及原因、操作人和时间，显示“已取消”，不再提示收款差额或提供收款/生效操作，不影响其他正常订单及核销。不能用删除会员或“撤销错误办卡并重新升级”代替取消草稿。
-错误会员收款使用“更正企微收款”，保留原收款及更正记录，不原地删除。会员退费不是本版已提供的通用功能，不用住宿退款或留存入口冒充会员退费。`
+    sources: ["docs/implementation/spec-private-bath-shared-membership.md", "docs/implementation/spec-cancel-empty-membership-order.md", "docs/implementation/spec-step-2b-membership-orders.md", "apps/web/src/pages/MembersPage.tsx", "docs/implementation/spec-payment-allocation-retained-funds.md"],
+    content: `会员档案中创建会员订单，按当前发布产品核对权益、房型、价格、有效期；调价填原因。助手不承诺固定价格。真实企微收款须核对归属，会员收款整笔独占，不支持住宿多单分配。
+独卫标间／大床通用会员默认2800元，两房型共用一份30间夜，生效日起一个日历年；以当前发布产品及订单快照为准，不自动转换旧会员。
+至少有一笔有效收款才能明确办理生效；建档、建单、收款不等于权益生效。收款差额按页面核对，不自动改价或宣称结清。
+误建空白单在会员档案对应订单点“取消订单”、填原因并核对确认。仅待生效、从未有任何收款记录、未关联合同或权益可取消；收款已冲销为零也不属于空白订单。取消保留订单、原因、操作人与时间，显示“已取消”，隐藏差额及收款/生效操作，不影响其他正常订单及核销。不能用删除会员或“撤销错误办卡并重新升级”代替取消草稿。
+错记收款用“更正企微收款”，原记录及更正历史保留。会员退费尚无通用功能，不能用住宿退款或留存冒充。`
   },
   {
     id: "member-stay", title: "会员住宿覆盖、余额与临时其他整间房", commands: ["CORRECT_MEMBER_ENTITLEMENT_BALANCE"],
-    sources: ["docs/implementation/spec-step-2c-member-balances-and-stays.md", "待开发项/QinTopia-PMS-会员临时安排其他整间房型-实施规格.md", "apps/web/src/pages/MembersPage.tsx"],
-    content: `安排住宿时选择会员并核对房型、有效日期、可用权益和现金补差。预订冻结权益，入住按规则核销；不能把会员剩余夜数当成现金，也不能仅因有会员档案就保证所有日期和房型免费。
-覆盖不足时查看逐段覆盖和未覆盖部分报价；遇到多份权益重叠无法自动选择等提示先处理歧义，不由助手随意指定权益。余额更正在会员权益区填写目标剩余数和原因、核对后提交，不改档案数字替代流水。
-临时安排其他整间房：从正常房态选择空的整间房、创建订单并选会员，按页面选择临时安排并填写原因；必须有唯一的有效整房权益完整覆盖全部日期，每晚仍扣原权益1间夜，只占实际房间，不增加房型差价、不改变未来适用房型。余额不足不回退现金补差，不能用于床位与整房互换，也不新增审批入口。`
+    sources: ["docs/implementation/spec-private-bath-shared-membership.md", "docs/implementation/spec-step-2c-member-balances-and-stays.md", "待开发项/QinTopia-PMS-会员临时安排其他整间房型-实施规格.md", "apps/web/src/pages/MembersPage.tsx"],
+    content: `安排住宿选会员，核对房型、有效日期、权益及补差。预订冻结、入住核销；剩余夜数不是现金，有会员档案不保证所有日期房型免费。
+通用会员在独卫标间与独卫大床每间每晚扣1间夜；例如标间5晚加大床3晚，共用8间夜、余22，不是各有30夜。两房型正常入住与换房不需临时安排原因，不重发权益或重算有效期。其他房型仍按原规则核对。
+覆盖不足时查看逐段覆盖和未覆盖部分报价；多份权益重叠须先处理歧义，助手不指定消耗顺序。余额更正在会员权益区填目标剩余数与原因、核对提交，不改档案数字替代流水。
+临时安排其他整间房：房态选空整房、建单选会员，勾选临时安排并填原因；唯一有效整房权益须覆盖全部日期，每晚扣原权益1间夜，只占实际房间，不加差价、不改未来适用房型。余额不足不回退现金补差，不用于床位与整房互换、不新增审批。`
   },
   {
     id: "membership-conversion", title: "在住升级会员与收款转会员", commands: ["CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"],
-    sources: ["待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md", "待开发项/spec-cross-room-membership-upgrade.md", "待开发项/spec-8-6-wecom-net-transfer-after-refunds.md", "docs/implementation/spec-payment-allocation-retained-funds.md"],
-    content: `在符合条件的在住订单详情点击“升级会员”：按主住人手机号匹配档案，无手机号先更正住宿人，无档案先建档再回到订单。核对产品、有效净收款、转入金额、会员成交价、企微补收差额和住宿权益核销，按最终预览确认。
-跨房型升级保留实际房间，不是要求先换房；适用在住、完整区间连续的整房时间线及整房会员。若期间发生过房型变更，须明确勾选“前期临时安置”并填原因，核对每一段实际整房、日期连续、目标会员房型至少出现一段且没有床位混用，整段权益充足。例外覆盖本次完整房间时间线与日期，不改变以后产品房型；跨房型升级后延长、换房和历史房间安排纠错被阻止，不能自动套用普通会员续住说明。
-住宿收款转会员是现有资金归属转换，不是再次收款。符合资格的全部企微净收款一次转入，会员成交价不能低于转入额；差额必须有真实新企微收款凭证，零转入不伪造零元收款。历史收退款保留；拆分收款或内部划转来源禁止转会员，不把已留存、已退款或已转出的款项重复转入。升级后金额与权益按服务端核对，不用普通重价或部分撤销伪造完整撤销升级。`
+    sources: ["docs/implementation/spec-private-bath-shared-membership.md", "待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md", "待开发项/spec-cross-room-membership-upgrade.md", "待开发项/spec-8-6-wecom-net-transfer-after-refunds.md", "docs/implementation/spec-payment-allocation-retained-funds.md"],
+    content: `符合条件的在住订单详情点“升级会员”：按主住人手机号匹配；缺手机号先更正，缺档案先建档。核对产品、净收款、转入额、成交价、真实补收及核销，按最终预览确认。
+通用会员的住宿房段全部属于独卫标间／独卫大床时按普通匹配升级，无需确认临时安置。
+跨房型升级保留实际房间，不是要求先换房；适用在住、完整区间连续的整房时间线及整房会员。若涉及范围外且发生过房型变更，须明确勾选“前期临时安置”并填原因，核对整房各段连续、目标会员房型至少出现一段、无床位混用且权益充足。例外仅限本次完整时间线，不改变以后适用房型；跨房型升级后延长、换房和历史房间安排纠错被阻止，不能自动套用普通会员续住说明。
+住宿款转会员是资金归属转换，不是再次收款。全部合格企微净款一次转入，成交价不得低于转入额；差额需真实新企微收款凭证，零转入不造零元收款。历史收退款保留；拆分收款或内部划转来源禁止转会员，不把已留存、已退款或已转出的款项重复转入。升级后按服务端核对金额权益，不用重价或部分撤销伪造完整撤销。`
   },
   {
     id: "historical-corrections", title: "历史补录、住客及住宿安排纠错", commands: ["CORRECT_ORDER_OCCUPANT", "CORRECT_HISTORICAL_STAY_ARRANGEMENTS", "CORRECT_MEMBERSHIP_EFFECTIVE_DATE", "BACKFILL_HISTORICAL_MEMBERSHIP", "VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY"],
-    sources: ["待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md", "待开发项/QinTopia-PMS-运营主管受控纠错与房态异常修复-实施规格.md", "apps/web/src/pages/MembersPage.tsx", "apps/web/src/pages/OrdersPage.tsx"],
+    sources: ["docs/implementation/spec-private-bath-shared-membership.md", "待开发项/QinTopia-PMS-在住升级会员与历史补录-实施规格.md", "待开发项/QinTopia-PMS-运营主管受控纠错与房态异常修复-实施规格.md", "apps/web/src/pages/MembersPage.tsx", "apps/web/src/pages/OrdersPage.tsx"],
     content: `补录用于补进真实漏记业务，不是改写已有订单。已完成住宿与当前在住住宿按房态页提供的“补录住宿”入口办理，录入真实历史日期并核对价格、权益及资金依据。已完成补录不再补办入住/退房、不算当前在住；跨今天的在住补录直接形成实际在住记录。已有订单漏记收款在原订单补记，不重复建单。确实漏记退房的逾期在住订单按页面补记退房；错误预订的完成住宿需填写真实依据、核对完整履约与权益影响，不能对所有历史订单普遍补办入住/退房。
 住客、历史住宿安排、会员生效日期、历史会员补录或误办会员转回住宿等纠错，使用当前页面已开放且有权限的“修改会员记录”或对应订单更正入口，填原因并查看只读核对、影响范围后确认。不能因为按钮不见就用普通新建流程代替受控纠错。
 本版保留审计和关联关系，不指导SQL改数、删除原始事实或绕过库存/权益检查；未来计划或关闭的入口不当成当前功能。`

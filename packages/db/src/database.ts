@@ -1,3 +1,4 @@
+import { membershipScopeReady } from "./membership-scope-readiness.ts";
 import { membershipCancellationReady } from "./membership-cancellation-readiness.ts";
 import { operatingSalesReady } from "./operating-sales-readiness.ts";
 import { paymentAllocationReady } from "./payment-allocation-readiness.ts";
@@ -102,7 +103,8 @@ export const currentMigrationNames = [
   "078_ai_question_progress.sql",
   "079_ai_provider_failover.sql",
   "080_ai_provider_priority_swap.sql",
-  "081_wecom_refund_reconciliation.sql"
+  "081_wecom_refund_reconciliation.sql",
+  "082_private_bath_shared_membership.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -2018,12 +2020,12 @@ export async function databaseReady(
             FROM (
               VALUES
                 ('qintopia_assert_stage13_stay_conversion_command(text)', '9f9d7311054a9c99b68999dcd799cd662996d0496573cdd783fc747ca1466459'),
-                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', 'b4270521bdc3cb0eda81d6cb6e65ba353239a6a01e712534cf99d954b293bb63'),
+                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '36297eb71b15c6ca4ff887805d94112246492e5c6fd718fd6903315a33f759d3'),
                 ('qintopia_reject_lodging_funds_after_membership_transfer()', 'db65662dcfcffcde84fb0abc91d54a7a1b2b720b4cd42a8b34375f9499943d5e'),
                 ('qintopia_reject_membership_funds_after_stay_transfer()', '94efb540ae902ad6edf664b72ec170e1ea54fc3459a5e70af01783b0e484ebb6'),
                 ('qintopia_require_stage13_conversion_reversal_bridge()', '5f73c20a3019cdc3810ae4484eec1a898e700e954c20d6c6a65fe8493b8f5c2e'),
                 ('qintopia_require_transfer_membership_payment_bridge()', '1993430b9a865fa9ab62a4c88dab76e30dc0defc753016726bb1e21ed4920af2'),
-                ('qintopia_validate_conversion_consume_entitlement_fact()', 'af89b532e6a6ab2c9a276610b5f4b72dffbdb858862bdf646ffaced92eaddb93'),
+                ('qintopia_validate_conversion_consume_entitlement_fact()', '9da328e757d777ad7c36611a87a68d231d5f6fd6690f35c9d376d6517867dcaf'),
                 ('qintopia_validate_membership_payment_fact()', 'cce1edb6109475403047b936d164c8cb18b6577b9078c6c398c25ce0f22a41c1'),
                 ('qintopia_validate_stage13_stay_conversion_child()', '4d0ef7b2821a7286c2e6bb87fa936b1e6c6fc194e759acf09afe0645d36095b0'),
                 ('qintopia_validate_stage13_stay_conversion_execution()', '2b83d1f0c739a4bdc65e3114d0f6ddbcca1ac80a02ede73d687705da946d3f56'),
@@ -2261,6 +2263,7 @@ export async function databaseReady(
               'entitlement_units',
               'validity_period',
               'allowed_room_type_code',
+              'allowed_room_type_codes',
               'allowed_inventory_kind',
               'actual_membership_date',
               'valid_until',
@@ -2270,7 +2273,7 @@ export async function databaseReady(
               'command_id',
               'created_at'
             ]::text[],
-            25),
+            26),
           ('membership_payment_reclassifications',
             ARRAY[
               'id',
@@ -2406,10 +2409,10 @@ export async function databaseReady(
           ('qintopia_has_historical_command_fact_evidence(text,text,text,text,text)', 'd7fde4c9df35af9e9a3bf1d87e2eb70db2e79c0e8cc3ad773bca088d22e5712e', 'sql', 's', false),
           ('qintopia_has_exact_source_amendment_set(text,text,text)', '7bc120ec02f86adc183062354e7c6fd9d93bcd25fef482738b328a5a50c282a8', 'sql', 's', false),
           ('qintopia_validate_member_profile_correction()', '51908a84980ff376295b9c283cfc2a55a34ce35716639551b7bed882d9b64fca', 'plpgsql', 'v', false),
-          ('qintopia_validate_membership_effective_date_correction()', '2a934ecfb22c081fbf886b07f624858e20ccde7a291c80ab982a5596bf829c63', 'plpgsql', 'v', false),
+          ('qintopia_validate_membership_effective_date_correction()', '97125ffced9ae1d76d17a97bf16cc0857734a33e041b03b63f51e7a12387a92e', 'plpgsql', 'v', false),
           ('qintopia_validate_historical_membership_backfill()', '723b39cd35d1f92ee5e88d82548f0df7c3fccafd6db2ac9f68ee4ae8c9ba4285', 'plpgsql', 'v', false),
           ('qintopia_validate_membership_void_entitlement_fact()', 'a60cae95369c47eaf90f24937d927913a73f6207b318de0977d65460f20ad300', 'plpgsql', 'v', false),
-          ('qintopia_validate_membership_void_reconversion()', '028e6a3435a8c1b049f17b8f5235b663a87aaba0fba515277ea1586a0e07011e', 'plpgsql', 'v', false),
+          ('qintopia_validate_membership_void_reconversion()', 'fe713a7a385c69715fc9f6d1af5b1ec92e9c8944edec93ae856f555adea06d11', 'plpgsql', 'v', false),
           ('qintopia_assert_admin_membership_correction_child(text)', 'd6600cf5ff86052d542c0e1ed6a8b34e2bc10c0c7a4a4d76035873a7b8a72d76', 'plpgsql', 'v', false),
           ('qintopia_validate_admin_membership_direct_child()', 'fc83255e1e4977f18acd21a3bb3484e90abd55612ec167fcef1baccc50d85307', 'plpgsql', 'v', false),
           ('qintopia_validate_admin_membership_order_child()', 'c61c4258b25c87cd1b6646b55340d88c6c0faf540d71711e214b46e979a3ef16', 'plpgsql', 'v', false),
@@ -2617,7 +2620,7 @@ export async function databaseReady(
           ('admin_membership_payment_evidence_claims', '0674f8d9d3c380e5ddf15012c8d093628e38e86b1f107060b2a132f73133f4a5'),
           ('member_profile_corrections', 'b0ef6f22805398e05e7ad02b7fbbcd2b7acfb03181e481c3d3deb044f7aa52f8'),
           ('membership_effective_date_corrections', '53266d3722b9d963823ae45ce920c1eb8220c5a2d7dfa1812f8ee245b39f5dbb'),
-          ('historical_membership_backfills', '59b33fa3d9a627bc0447d2ad9ec28dd18898bfa00471c46fdfe1ff8f1bed9997'),
+          ('historical_membership_backfills', '99b085af8a4a195346e6231165c67df207821413292acfab777ac34abe8c9157'),
           ('membership_payment_reclassifications', '7e39a365047f705c961d4296f6f4b9ba5e99817592f16f168dd9150ad775febb'),
           ('membership_void_reconversions', '0cf03ec66fad96a3ed4a7a1f3a6f42ee40ac056feded30455932766a7268a0e3')
       ),
@@ -2971,18 +2974,18 @@ export async function databaseReady(
             FROM (
               VALUES
                 ('qintopia_assert_stage10_shorten_combination(text)', 'a9ea4fc40b6f4e204db8b9c9ec05869b493f5220c389bbd6443ee355cc30db4b'),
-                ('qintopia_validate_coverage_ownership()', '7b304edb2fd2783436bc77b568370d2f2aab78820771c71fbea53f35d0d75a55'),
+                ('qintopia_validate_coverage_ownership()', 'e6233bbe4a50a4d6a9eea4311030750a57d3ab2f13e862a0125cae7ed7346a01'),
                 ('qintopia_protect_coverage_identity()', 'b8eb365fa29712bfe2c26b9c8dfe17a87bdcd0091b012af88a5bb328b5af0750'),
                 ('qintopia_reject_stage10_entitlement_write()', 'd3450f298724fa9df85d09cc89175acf4d4cccb837963839b61dddbaac22756f'),
                 ('qintopia_validate_entitlement_lifecycle_fact()', 'c03dac8f3f8571b9908fb95929f91fa7ea6386b78af1e19aa7127c54ca65ab35'),
                 ('qintopia_validate_coverage_lifecycle_state()', '5442a3840f8204eefb8a465ed5297634add72877de279ff371a8800bbd421596'),
-                ('qintopia_assert_stage11_move_combination(text)', 'a20dda3b5c1103f9daa577dd09edcf4a8544a7f66c9f292d9d72d4eb172b12cf'),
+                ('qintopia_assert_stage11_move_combination(text)', '91cd98d47fc862dd91c8454a57ca497771d780f6bb7d9928fcceac6b908409b4'),
                 ('qintopia_preserve_stage11_consumed_coverage()', '7152466eed2e839a9be9e38464e0fef91d5e615246f21dd372c7d487295dde58'),
-                ('qintopia_validate_conversion_consume_entitlement_fact()', 'af89b532e6a6ab2c9a276610b5f4b72dffbdb858862bdf646ffaced92eaddb93'),
+                ('qintopia_validate_conversion_consume_entitlement_fact()', '9da328e757d777ad7c36611a87a68d231d5f6fd6690f35c9d376d6517867dcaf'),
                 ('qintopia_reject_lodging_funds_after_membership_transfer()', 'db65662dcfcffcde84fb0abc91d54a7a1b2b720b4cd42a8b34375f9499943d5e'),
                 ('qintopia_reject_membership_funds_after_stay_transfer()', '94efb540ae902ad6edf664b72ec170e1ea54fc3459a5e70af01783b0e484ebb6'),
-                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', 'b4270521bdc3cb0eda81d6cb6e65ba353239a6a01e712534cf99d954b293bb63'),
-                ('qintopia_assert_converted_stay_fulfillment_command(text)', '7b22fe62a3610462c82a4a54f95d62e478996454dfc312ff8e90c189dfa222a0'),
+                ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '36297eb71b15c6ca4ff887805d94112246492e5c6fd718fd6903315a33f759d3'),
+                ('qintopia_assert_converted_stay_fulfillment_command(text)', '1ee7afb83a223322b49218cd666d45c0c24c14b887244232c5566119434e0304'),
                 ('qintopia_validate_converted_stay_fulfillment_execution()', 'ed58ceb0d44795151d23b34912bf90809ca7f2e370b41d9f07b564a71c8404ce'),
                 ('qintopia_validate_converted_stay_fulfillment_child()', 'a4a789b5bbb5ad99fd7b6fd8aa38528f6bcc6f4851ea0e7f550f7d28d965733c')
             ) AS expected(signature, body_hash)
@@ -3142,7 +3145,7 @@ export async function databaseReady(
             IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
           + COALESCE(position('temporaryOtherRoomArrangement'
             IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
-          + COALESCE(position('membership_room_type_code IS DISTINCT FROM inventory_room_type_code'
+          + COALESCE(position('NOT qintopia_membership_room_matches(membership_room_type_code, membership_room_type_codes, inventory_room_type_code)'
             IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
           + COALESCE(position('coverage_items_membership_product_match'
             IN pg_get_functiondef(to_regprocedure('qintopia_validate_coverage_ownership()'))) > 0, false)::integer
@@ -3188,8 +3191,8 @@ export async function databaseReady(
             SELECT 1
             FROM (
               VALUES
-                ('qintopia_validate_coverage_ownership()', '7b304edb2fd2783436bc77b568370d2f2aab78820771c71fbea53f35d0d75a55'),
-                ('qintopia_validate_temporary_other_room_create_order()', '7591e6b8e9d6cac8f3625807ab56ec2f743b3d4f96accd8c7d759a9c435c72b8'),
+                ('qintopia_validate_coverage_ownership()', 'e6233bbe4a50a4d6a9eea4311030750a57d3ab2f13e862a0125cae7ed7346a01'),
+                ('qintopia_validate_temporary_other_room_create_order()', '164da03059d257973ee957a3465e1fd4c7d8520d54a04d1db043db9cb9d81b50'),
                 ('qintopia_reject_temporary_other_room_lifecycle_amendment()', 'f48371f00b8377485122ef26f988ace3a1cf6a54711e94937f9c74d45c1f6a54'),
                 ('qintopia_protect_temporary_other_room_member_chain()', 'b26f75a93c4f5e0580847d61c267c72db734f1a4dc2ed7fe3590c43ff0798004'),
                 ('qintopia_reject_temporary_other_room_funds()', '31abb8a611888eb8364029b30dea6050df13da1df75d6615f923238fb912957f')
@@ -3311,7 +3314,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await membershipCancellationReady(db) && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db);
+    return finalReady && await membershipScopeReady(db) && await membershipCancellationReady(db) && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db);
   } catch {
     return false;
   }

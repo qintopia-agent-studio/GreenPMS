@@ -57,7 +57,7 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
 
   await page.getByTestId("create-membership-order").click();
   const product = page.getByTestId("membership-product");
-  await expect(product.locator("option")).toHaveCount(3);
+  await expect(product.locator("option")).toHaveCount(4);
   await expect(product.locator("option", { hasText: "公卫单人间会员 · ¥1,620.00" })).toHaveCount(1);
   await expect(product.locator("option", { hasText: "独卫单人间会员 · ¥2,160.00" })).toHaveCount(1);
   await expect(product.locator("option", { hasText: "公卫四人间会员 · ¥936.00" })).toHaveCount(1);
@@ -149,4 +149,45 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
   await page.screenshot({ path: testInfo.outputPath("membership-orders-2b.png"), fullPage: true });
+});
+
+test("通用会员一次办理两房型共享30间夜且按一年生效", async ({ page }, testInfo: TestInfo) => {
+  await login(page);
+  await page.getByRole("link", { name: "会员", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "会员档案" })).toBeVisible();
+  const suffix = testInfo.project.name;
+  const memberName = `通用会员验收-${suffix}`;
+  await page.getByTestId("create-member").click();
+  await page.getByTestId("member-full-name").fill(memberName);
+  await page.getByTestId("member-nickname").fill(memberName);
+  await page.getByTestId("member-phone").fill(suffix === "desktop" ? "13928000001" : "13928000002");
+  await page.getByTestId("member-identity-card").fill(`E2E-SHARED-${suffix}-001`);
+  await page.getByTestId("member-wechat").fill(`shared-member-${suffix}`);
+  await page.getByRole("button", { name: "核对并创建", exact: true }).click();
+  await confirmMembershipCommand(page, [memberName], "会员档案已创建");
+  await expect(page.getByRole("heading", { name: memberName, exact: true })).toBeVisible();
+  await page.getByTestId("create-membership-order").click();
+  await page.getByTestId("membership-product").selectOption("membership_product_private_bath_shared_v1");
+  const summary = page.getByLabel("会员产品信息");
+  for (const text of ["¥2,800.00", "30 间夜", "独卫标间／独卫大床", "生效日起一年"]) {
+    await expect(summary).toContainText(text);
+  }
+  await expect(summary).not.toContainText("公卫四人间");
+  await expect(page.getByTestId("membership-agreed-price-yuan")).toHaveValue("2800");
+  await page.screenshot({ path: testInfo.outputPath("shared-membership-product.png"), fullPage: true });
+  await page.getByRole("button", { name: "核对会员订单", exact: true }).click();
+  await confirmMembershipCommand(page, ["独卫标间／大床通用会员", "¥2,800.00", "30 间夜"], "会员订单已创建");
+  await expect(page.getByTestId("membership-order-item")).toHaveCount(1);
+  await recordPayment(page, "2800", `WX-SHARED-${suffix}`);
+  await page.getByTestId("activate-membership-order").click();
+  await confirmMembershipCommand(page, ["30 间夜"], "会员订单已生效");
+  const lot = page.getByTestId("member-entitlement-lot");
+  await expect(lot).toHaveCount(1);
+  await expect(lot).toContainText("独卫标间／大床通用会员");
+  await expect(lot).toContainText("30 间夜");
+  const today = todayInTimeZone("Asia/Shanghai");
+  await expect(page.getByTestId("membership-activation-summary")).toContainText(`${today} 至 ${nextYear(today)}`);
+  await expect(page.getByTestId("activate-membership-order")).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: testInfo.outputPath("shared-membership-active.png"), fullPage: true });
 });

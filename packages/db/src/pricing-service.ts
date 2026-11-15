@@ -142,6 +142,7 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
   memberId: string;
   inventoryUnitKind: InventoryUnitKind;
   roomTypeCode: string | null;
+  requiredRoomTypeCodes?: string[];
   dates: string[];
   preserved?: CoverageCandidate[];
   reallocatableHeld?: CoverageCandidate[];
@@ -161,6 +162,7 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
     .leftJoin("entitlement_ledger", "entitlement_ledger.lot_id", "entitlement_lots.id")
     .select([
       "membership_orders.allowed_room_type_code",
+      "membership_orders.allowed_room_type_codes",
       "membership_orders.allowed_inventory_kind",
       "membership_orders.entitlement_unit_kind",
       "member_contracts.id as contract_id",
@@ -178,6 +180,7 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
     .where("member_contracts.status", "=", "ACTIVE")
     .groupBy([
       "membership_orders.allowed_room_type_code",
+      "membership_orders.allowed_room_type_codes",
       "membership_orders.allowed_inventory_kind",
       "membership_orders.entitlement_unit_kind",
       "member_contracts.id",
@@ -192,7 +195,8 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
   const preservedSource = options.preserved ?? [];
   const preserved = preservedSource.filter((item) => options.dates.includes(item.serviceDate));
   const hasConsumedCoverageHistory = preservedSource.some((item) => item.status === "CONSUMED");
-  const matching = rows.filter((row) => row.allowed_room_type_code === options.roomTypeCode
+  const matching = rows.filter((row) => (row.allowed_room_type_codes ?? [row.allowed_room_type_code]).includes(options.roomTypeCode!)
+    && (options.requiredRoomTypeCodes ?? []).every((code) => (row.allowed_room_type_codes ?? [row.allowed_room_type_code]).includes(code))
     && row.allowed_inventory_kind === options.inventoryUnitKind
     && row.entitlement_unit_kind === entitlementKindFor(options.inventoryUnitKind));
   if (matching.length === 0) {
@@ -242,6 +246,7 @@ export async function resolveMemberCoverage(db: DbExecutor, options: {
 type TemporaryOtherRoomSourceRow = {
   membership_order_id: string;
   allowed_room_type_code: string;
+  allowed_room_type_codes: string[] | null;
   allowed_inventory_kind: "ROOM" | "BED";
   entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
   membership_status: "DRAFT" | "ACTIVE" | "VOIDED";
@@ -329,6 +334,7 @@ export async function resolveTemporaryOtherRoomCoverage(db: DbExecutor, options:
     .select([
       "membership_orders.id as membership_order_id",
       "membership_orders.allowed_room_type_code",
+      "membership_orders.allowed_room_type_codes",
       "membership_orders.allowed_inventory_kind",
       "membership_orders.entitlement_unit_kind",
       "membership_orders.status as membership_status",
@@ -350,6 +356,7 @@ export async function resolveTemporaryOtherRoomCoverage(db: DbExecutor, options:
     .groupBy([
       "membership_orders.id",
       "membership_orders.allowed_room_type_code",
+      "membership_orders.allowed_room_type_codes",
       "membership_orders.allowed_inventory_kind",
       "membership_orders.entitlement_unit_kind",
       "membership_orders.status",
@@ -366,12 +373,12 @@ export async function resolveTemporaryOtherRoomCoverage(db: DbExecutor, options:
     .execute() as TemporaryOtherRoomSourceRow[];
 
   const completeWholeRoomSources = rows.filter((row) => temporarySourceCoversCompleteStay(row, options.dates, propertyToday));
-  if (rows.some((row) => row.allowed_room_type_code === options.actualRoomTypeCode
+  if (rows.some((row) => (row.allowed_room_type_codes ?? [row.allowed_room_type_code]).includes(options.actualRoomTypeCode!)
     && isActiveTemporaryWholeRoomSource(row, propertyToday)
     && options.dates.some((date) => row.valid_from <= date && date <= row.valid_until && date <= row.expires_on))) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "该会员权益已适用于所选房型，请按普通会员订单创建", 409);
   }
-  const mismatchedSources = completeWholeRoomSources.filter((row) => row.allowed_room_type_code !== options.actualRoomTypeCode);
+  const mismatchedSources = completeWholeRoomSources.filter((row) => !(row.allowed_room_type_codes ?? [row.allowed_room_type_code]).includes(options.actualRoomTypeCode!));
   if (mismatchedSources.length !== 1) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "该会员没有唯一可完整覆盖本次整房临时安排的原权益", 409);
   }

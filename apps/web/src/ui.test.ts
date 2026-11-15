@@ -1395,6 +1395,19 @@ describe("administrator membership correction presentation", () => {
     }
   };
 
+  it("validates shared scope in administrator membership preview while accepting legacy evidence", () => {
+    const product = { ...backfillEffect.product, allowedRoomTypeCode: "private_bath_standard" };
+    expect(administratorMembershipPreviewHasEvidence("BACKFILL_HISTORICAL_MEMBERSHIP", backfillEffect, backfillInput)).toBe(true);
+    expect(administratorMembershipPreviewHasEvidence("BACKFILL_HISTORICAL_MEMBERSHIP", {
+      ...backfillEffect, product: { ...product, allowedRoomTypeCodes: ["private_bath_standard", "private_bath_king"] }
+    }, backfillInput)).toBe(true);
+    for (const scope of [[], ["private_bath_standard", "private_bath_standard"], ["private_bath_king"], "private_bath_standard", null, ["private_bath_standard", 7]]) {
+      expect(administratorMembershipPreviewHasEvidence("BACKFILL_HISTORICAL_MEMBERSHIP", {
+        ...backfillEffect, product: { ...product, allowedRoomTypeCodes: scope }
+      }, backfillInput), JSON.stringify(scope)).toBe(false);
+    }
+  });
+
   it("accepts only the four complete, typed Preview evidence shapes", () => {
     expect(administratorMembershipPreviewHasEvidence("CORRECT_MEMBER_PROFILE", profileEffect, profileInput)).toBe(true);
     expect(administratorMembershipPreviewHasEvidence("CORRECT_MEMBERSHIP_EFFECTIVE_DATE", effectiveDateEffect, effectiveDateInput)).toBe(true);
@@ -3123,6 +3136,19 @@ describe("stay collection upgrade membership evidence", () => {
     ],
     committedAt: "2026-08-02T10:00:00.000Z"
   };
+
+  it("validates shared scope in conversion preview while accepting legacy evidence", () => {
+    const product = { ...previewEffect.product, allowedRoomTypeCode: "private_bath_standard" };
+    expect(conversionPreviewHasEvidence(previewEffect, input)).toBe(true);
+    expect(conversionPreviewHasEvidence({ ...previewEffect,
+      product: { ...product, allowedRoomTypeCodes: ["private_bath_standard", "private_bath_king"] }
+    }, input)).toBe(true);
+    for (const scope of [[], ["private_bath_standard", "private_bath_standard"], ["private_bath_king"], "private_bath_standard", null, ["private_bath_standard", 7]]) {
+      expect(conversionPreviewHasEvidence({ ...previewEffect,
+        product: { ...product, allowedRoomTypeCodes: scope }
+      }, input), JSON.stringify(scope)).toBe(false);
+    }
+  });
 
   it("requires explicit input and coherent cross-room evidence before enabling confirmation", () => {
     const crossRoomUpgrade = { kind: "TEMPORARY_OTHER_ROOM_UPGRADE", reason: "客户继续住原整房",

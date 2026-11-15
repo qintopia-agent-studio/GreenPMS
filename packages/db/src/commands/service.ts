@@ -429,6 +429,7 @@ async function bindPersistedEffectHash(
         "historical_membership_backfills.entitlement_units",
         "historical_membership_backfills.validity_period",
         "historical_membership_backfills.allowed_room_type_code",
+        "historical_membership_backfills.allowed_room_type_codes",
         "historical_membership_backfills.allowed_inventory_kind",
         "historical_membership_backfills.evidence_note",
         "members.full_name",
@@ -455,6 +456,7 @@ async function bindPersistedEffectHash(
         entitlementUnits: backfill.entitlement_units,
         validityPeriod: backfill.validity_period,
         allowedRoomTypeCode: backfill.allowed_room_type_code,
+        ...(backfill.allowed_room_type_codes ? { allowedRoomTypeCodes: backfill.allowed_room_type_codes } : {}),
         allowedInventoryKind: backfill.allowed_inventory_kind
       },
       payment: {

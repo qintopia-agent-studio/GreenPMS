@@ -256,6 +256,29 @@ describe.sequential("administrator room catalog with the restricted runtime role
       await postConfirm(await postPreview({ action: "SET_OPERATING_STATISTICS", assetIds: [roomDraft.effect.roomLink.assetId], included: true }));
     } finally { await app.close(); }
   });
+  it("protects the second shared membership room type from losing its last supply in preview", async () => {
+    async function execute(commandType: CommandType, input: Record<string, unknown>) {
+      const prepared = await createCommandPreview(db, admin, { commandType, input: { propertyId: demo.propertyId, ...input } } as Parameters<typeof createCommandPreview>[2], metadata());
+      const receipt = await confirmCommandPreview(db, admin, prepared.preview.previewId, {
+        propertyId: demo.propertyId, commandType, expectedEffectHash: prepared.preview.effectHash,
+        confirmation: true, reason: { code: "DATA_ENTRY_CORRECTION", note: "合成通用会员房源保护" }
+      }, metadata());
+      expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+      return receipt.result!;
+    }
+    const member = await execute("CREATE_MEMBER", { fullName: "通用房源保护", nickname: "通用房源保护",
+      phone: "13928003333", identityCardNumber: "CATALOG-SHARED-SCOPE", wechat: "catalog-shared-scope" });
+    const order = await execute("CREATE_MEMBERSHIP_ORDER", { memberId: member.memberId,
+      membershipProductId: "membership_product_private_bath_shared_v1", agreedPriceMinor: 280_000 });
+    await execute("RECORD_MEMBERSHIP_PAYMENT", { membershipOrderId: order.membershipOrderId,
+      amountMinor: 280_000, transactionReference: "WX-CATALOG-SHARED-SCOPE" });
+    await execute("ACTIVATE_MEMBERSHIP_ORDER", { membershipOrderId: order.membershipOrderId });
+    const before = await readRoomCatalog(db, demo.propertyId);
+    expect(before.rooms.some((room) => room.active && room.typeCode === "private_bath_king")).toBe(true);
+    await expect(preview({ action: "SET_TYPE_ACTIVE", typeCode: "private_bath_king", active: false }))
+      .rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT", message: expect.stringContaining("最后一间") });
+    expect(await readRoomCatalog(db, demo.propertyId)).toEqual(before);
+  });
   it("keeps the last supply for a live membership and rolls back incomplete catalog commands", async () => {
     await expect(preview({ action: "SET_TYPE_ACTIVE", typeCode: "shared_bath_single", active: false })).rejects.toMatchObject({ code: "ENTITLEMENT_CONFLICT" });
     const before = await readRoomCatalog(db, demo.propertyId);
