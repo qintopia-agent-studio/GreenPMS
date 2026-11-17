@@ -15,7 +15,7 @@
       "spectacle": 1,
       "density": 8
     },
-    "brief": "Approved audit implemented: complete product facts in compact rows, contextual help popovers, right-aligned actions, separated collapsed history, mobile room picker, account menus and access-key feedback, explicit AI draft/commit states. Preserve system tokens and business commands. Implemented, awaiting user feedback."
+    "brief": "Approved audit implemented: complete product facts in compact rows, contextual help popovers, right-aligned actions, separated collapsed history, mobile room picker, account menus and access-key feedback, explicit AI draft/commit states. Preserve system tokens and business commands. Implemented, awaiting user feedback. Follow-up: center the AI settings container at its existing 860px maximum width; preserve left-aligned fields and right-aligned actions. Verified at 1440, 1024, 390 and 320px; awaiting user feedback."
   },
   {
     "date": "2026-11-17",
