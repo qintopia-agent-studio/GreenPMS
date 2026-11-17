@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { History, KeyRound, LogOut, Plus, RefreshCw, Trash2, UserCheck, UserRound, UserX, Users } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
+import { ChevronDown, History, KeyRound, LogOut, Plus, RefreshCw, Trash2, UserCheck, UserRound, UserX, Users } from "lucide-react";
 import type { AccountManagementAction, AccountManagementContext, AccountManagementRequest, StaffAccountDto } from "@qintopia/contracts";
 import { api, ApiError } from "../api";
 import { useWorkspace } from "../session";
 import { errorMessage, LoadingBlock, Modal } from "../ui";
+import "./settings-access.css";
 
 export const accountActionLabels: Record<AccountManagementAction, string> = {
   CREATE_STAFF: "创建员工账号", RESET_PASSWORD: "重设密码", CHANGE_PASSWORD: "修改我的密码",
@@ -12,6 +14,84 @@ export const accountActionLabels: Record<AccountManagementAction, string> = {
 };
 
 type AccountActionTarget = AccountManagementContext["self"] & Partial<Pick<StaffAccountDto, "status">>;
+
+function AccountRowActions({ account, onAction }: { account: StaffAccountDto; onAction: (action: AccountManagementAction, account: StaffAccountDto) => void }) {
+  const [position, setPosition] = useState<{ top: number; left: number }>();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const menuId = useId();
+
+  function close(returnFocus = false) {
+    setPosition(undefined);
+    if (returnFocus) trigger.current?.focus({ preventScroll: true });
+  }
+
+  function show() {
+    const rect = trigger.current?.getBoundingClientRect();
+    if (rect) setPosition({ top: rect.bottom + 6, left: Math.max(12, Math.min(rect.right - 240, window.innerWidth - 252)) });
+  }
+
+  useLayoutEffect(() => {
+    if (!position) return;
+    const panel = menu.current;
+    const alignWithTrigger = () => {
+      const rect = trigger.current?.getBoundingClientRect();
+      if (!panel || !rect) return;
+      if (rect.bottom < 0 || rect.top > window.innerHeight) { close(); return; }
+      const height = panel.getBoundingClientRect().height;
+      const below = rect.bottom + 6;
+      const above = rect.top - height - 6;
+      panel.style.top = `${below + height <= window.innerHeight - 12 ? below : above >= 12 ? above : Math.max(12, window.innerHeight - height - 12)}px`;
+      panel.style.left = `${Math.max(12, Math.min(rect.right - 240, window.innerWidth - 252))}px`;
+    };
+    alignWithTrigger();
+    panel?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus({ preventScroll: true });
+    const dismiss = (event: PointerEvent) => {
+      if (!menu.current?.contains(event.target as Node) && !trigger.current?.contains(event.target as Node)) close();
+    };
+    const dismissOnMove = (event: Event) => {
+      if (event.target instanceof Node && menu.current?.contains(event.target)) return;
+      alignWithTrigger();
+    };
+    document.addEventListener("pointerdown", dismiss);
+    window.addEventListener("resize", dismissOnMove);
+    window.addEventListener("scroll", dismissOnMove, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("resize", dismissOnMove);
+      window.removeEventListener("scroll", dismissOnMove, true);
+    };
+  }, [position]);
+
+  function handleMenuKey(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") { event.preventDefault(); close(true); return; }
+    if (event.key === "Tab") { close(true); return; }
+    const items = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !items.length) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+      : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[next]?.focus();
+  }
+
+  function choose(action: AccountManagementAction) { close(true); onAction(action, account); }
+
+  return <div className="account-actions">
+    <button type="button" className="button button-secondary button-compact" aria-label={`重设 ${account.username} 的密码`} onClick={() => onAction("RESET_PASSWORD", account)}>重设密码</button>
+    <button ref={trigger} type="button" className="button button-secondary button-compact account-more-trigger" aria-label={`${account.displayName}的更多操作`} aria-haspopup="menu" aria-expanded={Boolean(position)} aria-controls={position ? menuId : undefined}
+      onClick={() => position ? close() : show()} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); show(); } }}>更多<ChevronDown size={14} aria-hidden="true" /></button>
+    {position ? createPortal(<div ref={menu} id={menuId} role="menu" aria-label={`${account.displayName}的更多操作`} className="account-more-menu" style={position} onKeyDown={handleMenuKey}
+      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget) && event.relatedTarget !== trigger.current) close(); }}>
+      <button role="menuitem" type="button" onClick={() => choose("REVOKE_SESSIONS")}><LogOut size={16} aria-hidden="true" />撤销全部会话</button>
+      <button role="menuitem" type="button" className={account.status === "ACTIVE" ? "account-menu-danger" : ""} onClick={() => choose(account.status === "ACTIVE" ? "DISABLE_STAFF" : "ENABLE_STAFF")}>
+        {account.status === "ACTIVE" ? <UserX size={16} aria-hidden="true" /> : <UserCheck size={16} aria-hidden="true" />}{account.status === "ACTIVE" ? "停用账号" : "启用账号"}</button>
+      <div className="account-menu-separator" role="separator" />
+      <button role="menuitem" type="button" className="account-menu-danger" disabled={!account.canDelete} aria-describedby={!account.canDelete ? `${menuId}-delete-hint` : undefined} onClick={() => choose("DELETE_STAFF")}><Trash2 size={16} aria-hidden="true" />删除误建账号</button>
+      {!account.canDelete ? <p id={`${menuId}-delete-hint`} className="account-menu-hint">仅可删除本页新建且从未使用的误建账号</p> : null}
+    </div>, document.body) : null}
+  </div>;
+}
 
 function AccountActionDialog({ action, target, propertyId, onClose, onDone }: {
   action: AccountManagementAction;
@@ -127,7 +207,7 @@ export function AccountsPage() {
           const title = status === "ACTIVE" ? "在用员工" : "已停用员工";
           const sectionBody = accounts.length === 0 ? <p className="muted">{status === "ACTIVE" ? "暂无在用员工" : "暂无已停用员工"}</p> : <div className="account-table-scroll"><table className="account-table"><thead><tr><th>员工 / 账号</th><th>状态</th><th>最近登录</th><th>有效会话</th><th>操作</th></tr></thead><tbody>{accounts.map((account) => <tr key={account.id}>
             <td><strong>{account.displayName}</strong><span className="account-username">{account.username}</span></td><td><span className={account.status === "ACTIVE" ? "account-active" : "muted"}>{account.status === "ACTIVE" ? "已启用" : "已停用"}</span></td><td>{account.lastLoginAt ? new Date(account.lastLoginAt).toLocaleString("zh-CN") : "从未登录"}</td><td>{account.activeSessions}</td>
-            <td><div className="account-actions"><button className="icon-button" title="重设密码" aria-label={`重设 ${account.username} 的密码`} onClick={() => open("RESET_PASSWORD", account)}><KeyRound size={17} /></button><button className="icon-button" title="撤销全部会话" aria-label={`撤销 ${account.username} 的全部会话`} onClick={() => open("REVOKE_SESSIONS", account)}><LogOut size={17} /></button><button className="icon-button" title={account.status === "ACTIVE" ? "停用账号" : "启用账号"} aria-label={`${account.status === "ACTIVE" ? "停用" : "启用"} ${account.username}`} onClick={() => open(account.status === "ACTIVE" ? "DISABLE_STAFF" : "ENABLE_STAFF", account)}>{account.status === "ACTIVE" ? <UserX size={17} /> : <UserCheck size={17} />}</button><button className="icon-button account-danger" title={account.canDelete ? "删除误建账号" : "仅可删除本页新建且从未使用的误建账号"} aria-label={`删除 ${account.username}`} disabled={!account.canDelete} onClick={() => open("DELETE_STAFF", account)}><Trash2 size={17} /></button></div></td>
+            <td><AccountRowActions account={account} onAction={open} /></td>
           </tr>)}</tbody></table></div>;
           if (status === "DISABLED") {
             return <details className="account-staff account-staff-collapsible" aria-label={title} key={status}>

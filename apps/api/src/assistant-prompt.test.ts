@@ -86,6 +86,8 @@ describe("versioned employee operating knowledge", () => {
   scenarios.push({ question: "备用供应商怎么设置，主恢复后什么时候切回？", ids: ["assistant-help"], facts: ["主用/备用两张卡", "改连接须重测", "设为主用", "无需重填Key", "使旧对话失效", "最多自动切备用一次", "用备用重新回答", "10分钟", "无人提问不探测", "不发送业务资料", "不让用户等待", "立即检查恢复", "不改主备身份", "不能凭知识断言当前供应商"] });
   scenarios.push({ question: "已经查到订单或显示半截回答后失败，还要手动切备用吗？", ids: ["assistant-help"], facts: ["每问最多重试当前供应商一次", "复用已完成查询", "最多自动切备用一次", "从原问题与历史上下文重答", "清除失败草稿与暂存入口", "不拼接主的中间回答", "切备用后失败不循环", "累计4次模型/6次工具预算不重置", "普通界面仅思考/查询/回答", "最终失败才报错"] });
   scenarios.push({ question: "权限失效或供应商额度不足时也会反复调用吗？", ids: ["assistant-help"], facts: ["鉴权/额度故障可直接备用", "参数/内容过滤、安全、权限、保存配置、取消不重试", "停止、断线、退出或权限失效不触发备用"] });
+  scenarios.push({ question: "AI 设置勾选就生效吗，刷新会丢掉修改吗？", ids: ["assistant-help"], facts: ["全局启停立即生效", "供应商勾选须保存", "刷新先确认放弃草稿/测试结果"] });
+  scenarios.push({ question: "员工的停用入口在哪里，访问密钥复制失败怎么办？", ids: ["accounts-tokens"], facts: ["行内“更多”", "复制失败手动保存", "权限与轮换详情可展开"] });
   it.each(scenarios)("supplies required evidence for: $question", ({ ids, facts }) => {
     const evidence = assistantKnowledgeTopics.filter(topic => ids.includes(topic.id)).map(topic => topic.content).join("\n");
     const prompt = buildAssistantSystemPrompt(context);

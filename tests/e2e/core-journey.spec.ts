@@ -533,7 +533,7 @@ async function forceNavigateAwayAndBackToTokens(page: Page) {
     window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
   });
   await expect(page.getByRole("heading", { name: "智能体与外部访问" })).toBeVisible();
-  await expect(page.getByText("正在载入 Token", { exact: true })).toBeHidden();
+  await expect(page.getByText("正在载入访问密钥", { exact: true })).toBeHidden();
 }
 
 async function releaseConfirmAndFlushOldCallback(
@@ -1514,7 +1514,7 @@ test("desktop projects the exact two-level staff and administrator capabilities"
   expect(logoutResponse.ok()).toBe(true);
   await login(page, administratorCredentials);
   await page.getByRole("link", { name: "设置", exact: true }).click();
-  await expect(page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "设置入口", exact: true }).getByRole("link", { name: /^智能体与外部访问/ })).toBeVisible();
 
   const administratorResponse = await page.request.get("/api/v1/me");
   expect(administratorResponse.ok()).toBe(true);
@@ -1550,15 +1550,15 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   test.skip(testInfo.project.name !== "desktop", "desktop-only Token lifecycle");
   await login(page, administratorCredentials);
   await page.getByRole("link", { name: "设置", exact: true }).click();
-  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
+  await page.getByRole("navigation", { name: "设置入口", exact: true }).getByRole("link", { name: /^智能体与外部访问/ }).click();
   await expect(page.getByRole("heading", { name: "智能体与外部访问" })).toBeVisible();
 
-  await page.getByRole("button", { name: "签发 Token" }).click();
-  await page.getByLabel("标签").fill("E2E external agent");
-  await page.getByLabel("权限上限").selectOption("WRITE");
+  await page.getByRole("button", { name: "签发密钥" }).click();
+  await page.getByLabel("密钥名称", { exact: true }).fill("E2E external agent");
+  await page.getByLabel("访问范围", { exact: true }).selectOption("WRITE");
   await page.getByLabel("创建住宿订单", { exact: true }).check();
   await page.getByLabel("登记住宿收款", { exact: true }).check();
-  const issueSecret = await page.getByLabel("一次性 Token secret").inputValue();
+  const issueSecret = await page.getByLabel("一次性访问密钥（Token）").inputValue();
   expect(issueSecret).toMatch(/^qtp_[A-Za-z0-9_-]{43}$/);
   const issuePreviewIdempotencyKeys: string[] = [];
   page.on("request", (request) => {
@@ -1570,7 +1570,7 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
     await route.fetch();
     await route.abort("failed");
   }, { times: 1 });
-  await page.getByLabel(/我已将一次性 secret 安全保存/).check();
+  await page.getByLabel(/我已安全保存一次性访问密钥/).check();
   await page.getByRole("button", { name: "下一步" }).click();
   const retainedIssueSecret = page.getByRole("region", { name: /一次性密钥待清除/ });
   await page.getByRole("button", { name: "取消", exact: true }).click();
@@ -1580,11 +1580,11 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await expect(page.getByTestId("command-effect")).not.toContainText(issueSecret);
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await expect(retainedIssueSecret).toContainText("待确认");
-  await expect(retainedIssueSecret.getByLabel("一次性 Token secret")).toHaveValue(issueSecret);
+  await expect(retainedIssueSecret.getByLabel("一次性访问密钥（Token）")).toHaveValue(issueSecret);
   await expect(retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" })).toBeDisabled();
   await page.getByRole("link", { name: "订单", exact: true }).click();
   await page.getByRole("link", { name: "设置", exact: true }).click();
-  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
+  await page.getByRole("navigation", { name: "设置入口", exact: true }).getByRole("link", { name: /^智能体与外部访问/ }).click();
   await retainedIssueSecret.getByRole("button", { name: "继续处理" }).click();
   const issueEffect = page.getByTestId("command-effect");
   await expect(issueEffect).toBeVisible();
@@ -1604,13 +1604,13 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await page.getByTestId("confirm-command").click();
   await expect(page.getByText("Token 操作结果需要查询", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(retainedIssueSecret.getByLabel("一次性 Token secret")).toHaveValue(issueSecret);
+  await expect(retainedIssueSecret.getByLabel("一次性访问密钥（Token）")).toHaveValue(issueSecret);
   await expect(retainedIssueSecret).toContainText("提交结果待查询");
   await expect(retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" })).toBeDisabled();
   await page.getByRole("link", { name: "订单", exact: true }).click();
   await page.getByRole("link", { name: "设置", exact: true }).click();
-  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
-  await expect(retainedIssueSecret.getByLabel("一次性 Token secret")).toHaveValue(issueSecret);
+  await page.getByRole("navigation", { name: "设置入口", exact: true }).getByRole("link", { name: /^智能体与外部访问/ }).click();
+  await expect(retainedIssueSecret.getByLabel("一次性访问密钥（Token）")).toHaveValue(issueSecret);
   await retainedIssueSecret.getByRole("button", { name: "继续处理" }).click();
   await page.getByRole("button", { name: "查询 Token 结果" }).click();
   await assertOperatorReceipt(page);
@@ -1622,12 +1622,12 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await expect(activeRow).not.toContainText(/(?:token_|subject_|CREATE_ORDER)/);
   await retainedIssueSecret.getByRole("button", { name: "已保存，清除本机显示" }).click();
 
-  await activeRow.getByRole("button", { name: "轮换", exact: true }).click();
-  const rotationSecret = await page.getByLabel("一次性 Token secret").inputValue();
+  await activeRow.getByRole("button", { name: /^轮换访问密钥 / }).click();
+  const rotationSecret = await page.getByLabel("一次性访问密钥（Token）").inputValue();
   expect(rotationSecret).toMatch(/^qtp_[A-Za-z0-9_-]{43}$/);
   expect(rotationSecret).not.toBe(issueSecret);
   await page.getByLabel("登记住宿收款", { exact: true }).uncheck();
-  await page.getByLabel(/我已将一次性 secret 安全保存/).check();
+  await page.getByLabel(/我已安全保存一次性访问密钥/).check();
   await page.getByRole("button", { name: "下一步" }).click();
   const rotationEffect = page.getByTestId("command-effect");
   await assertTokenPreviewUsesOperatorCopy(rotationEffect, rotationSecret);
@@ -1642,10 +1642,12 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
 
   const originalRow = page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "已轮换" });
   await expect(originalRow).toHaveCount(1);
-  await expect(originalRow).toContainText("已由新 Token 替换");
+  await originalRow.locator("details > summary").click();
+  await expect(originalRow.getByText("已由新密钥替换", { exact: true })).toBeVisible();
   activeRow = page.getByRole("row").filter({ hasText: "E2E external agent" }).filter({ hasText: "有效" });
   await expect(activeRow).toHaveCount(1);
-  await expect(activeRow).toContainText("由旧 Token 轮换生成");
+  await activeRow.locator("details > summary").click();
+  await expect(activeRow.getByText("由旧密钥轮换生成", { exact: true })).toBeVisible();
   await expect(activeRow).not.toContainText(/(?:token_|subject_|CREATE_ORDER)/);
   await page.getByRole("region", { name: /一次性密钥待清除/ }).getByRole("button", { name: "已保存，清除本机显示" }).click();
 
@@ -1665,7 +1667,7 @@ test("desktop Token lifecycle retains client secrets and uses Preview Confirm Re
   await page.getByTestId("confirm-command").click();
   await expect(page.getByText("Token 操作结果需要查询", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  const pendingRevoke = page.getByRole("region", { name: "Token 操作待完成" });
+  const pendingRevoke = page.getByRole("region", { name: "访问密钥操作待完成" });
   await expect(pendingRevoke).toContainText("提交结果待查询");
   await pendingRevoke.getByRole("button", { name: "继续处理" }).click();
   await page.getByRole("button", { name: "查询 Token 结果" }).click();
@@ -1681,17 +1683,17 @@ test("desktop expired Token Preview rotates preview metadata without changing th
   await page.clock.install();
   await login(page, administratorCredentials);
   await page.getByRole("link", { name: "设置", exact: true }).click();
-  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
-  await page.getByRole("button", { name: "签发 Token" }).click();
-  await page.getByLabel("标签").fill("E2E expired preview agent");
-  const secret = await page.getByLabel("一次性 Token secret").inputValue();
+  await page.getByRole("navigation", { name: "设置入口", exact: true }).getByRole("link", { name: /^智能体与外部访问/ }).click();
+  await page.getByRole("button", { name: "签发密钥" }).click();
+  await page.getByLabel("密钥名称", { exact: true }).fill("E2E expired preview agent");
+  const secret = await page.getByLabel("一次性访问密钥（Token）").inputValue();
   const previewKeys: string[] = [];
   page.on("request", (request) => {
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/command-previews") {
       previewKeys.push(request.headers()["idempotency-key"] ?? "");
     }
   });
-  await page.getByLabel(/我已将一次性 secret 安全保存/).check();
+  await page.getByLabel(/我已安全保存一次性访问密钥/).check();
   await page.getByRole("button", { name: "下一步" }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
   await page.clock.fastForward(601_000);
@@ -1705,7 +1707,7 @@ test("desktop expired Token Preview rotates preview metadata without changing th
   expect(previewKeys[1]).not.toBe(previewKeys[0]);
   await expect(page.getByTestId("confirm-command")).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(page.getByRole("region", { name: /一次性密钥待清除/ }).getByLabel("一次性 Token secret")).toHaveValue(secret);
+  await expect(page.getByRole("region", { name: /一次性密钥待清除/ }).getByLabel("一次性访问密钥（Token）")).toHaveValue(secret);
 });
 
 test("desktop Token lifecycle ignores deferred callbacks from unmounted command attempts", async ({ page }, testInfo: TestInfo) => {
@@ -1717,12 +1719,12 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
 
   await login(page, administratorCredentials);
   await page.getByRole("link", { name: "设置", exact: true }).click();
-  await page.getByRole("navigation", { name: "设置导航", exact: true }).getByRole("link", { name: /^外部访问/ }).click();
+  await page.getByRole("navigation", { name: "设置入口", exact: true }).getByRole("link", { name: /^智能体与外部访问/ }).click();
   await expect(page.getByRole("heading", { name: "智能体与外部访问" })).toBeVisible();
 
-  await page.getByRole("button", { name: "签发 Token" }).click();
-  await page.getByLabel("标签").fill("E2E deferred callback agent");
-  await page.getByLabel(/我已将一次性 secret 安全保存/).check();
+  await page.getByRole("button", { name: "签发密钥" }).click();
+  await page.getByLabel("密钥名称", { exact: true }).fill("E2E deferred callback agent");
+  await page.getByLabel(/我已安全保存一次性访问密钥/).check();
   await page.getByRole("button", { name: "下一步" }).click();
   await expect(page.getByTestId("command-effect")).toBeVisible();
 
@@ -1771,7 +1773,7 @@ test("desktop Token lifecycle ignores deferred callbacks from unmounted command 
   await delayedRevoke.fetched;
   await forceNavigateAwayAndBackToTokens(page);
 
-  const pending = page.getByRole("region", { name: "Token 操作待完成" });
+  const pending = page.getByRole("region", { name: "访问密钥操作待完成" });
   await expect(pending).toContainText("正在提交");
   await pending.getByRole("button", { name: "继续处理" }).click();
   const revokeRequestBaseline = tokenListRequests;

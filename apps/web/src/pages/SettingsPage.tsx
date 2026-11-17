@@ -1,5 +1,5 @@
 import { useAssistant } from "../assistant/context";
-import { Component, Suspense, type ReactNode } from "react";
+import { Component, Suspense, useEffect, useRef, type ReactNode } from "react";
 import { ArrowLeft, BedDouble, KeyRound, Users, Sparkles } from "lucide-react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { canManageTokens, principalCan, useWorkspace } from "../session";
@@ -21,13 +21,25 @@ export function SettingsPage() {
   const assistant = useAssistant();
   const { principal, propertyId } = useWorkspace();
   const { pathname } = useLocation();
+  const navigation = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const tabs = navigation.current;
+    const selected = tabs?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!tabs || !selected) return;
+    // Scroll only the horizontal strip, never the page or the sticky shell.
+    const reveal = () => { tabs.scrollLeft = Math.max(0, selected.offsetLeft - tabs.offsetLeft - (tabs.clientWidth - selected.clientWidth) / 2); };
+    reveal();
+    const observer = new ResizeObserver(reveal);
+    observer.observe(tabs);
+    return () => observer.disconnect();
+  }, [pathname, propertyId, principal, assistant?.settings?.canManage]);
   const index = pathname === "/settings" || pathname === "/settings/";
   const entries = [
     { to: "/settings/rooms", label: "房型与价格", detail: "新增或停用房型、配置房间床位，调整住宿价格", icon: BedDouble,
       visible: principalCan(principal, propertyId, "MANAGE_ROOM_CATALOG") },
     { to: "/settings/memberships", label: "会员产品", detail: "配置会员售价、房型、总夜数和有效期", icon: Users, visible: principalCan(principal, propertyId, "MANAGE_MEMBERSHIP_CATALOG") },
     { to: "/settings/accounts", label: "账号管理", detail: "管理工作人员账号、登录与操作权限", icon: Users, visible: true },
-    { to: "/settings/tokens", label: "智能体与外部访问", detail: "管理 API Key（Token）、权限范围与有效期", icon: KeyRound,
+    { to: "/settings/tokens", label: "智能体与外部访问", detail: "管理访问密钥（Token）、权限范围与有效期", icon: KeyRound,
       visible: canManageTokens(principal, propertyId) },
     { to: "/settings/ai", label: "AI 助手", detail: "模型服务、连接测试与启停", icon: Sparkles,
       visible: Boolean(assistant?.settings?.canManage) }
@@ -47,7 +59,7 @@ export function SettingsPage() {
           <Link to="/settings"><ArrowLeft size={16} aria-hidden="true" />返回设置</Link>
           <span aria-hidden="true">/</span><span aria-current="page">{current?.label ?? "设置详情"}</span>
         </nav>
-        <nav className="settings-tabs" aria-label="设置导航">
+        <nav ref={navigation} className="settings-tabs" aria-label="设置导航">
           {entries.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} className="settings-link">
             <Icon size={18} aria-hidden="true" /><span>{label}</span>
           </NavLink>)}
