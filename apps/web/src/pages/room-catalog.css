@@ -1,4 +1,7 @@
 .room-catalog-page { display: grid; gap: 24px; min-width: 0; }
+.catalog-page-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 0; }
+.catalog-title { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.catalog-type-picker { display: none; }
 .catalog-page-actions, .catalog-tabs, .catalog-toolbar, .catalog-section-heading, .catalog-detail-heading, .catalog-type-footer { display: flex; align-items: center; gap: 12px; }
 .catalog-toolbar, .catalog-section-heading, .catalog-detail-heading, .catalog-type-footer { justify-content: space-between; }
 .catalog-tabs { gap: 4px; flex-wrap: wrap; }
@@ -6,7 +9,7 @@
 .catalog-tabs button:hover { background: var(--surface-muted); }
 .catalog-tabs button.is-selected { background: var(--brand-soft); color: var(--brand); font-weight: 650; }
 .catalog-check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
-.catalog-check input { width: 16px; height: 16px; margin: 0; }
+.catalog-check input, .catalog-form .catalog-check input { width: 16px; height: 16px; min-height: 16px; flex: 0 0 16px; margin: 0; padding: 0; accent-color: var(--brand); }
 .catalog-workspace { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 24px; align-items: start; }
 .catalog-type-list { display: grid; border: 1px solid var(--border); background: var(--surface); border-radius: 12px; overflow: hidden; }
 .catalog-type-list button { display: flex; justify-content: space-between; align-items: center; gap: 10px; width: 100%; text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--border); padding: 18px 16px; color: var(--text); font: inherit; }
@@ -60,19 +63,37 @@
 .catalog-history h3 { font-size: 16px; }
 .catalog-history article p, .catalog-history time { margin-top: 8px; color: var(--muted); font-size: 13px; }
 .catalog-history ul { font-size: 13px; line-height: 1.8; padding-left: 20px; margin-bottom: 0; }
+.catalog-history-detail > summary { color: var(--brand); padding: 12px 0; font-size: 13px; min-height: 44px; }
 @media (max-width: 1050px) { .catalog-workspace { grid-template-columns: 185px minmax(0, 1fr); gap: 16px; } .catalog-detail { padding: 20px; } }
 @media (max-width: 760px) {
   .room-catalog-page { gap: 18px; }
   .catalog-toolbar { align-items: flex-start; flex-direction: column; }
   .catalog-workspace { grid-template-columns: minmax(0, 1fr); }
-  .catalog-type-list { display: flex; overflow-x: auto; border-radius: 8px; }
+  .catalog-type-list { display: none; }
+  .catalog-type-picker { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
+  .catalog-type-picker > span { flex-shrink: 0; }
+  .catalog-type-picker select { min-width: 0; min-height: 44px; }
   .catalog-type-list button { min-width: 165px; border-bottom: 0; border-right: 1px solid var(--border); padding: 14px; }
   .catalog-detail, .catalog-all-rooms, .catalog-history { padding: 17px; }
   .catalog-detail-heading { flex-wrap: wrap; }
+  .catalog-detail-heading > div { flex: 1; min-width: 0; }
+  .catalog-detail-heading h2 { font-size: 17px; }
+  .catalog-detail-heading .button { min-height: 44px; white-space: nowrap; padding-inline: 10px; }
+  .catalog-detail-heading .button > svg { display: none; }
+  .catalog-detail { gap: 20px; }
+  .catalog-prices { padding-top: 18px; }
   .catalog-price-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 0; }
   .catalog-price-grid > div:nth-child(2) { border-right: 0; }
   .catalog-price-grid dd { font-size: 22px; }
-  .catalog-tabs button { padding: 10px; font-size: 13px; }
+  .catalog-tabs { gap: 2px; flex-wrap: nowrap; width: 100%; }
+  .catalog-tabs button { padding: 10px 6px; gap: 4px; font-size: 12px; min-height: 44px; white-space: nowrap; }
+  .catalog-tabs button svg { width: 14px; height: 14px; }
+  .catalog-toolbar { gap: 4px; }
+  .catalog-check { min-height: 44px; }
+  .catalog-page-heading h1 { font-size: 22px; }
+  .catalog-page-heading .catalog-page-actions { flex-wrap: nowrap; gap: 8px; }
+  .catalog-page-heading .button { padding: 10px; font-size: 13px; min-height: 44px; white-space: nowrap; }
+  .catalog-page-heading .button svg { display: none; }
   .catalog-form-pair, .catalog-price-inputs { gap: 12px; }
   .catalog-page-actions { flex-wrap: wrap; }
   .catalog-type-footer .row-actions { flex-wrap: wrap; }

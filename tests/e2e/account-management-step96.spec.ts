@@ -17,6 +17,18 @@ async function checkLayout(page: Page) {
   expect(overflow).toEqual([]);
 }
 
+async function chooseEmployeeAction(page: Page, username: string, action: string) {
+  const row = page.getByRole("row").filter({ hasText: username });
+  await row.getByRole("button", { name: /的更多操作$/ }).click();
+  await page.getByRole("menu").getByRole("menuitem", { name: action, exact: true }).click();
+}
+async function expandDisabledEmployees(page: Page) {
+  const section = page.locator("details.account-staff-collapsible");
+  await expect(section.locator("summary")).toBeVisible();
+  if (await section.getAttribute("open") === null) await section.locator("summary").click();
+  return section;
+}
+
 async function businessCommand(request: APIRequestContext, commandType: string, input: Record<string, unknown>) {
   const key = crypto.randomUUID();
   const previewResponse = await request.post("/api/v1/command-previews", { headers: { "idempotency-key": `preview-${key}`, "x-correlation-id": key }, data: { commandType, input: { propertyId: demo.propertyId, ...input } } });
@@ -46,13 +58,13 @@ test("administrator creates, confirms and deletes an empty employee", async ({ p
   await expect(page.getByRole("row").filter({ hasText: username })).toBeVisible();
   await checkLayout(page);
   await page.screenshot({ path: testInfo.outputPath("accounts.png"), fullPage: true });
-  await page.getByRole("button", { name: `删除 ${username}`, exact: true }).click();
+  await chooseEmployeeAction(page, username, "删除误建账号");
   dialog = page.getByRole("dialog");
   await dialog.getByLabel("操作原因").fill("录入错误");
   await dialog.getByRole("button", { name: "核对信息" }).click();
   await dialog.getByRole("button", { name: "取消", exact: true }).click();
   await expect(page.getByRole("row").filter({ hasText: username })).toBeVisible();
-  await page.getByRole("button", { name: `删除 ${username}`, exact: true }).click();
+  await chooseEmployeeAction(page, username, "删除误建账号");
   await page.getByRole("dialog").getByLabel("操作原因").fill("录入错误");
   await page.getByRole("dialog").getByRole("button", { name: "核对信息" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "确认执行" }).click();
@@ -80,7 +92,7 @@ test("resetting a disabled employee explains that enablement is still required",
     expect(disabled.status(), await disabled.text()).toBe(200);
     await page.reload();
     const activeStaff = page.getByRole("region", { name: "在用员工", exact: true });
-    const disabledStaff = page.getByRole("region", { name: "已停用员工", exact: true });
+    const disabledStaff = await expandDisabledEmployees(page);
     await expect(disabledStaff.getByRole("row").filter({ hasText: username })).toBeVisible();
     await expect(activeStaff.getByRole("row").filter({ hasText: username })).toHaveCount(0);
     await checkLayout(page);
@@ -98,10 +110,11 @@ test("resetting a disabled employee explains that enablement is still required",
     await page.screenshot({ path: testInfo.outputPath("disabled-password-reset-confirmation.png") });
     await dialog.getByRole("button", { name: "确认执行", exact: true }).click();
     await expect(page.getByRole("status").filter({ hasText: "密码已重设，账号仍为停用状态" })).toBeVisible();
+    await expandDisabledEmployees(page);
     await expect(page.getByRole("row").filter({ hasText: username })).toContainText("已停用");
     expect((await staffPage.request.get("/api/v1/me")).status()).toBe(401);
     expect((await staffPage.request.post("/api/v1/auth/login", { data: { username, password: "new-password-2026" } })).status()).toBe(401);
-    await page.getByRole("button", { name: `启用 ${username}`, exact: true }).click();
+    await chooseEmployeeAction(page, username, "启用账号");
     await page.getByRole("dialog").getByLabel("操作原因").fill("允许该员工重新登录");
     await page.getByRole("dialog").getByRole("button", { name: "核对信息", exact: true }).click();
     await page.getByRole("dialog").getByRole("button", { name: "确认执行", exact: true }).click();

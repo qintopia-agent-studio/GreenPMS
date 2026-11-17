@@ -3,8 +3,9 @@ import type { MembershipCatalogEntry, MembershipCatalogInput, MembershipCatalogV
 import { api } from "../api";
 import { principalCan, useWorkspace } from "../session";
 import type { CommandRequest } from "../types";
-import { CommandDialog, CommandRecoveryBar, DamagedCommandRecoveryNotice, EmptyState, InlineError, LoadingBlock, Modal, InfoHint,
+import { CommandDialog, CommandRecoveryBar, DamagedCommandRecoveryNotice, EmptyState, InlineError, LoadingBlock, Modal,
   QuoteRecoveryConflictNotice, formatDateTime, formatMinor, isTerminalCommandRecovery, recoveryCommandRequest, usePersistentCommandRecovery } from "../ui";
+import { SettingsHint as InfoHint } from "../components/SettingsHint";
 import "./room-catalog.css";
 import "./membership-catalog.css";
 export function membershipPeriodLabel(period: string) {
@@ -88,11 +89,32 @@ export function MembershipCatalogPage() {
     {recovery.pending ? <CommandRecoveryBar recovery={recovery.pending} businessFacing onOpen={()=>{if(recovery.pending){setCommand(recoveryCommandRequest(recovery.pending));setRecovering(true);}}}/> : null}
     {recovery.canDiscardCorrupt ? <DamagedCommandRecoveryNotice error={recovery.error} onDiscard={recovery.discardCorruptAfterReview}/> : <InlineError error={recovery.error}/>}
     <QuoteRecoveryConflictNotice conflict={recovery.conflict}/>
-    {loading&&!data?<LoadingBlock label="正在载入会员产品"/>:data&&!error?<><div className="membership-product-grid">{data.entries.map(entry=><section className="catalog-detail membership-product-card" key={entry.code}><header className="membership-card-heading"><h2>{entry.current.name}</h2><span className={`catalog-status${entry.saleStatus === "OFF_SALE" ? " is-inactive" : ""}`}>{entry.saleStatus === "ON_SALE" ? "在售" : "停售"}</span></header><div className="membership-card-price">{formatMinor(entry.current.listPriceMinor, entry.current.currency)}</div><Specification entry={entry} compact {...(rooms?{rooms}:{})}/><div className="row-actions membership-card-actions">
-      <button className="button button-secondary" disabled={blocked} onClick={()=>{setDraft(undefined);setDraftReason("");setEditor({entry});}}>编辑</button>
-      <button className="button button-secondary" disabled={blocked} onClick={()=>{setDraft(undefined);setDraftReason("");setEditor({entry,copy:true});}}>复制</button>
-      <button className="button button-secondary" disabled={blocked} onClick={()=>submit({propertyId,expectedRoomCatalogVersion:rooms!.version,action:"SET_SALE_STATUS",code:entry.code,expectedRevision:entry.revision,saleStatus:entry.saleStatus==="ON_SALE"?"OFF_SALE":"ON_SALE"})}>{entry.saleStatus==="ON_SALE"?"停售":"恢复销售"}</button>
-    </div></section>)}</div>{!data.entries.length?<EmptyState title="暂无会员产品" detail="新增产品后，工作人员即可办理。"/>:null}
+    {loading&&!data?<LoadingBlock label="正在载入会员产品"/>:data&&!error?<>
+    {data.entries.length ? <section className="membership-product-list" aria-label="会员产品列表">
+      <table className="membership-products" role="table">
+        <caption className="sr-only">会员产品的售价、总夜数、适用房型、有效期及销售状态</caption>
+        <colgroup><col/><col/><col/><col/><col/><col/></colgroup>
+        <thead role="rowgroup"><tr role="row">
+          <th scope="col" role="columnheader">产品名称 / 状态</th><th scope="col" role="columnheader">售价</th>
+          <th scope="col" role="columnheader">总夜数</th><th scope="col" role="columnheader">适用房型</th>
+          <th scope="col" role="columnheader">有效期</th><th scope="col" role="columnheader">操作</th>
+        </tr></thead>
+        <tbody role="rowgroup">{data.entries.map(entry=><tr key={entry.code} role="row" data-testid="membership-product-row">
+          <th scope="row" role="rowheader" className="membership-product-name">
+            <h2>{entry.current.name}</h2><span className={`catalog-status${entry.saleStatus === "OFF_SALE" ? " is-inactive" : ""}`}>{entry.saleStatus === "ON_SALE" ? "在售" : "停售"}</span>
+          </th>
+          <td role="cell" className="membership-product-price">{formatMinor(entry.current.listPriceMinor, entry.current.currency)}</td>
+          <td role="cell" className="membership-product-units">{entry.current.entitlementUnits} {entry.current.entitlementUnitKind === "ROOM_NIGHT" ? "间夜" : "床夜"}</td>
+          <td role="cell" className="membership-product-scope"><span className="membership-cell-label">适用房型</span>{entry.current.allowedRoomTypeCodes.map(code=><span className="membership-room-type" key={code}>{rooms?.types.find(type=>type.code===code)?.name ?? code}</span>)}</td>
+          <td role="cell" className="membership-product-validity"><span className="membership-cell-label">有效期</span>{membershipPeriodLabel(entry.current.validityPeriod)}</td>
+          <td role="cell" className="membership-product-actions"><div className="membership-row-actions">
+            <button className="membership-row-button membership-row-edit" disabled={blocked} onClick={()=>{setDraft(undefined);setDraftReason("");setEditor({entry});}}>编辑</button>
+            <button className="membership-row-button" disabled={blocked} onClick={()=>{setDraft(undefined);setDraftReason("");setEditor({entry,copy:true});}}>复制</button>
+            <button className="membership-row-button" disabled={blocked} onClick={()=>submit({propertyId,expectedRoomCatalogVersion:rooms!.version,action:"SET_SALE_STATUS",code:entry.code,expectedRevision:entry.revision,saleStatus:entry.saleStatus==="ON_SALE"?"OFF_SALE":"ON_SALE"})}>{entry.saleStatus==="ON_SALE"?"停售":"恢复销售"}</button>
+          </div></td>
+        </tr>)}</tbody>
+      </table>
+    </section> : <EmptyState title="暂无会员产品" detail="新增产品后，工作人员即可办理。"/>}
     <details className="catalog-history membership-history">
       <summary><span>变更历史</span><span className="membership-history-count">{data.history.length} 条</span></summary>
       {data.history.length ? data.history.map(item=><article key={item.id}>

@@ -79,7 +79,7 @@ describe("Token lifecycle status", () => {
       rotated_from_id: "token_internal_previous",
       replaced_by_id: "token_internal_next"
     });
-    expect(relationship).toBe("由旧 Token 轮换生成，现已由新 Token 替换");
+    expect(relationship).toBe("由旧密钥轮换生成，现已由新密钥替换");
     expect(relationship).not.toContain("token_internal");
   });
 });

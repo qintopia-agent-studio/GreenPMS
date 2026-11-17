@@ -73,15 +73,14 @@
 .assistant-resume { position: fixed; bottom: 20px; right: 20px; z-index: 70; box-shadow: 0 3px 15px rgba(23,32,27,.12); }
 .assistant-operation-guide { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 5px; background: var(--brand-soft); }
 .assistant-operation-guide summary { color: var(--brand); font-weight: 600; }
-.assistant-settings-page { max-width: 860px; }
-.assistant-settings-page .page-heading p:not(.eyebrow) { color: var(--muted); margin-top: 8px; }
-.assistant-settings-form { max-width: 680px; }
+.assistant-settings-page { max-width: 860px; min-width: 0; margin-inline: auto; }
+.assistant-settings-form { min-width: 0; }
 .assistant-settings-form fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 20px; }
 .assistant-settings-form label { display: grid; gap: 7px; font-weight: 600; }
 .assistant-settings-form label small { font-weight: 400; color: var(--muted); }
 .assistant-settings-form .assistant-enable { display: flex; align-items: center; gap: 10px; }
 .assistant-enable input { min-height: auto; width: 16px; height: 16px; accent-color: var(--brand); }
-.assistant-settings-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+.assistant-settings-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
 .assistant-setting-hint { color: var(--muted); font-size: 12px; line-height: 1.7; margin-top: 12px; }
 .assistant-save-notice { padding: 12px; background: var(--success-soft); color: var(--success); margin: 12px 0; border-radius: 5px; }
 @media (max-width: 860px) {
@@ -95,23 +94,41 @@
   .assistant-settings-page .page-heading { flex-wrap: wrap; }
 }
 
-.assistant-settings-page > .page-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.assistant-settings-page > .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.assistant-settings-refresh { margin-left: auto; flex-shrink: 0; }
+.assistant-settings-help { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.assistant-settings-field { display: grid; gap: 7px; min-width: 0; }
+.assistant-enablement-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.assistant-save-mode, .assistant-current-state { color: var(--muted); font-size: 12px; }
+.assistant-unsaved-notice { margin: 0 0 16px; color: var(--brand); font-size: 13px; line-height: 1.6; }
+.assistant-provider-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; min-width: 0; }
+.assistant-provider-heading { flex-wrap: wrap; }
+.assistant-provider-title .assistant-pending-badge { color: var(--brand); background: var(--brand-soft); border-radius: 4px; padding: 3px 6px; }
+.assistant-promote-action { margin-left: auto; }
+.assistant-promote-action > .button { min-height: 40px; padding: 7px 10px; font-size: 13px; }
 .assistant-settings-form > .detail-section > fieldset { padding: 20px; }
-.assistant-settings-form .assistant-settings-actions { margin: 0; padding: 0 20px 12px; }
+.assistant-provider-footer { display: grid; gap: 8px; padding: 0 20px 20px; }
+.assistant-provider-footer .assistant-setting-hint { margin: 0; }
+.assistant-provider-footer .assistant-settings-actions { margin-top: 8px; }
 .assistant-settings-form .detail-section > .assistant-setting-hint { padding: 0 20px 18px; margin: 0; }
 .assistant-settings-form .detail-section > .assistant-notice { margin: 16px 20px 0; }
 .assistant-service-body { padding: 20px; }
 .assistant-service-body > p { line-height: 1.7; }
+.assistant-recovery-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.assistant-recovery-actions .assistant-setting-hint { margin: 0; }
+.assistant-runtime-details { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--border); }
+.assistant-runtime-details > summary { width: fit-content; min-height: 32px; align-content: center; color: var(--brand); font-size: 13px; cursor: pointer; }
+.assistant-runtime-details > summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 .assistant-provider-card { margin-top: 20px; min-width: 0; }
 .assistant-settings-form .assistant-provider-card > fieldset { padding: 20px; }
 .assistant-settings-form .assistant-provider-card input:not([type="checkbox"]) { min-width: 0; width: 100%; }
 .assistant-provider-card fieldset > .assistant-setting-hint { margin: 0; font-weight: 400; }
 .assistant-backup-retry { margin-top: 10px; }
-.settings-page:has(.assistant-settings-page) .settings-tabs { flex-wrap: wrap; }
-.settings-page:has(.assistant-settings-page) .settings-tabs .settings-link { flex-shrink: 0; gap: 8px; }
 @media (max-width: 480px) {
-  .settings-page:has(.assistant-settings-page) .settings-tabs { gap: 6px; }
-  .settings-page:has(.assistant-settings-page) .settings-tabs .settings-link { padding: 10px; white-space: nowrap; }
+  .assistant-service-body, .assistant-settings-form .assistant-provider-card > fieldset { padding: 16px; }
+  .assistant-provider-footer { padding: 0 16px 16px; }
+  .assistant-promote-action > .button { min-height: 44px; }
+  .assistant-runtime-details > summary { min-height: 44px; }
 }
 
 /* Both showModal() forms and show() order drawers reserve space. The portal
