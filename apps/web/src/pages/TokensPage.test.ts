@@ -86,7 +86,7 @@ describe("Token lifecycle status", () => {
 
 describe("Token command ceiling", () => {
   it("groups every command once and keeps the Operator shortcut aligned with the authorization policy", () => {
-    expect(tokenCommandGroups.flatMap((group) => group.commands).sort()).toEqual(administratorCommandGrants.filter((command) => command !== "MANAGE_ROOM_CATALOG").sort());
+    expect(tokenCommandGroups.flatMap((group) => group.commands).sort()).toEqual(administratorCommandGrants.filter((command) => command !== "MANAGE_ROOM_CATALOG" && command !== "MANAGE_MEMBERSHIP_CATALOG").sort());
     expect([...operatorTokenCommands].sort()).toEqual([...ordinaryStaffCommandGrants].filter(command => !(retainedFundsCommandTypes as readonly string[]).includes(command)).sort());
   });
 

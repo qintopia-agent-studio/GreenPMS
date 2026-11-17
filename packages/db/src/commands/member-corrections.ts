@@ -1,3 +1,5 @@
+import { addMembershipValidity } from "@qintopia/domain";
+import { requireMembershipProduct } from "../membership-catalog.ts";
 import { sql, type Selectable, type Transaction } from "kysely";
 import { DomainError, type CommandReason } from "@qintopia/contracts";
 import {
@@ -88,14 +90,6 @@ function identity(value: unknown): string | null {
 
 function money(currency: string, minorUnits: number) {
   return { currency, minorUnits };
-}
-
-function addOneCalendarYear(value: string): string {
-  const parsed = parseLocalDate(value);
-  const year = parsed.getUTCFullYear() + 1;
-  const month = parsed.getUTCMonth();
-  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  return new Date(Date.UTC(year, month, Math.min(parsed.getUTCDate(), lastDay))).toISOString().slice(0, 10);
 }
 
 function finalize(
@@ -523,7 +517,7 @@ async function buildEffectiveDateCorrection(db: DbExecutor, input: Record<string
   const evidenceNote = string(input, "evidenceNote");
   const { order, contract, lot } = await loadExactActiveMembershipChain(db, propertyId, membershipOrderId);
   const propertyToday = await propertyLocalToday(db, propertyId);
-  const validUntil = addOneCalendarYear(actualMembershipDate);
+  const validUntil = addMembershipValidity(actualMembershipDate, order.validity_period);
   if (order.valid_from! > propertyToday || order.valid_until! < propertyToday
     || actualMembershipDate > propertyToday || validUntil < propertyToday) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "修改前后会员资格都必须保持当前有效，不能通过修改日期改变订单状态", 409);
@@ -1219,8 +1213,7 @@ async function buildHistoricalBackfill(db: DbExecutor, input: Record<string, unk
     db.selectFrom("members").where("members.deleted_at", "is", null).innerJoin("member_property_links", "member_property_links.member_id", "members.id")
       .select(["members.id", "members.full_name"]).where("members.id", "=", memberId)
       .where("member_property_links.property_id", "=", propertyId).executeTakeFirst(),
-    db.selectFrom("membership_products").selectAll().where("id", "=", membershipProductId)
-      .where("status", "=", "PUBLISHED").executeTakeFirst(),
+    requireMembershipProduct(db, propertyId, membershipProductId, true),
     db.selectFrom("properties").select("currency").where("id", "=", propertyId).executeTakeFirst(),
     propertyLocalToday(db, propertyId),
     db.selectFrom("membership_orders").select(["id", "product_id", "status"])
@@ -1236,16 +1229,13 @@ async function buildHistoricalBackfill(db: DbExecutor, input: Record<string, unk
   if (!product) throw new DomainError("NOT_FOUND", "会员产品不存在", 404);
   if (!property) throw new DomainError("NOT_FOUND", "当前门店不存在", 404);
   if (property.currency !== product.currency) throw new DomainError("VALIDATION_ERROR", "会员产品币种与物业不一致");
-  if (product.validity_period !== "P1Y") {
-    throw new DomainError("ENTITLEMENT_CONFLICT", "当前仅支持一年期会员产品的历史办卡补录", 409);
-  }
   if (blockingOrders.length > 0 || activeProjections.contracts.length > 0 || activeProjections.lots.length > 0) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "该会员已有未作废会员订单或旧系统有效记录，不能使用历史办卡补录", 409);
   }
   if (duplicateMembershipPayment || duplicateStayPayment) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "该交易引用已被其他收款记录使用", 409);
   }
-  const validUntil = addOneCalendarYear(actualMembershipDate);
+  const validUntil = addMembershipValidity(actualMembershipDate, product.validity_period);
   if (actualMembershipDate > propertyToday || validUntil < propertyToday) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "首版只允许补录截至物业营业日仍有效的历史会员", 409);
   }
@@ -1409,7 +1399,7 @@ async function buildMembershipVoidReconversion(db: DbExecutor, input: Record<str
     || sourceRaw.current_contract_amount_minor < stayTransferTotal) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "源住宿当前金额必须覆盖企业微信净收款", 409);
   }
-  const validUntil = addOneCalendarYear(actualMembershipDate);
+  const validUntil = addMembershipValidity(actualMembershipDate, oldOrder.validity_period);
   if (actualMembershipDate > propertyToday || validUntil < propertyToday
     || serviceDates.some((date) => date < actualMembershipDate || date > validUntil)) {
     throw new DomainError("ENTITLEMENT_CONFLICT", "新会员有效期必须覆盖全部历史服务日且截至营业日仍有效", 409);
@@ -1908,7 +1898,7 @@ async function applyHistoricalMembershipBackfill(
     || agreedPrice.minorUnits !== listedPrice.minorUnits
     || effectEntitlementUnitKind(effect, "entitlementUnitKind") !== entitlementUnitKind
     || effectInteger(effect, "entitlementUnits", 1) !== entitlementUnits
-    || validityPeriod !== "P1Y") {
+    || !/^P[1-9]\d*(M|Y)$/.test(validityPeriod)) {
     throw new DomainError("INTERNAL_ERROR", "历史会员补录的产品信息不一致", 500);
   }
   const product = await trx.selectFrom("membership_products").selectAll()
@@ -1932,6 +1922,7 @@ async function applyHistoricalMembershipBackfill(
     property_id: propertyId,
     member_id: memberId,
     product_id: productId,
+    validity_period: validityPeriod,
     product_code: productCode,
     product_version: productVersion,
     product_name: productName,
@@ -2157,6 +2148,7 @@ async function applyMembershipVoidReconversion(
     property_id: propertyId,
     member_id: memberId,
     product_id: oldOrder.product_id,
+    validity_period: oldOrder.validity_period,
     product_code: oldOrder.product_code,
     product_version: oldOrder.product_version,
     product_name: oldOrder.product_name,

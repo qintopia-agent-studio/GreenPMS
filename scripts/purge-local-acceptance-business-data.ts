@@ -26,14 +26,16 @@ export const preservedBaseTables = [
   "api_tokens",
   "web_sessions",
   "membership_products",
+  "membership_product_catalog",
   "room_status_revisions",
   "room_catalog_state",
   "room_catalog_links",
   "room_catalog_heads"
 ] as const satisfies readonly (keyof Database)[];
 
-// external_payment_matches is maintained via SQL and is not in the typed DB schema.
-type AcceptanceBusinessTable = keyof Database | "external_payment_matches";
+// SQL-only business fact tables are explicit; no cascading into source/event history.
+type AcceptanceBusinessTable = keyof Database | "external_payment_matches" | "channel_operating_facts"
+  | "channel_refund_claims" | "owner_historical_payment_reprices" | "wecom_refund_reconciliations";
 
 export const acceptanceBusinessTables = [
   // Explicit inbound FK closure; never cascade into source bills or durable events.
@@ -46,6 +48,12 @@ export const acceptanceBusinessTables = [
   "order_occupant_removals",
   // Maintenance command/audit history is purged; operational catalog state/links/heads stay.
   "room_catalog_changes",
+  "membership_catalog_changes",
+  "membership_order_cancellations",
+  "channel_operating_facts",
+  "channel_refund_claims",
+  "owner_historical_payment_reprices",
+  "wecom_refund_reconciliations",
   "member_profile_corrections",
   "membership_effective_date_corrections",
   "historical_membership_backfills",

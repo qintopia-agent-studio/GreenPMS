@@ -23,6 +23,7 @@ export function SettingsPage() {
   const { pathname } = useLocation();
   const index = pathname === "/settings" || pathname === "/settings/";
   const entries = [
+    { to: "/settings/memberships", label: "会员产品", detail: "配置会员售价、房型、总夜数和有效期", icon: Users, visible: principalCan(principal, propertyId, "MANAGE_MEMBERSHIP_CATALOG") },
     { to: "/settings/rooms", label: "房型与价格", detail: "新增或停用房型、配置房间床位，调整住宿价格", icon: BedDouble,
       visible: principalCan(principal, propertyId, "MANAGE_ROOM_CATALOG") },
     { to: "/settings/accounts", label: "账号管理", detail: "管理工作人员账号、登录与操作权限", icon: Users, visible: true },

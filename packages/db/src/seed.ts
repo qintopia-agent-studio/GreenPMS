@@ -185,6 +185,8 @@ export async function seedDemo(db: Kysely<Database>, options: { includeProtocolF
         beds: catalog.beds.map(({ occupancy_capacity: _discarded, ...bed }) => bed)
       };
   await db.insertInto("properties").values({ id: demo.propertyId, code: "QTP-XA", name: "QinTopia", timezone: "Asia/Shanghai", currency: "CNY" }).onConflict((oc) => oc.column("id").doNothing()).execute();
+  const catalogInitializer = await sql<{ present: boolean }>`select to_regprocedure('qintopia_initialize_membership_catalog(text)') is not null as present`.execute(db);
+  if (catalogInitializer.rows[0]?.present) await sql`select qintopia_initialize_membership_catalog(${demo.propertyId})`.execute(db);
   await db.insertInto("inventory_units").values(inventoryRows.rooms).onConflict((oc) => oc.column("id").doNothing()).execute();
   await db.insertInto("inventory_units").values(inventoryRows.beds).onConflict((oc) => oc.column("id").doNothing()).execute();
   const pricingPolicies: Insertable<Database["pricing_policy_versions"]>[] = [

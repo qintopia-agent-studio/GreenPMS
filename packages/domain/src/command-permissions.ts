@@ -41,6 +41,7 @@ export const ordinaryStaffCommandGrants = [
 export const administratorCommandGrants = [
   ...ordinaryStaffCommandGrants,
   "MANAGE_ROOM_CATALOG",
+  "MANAGE_MEMBERSHIP_CATALOG",
   "REVOKE_CHECK_OUT",
   "CORRECT_ORDER_OCCUPANT",
   "CORRECT_HISTORICAL_STAY_ARRANGEMENTS",
@@ -97,7 +98,7 @@ export const enabledAdministratorCommandGrants = administratorCommandGrants
   .filter((commandType) => commandFeatureEnabled(commandType));
 
 export const enabledAdministratorTokenCommandGrants = enabledAdministratorCommandGrants
-  .filter((commandType) => commandType !== "MANAGE_ROOM_CATALOG");
+  .filter((commandType) => commandType !== "MANAGE_ROOM_CATALOG" && commandType !== "MANAGE_MEMBERSHIP_CATALOG");
 
 function asSet(values: ReadonlySet<string> | readonly string[] | null | undefined): ReadonlySet<string> {
   if (!values) return new Set();

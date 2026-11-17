@@ -274,7 +274,8 @@ function membershipPaymentDifferenceLabel(agreedPrice: MoneyDto | undefined, pay
 }
 
 function membershipValidityPeriodLabel(value: unknown): string {
-  return value === "P1Y" ? "1 年" : receiptValueOrUnavailable(value);
+  const match = typeof value === "string" ? /^P([1-9]\d*)(M|Y)$/.exec(value) : null;
+  return match ? `${match[1]} ${match[2] === "M" ? "个月" : "年"}` : receiptValueOrUnavailable(value);
 }
 
 const administratorMembershipCorrectionCommands = new Set<CommandType>([
@@ -423,6 +424,7 @@ function retainedFundsCommandLabel(commandType: string): string | undefined {
 export const commandCapabilityBusinessLabels: Record<CommandCapability, string> = {
   RETAIN_ORDER_FUNDS: "登记客户留存", APPLY_RETAINED_FUNDS: "使用客户留存款", RELEASE_RETAINED_FUNDS: "解除留存", REFUND_RETAINED_FUNDS: "登记留存款退款",
   MANAGE_ROOM_CATALOG: "管理房型与价格",
+  MANAGE_MEMBERSHIP_CATALOG: "管理会员产品",
   CREATE_MEMBER: "创建会员档案",
   CREATE_MEMBERSHIP_ORDER: "创建会员订单",
   RECORD_MEMBERSHIP_PAYMENT: "收款",
@@ -2085,6 +2087,38 @@ export function u1PreviewHasBusinessEvidence(
   const hasStayIdentity = (isRecord(effect.primaryGuest) && nonblankString(effect.primaryGuest.nickname))
     || (Array.isArray(effect.occupants) && effect.occupants.length > 0);
   switch (commandType) {
+    case "MANAGE_MEMBERSHIP_CATALOG": {
+      if (effect.operation !== commandType || effect.propertyId !== input.propertyId || effect.action !== input.action
+        || effect.roomCatalogVersion !== input.expectedRoomCatalogVersion || !isRecord(effect.after) || !isRecord(effect.after.current)
+        || effect.after.propertyId !== input.propertyId || !nonblankString(effect.after.code)
+        || effect.after.current.code !== effect.after.code || !nonblankString(effect.after.current.productId)
+        || !nonblankString(effect.title) || !Array.isArray(effect.description) || !effect.description.length) return false;
+      const current = effect.after.current;
+      const validVersion = (p: Record<string, unknown>) => nonblankString(p.productId) && nonblankString(p.code)
+        && nonblankString(p.name) && nonblankString(p.currency) && Number.isInteger(p.version) && Number(p.version)>0
+        && Number.isInteger(p.listPriceMinor) && Number(p.listPriceMinor)>0 && Number(p.listPriceMinor)%100===0
+        && Number.isInteger(p.entitlementUnits) && Number(p.entitlementUnits)>0 && /^P[1-9]\d*(M|Y)$/.test(String(p.validityPeriod))
+        && ["ROOM","BED"].includes(String(p.allowedInventoryKind)) && p.entitlementUnitKind===`${String(p.allowedInventoryKind)}_NIGHT`
+        && Array.isArray(p.allowedRoomTypeCodes) && p.allowedRoomTypeCodes.length>0 && p.allowedRoomTypeCodes.every(nonblankString)
+        && new Set(p.allowedRoomTypeCodes).size===p.allowedRoomTypeCodes.length && nonblankString(p.allowedRoomTypeCode) && p.allowedRoomTypeCodes.includes(p.allowedRoomTypeCode);
+      if (!validVersion(current)) return false;
+      if (input.action === "CREATE") {
+        if (effect.before !== null || effect.after.revision !== 1 || current.version !== 1 || effect.after.saleStatus !== "ON_SALE") return false;
+      } else {
+        if (!isRecord(effect.before) || !isRecord(effect.before.current) || !validVersion(effect.before.current) || effect.before.code !== input.code
+          || effect.before.propertyId !== input.propertyId || effect.before.revision !== input.expectedRevision
+          || effect.after.code !== input.code || effect.after.revision !== Number(input.expectedRevision) + 1) return false;
+        if (input.action === "SET_SALE_STATUS") return effect.after.saleStatus === input.saleStatus
+          && JSON.stringify(current) === JSON.stringify(effect.before.current);
+        if (current.version !== Number(effect.before.current.version) + 1 || effect.after.saleStatus !== effect.before.saleStatus) return false;
+      }
+      const spec = isRecord(input.specification) ? input.specification : undefined;
+      return Boolean(spec && current.name === String(spec.name).trim() && current.listPriceMinor === spec.listPriceMinor
+        && current.entitlementUnits === spec.entitlementUnits && current.validityPeriod === spec.validityPeriod
+        && Array.isArray(current.allowedRoomTypeCodes) && Array.isArray(spec.allowedRoomTypeCodes)
+        && JSON.stringify([...current.allowedRoomTypeCodes].sort()) === JSON.stringify([...spec.allowedRoomTypeCodes].sort())
+        && current.entitlementUnitKind === `${String(current.allowedInventoryKind)}_NIGHT`);
+    }
     case "MANAGE_ROOM_CATALOG":
       return effect.operation === "MANAGE_ROOM_CATALOG" && effect.propertyId === input.propertyId && effect.action === input.action
         && effect.beforeVersion === input.expectedVersion && isRecord(effect.after) && effect.after.version === Number(input.expectedVersion) + 1
@@ -2442,7 +2476,7 @@ export function administratorMembershipPreviewHasEvidence(
       || product.listedPrice.currency !== product.agreedPrice.currency
       || !moneyMatches(product.listedPrice, product.agreedPrice)
       || (product.entitlementUnitKind !== "ROOM_NIGHT" && product.entitlementUnitKind !== "BED_NIGHT")
-      || product.validityPeriod !== "P1Y"
+      || (typeof product.validityPeriod !== "string" || !/^P[1-9]\d*(M|Y)$/.test(product.validityPeriod))
       || (product.allowedInventoryKind !== "ROOM" && product.allowedInventoryKind !== "BED")
       || !nonblankString(product.allowedRoomTypeCode)
       || (product.allowedRoomTypeCodes !== undefined && (!exactNonblankStringList(product.allowedRoomTypeCodes)?.length || !(product.allowedRoomTypeCodes as string[]).includes(String(product.allowedRoomTypeCode))))
@@ -2581,6 +2615,12 @@ export function EffectSummary({ preview, fulfillment = false, businessCommand, r
   const effect = preview.effect;
   const unitLabel = (unit: Record<string, unknown>) => inventoryUnitLabels?.[String(unit.id)]
     ?? `${scalar(unit.code)} · ${scalar(unit.name)}`;
+  if (preview.commandType === "MANAGE_MEMBERSHIP_CATALOG") {
+    const before = isRecord(effect.before) && isRecord(effect.before.current) ? effect.before.current : undefined;
+    const after = isRecord(effect.after) && isRecord(effect.after.current) ? effect.after.current : {};
+    const summarize = (p: Record<string, unknown>) => `${String(p.name)} · ${formatMinor(Number(p.listPriceMinor), String(p.currency))} · ${String(p.entitlementUnits)} ${p.entitlementUnitKind === "ROOM_NIGHT" ? "间夜" : "床夜"} · ${membershipValidityPeriodLabel(p.validityPeriod)} · ${Array.isArray(p.allowedRoomTypeCodes) ? p.allowedRoomTypeCodes.map(code => inventoryUnitLabels?.[String(code)] ?? String(code)).join("、") : ""}`;
+    return <div className="effect-summary" data-testid="command-effect"><h3>{String(effect.title)}</h3>{before ? <p>修改前：{summarize(before)}</p> : null}<p>确认后：{summarize(after)}</p><p>销售状态：{isRecord(effect.after) && effect.after.saleStatus === "ON_SALE" ? "在售" : "停售"}</p><p>只影响此后新建的会员订单；已建订单与已售权益继续按原规格办理。</p></div>;
+  }
   if (preview.commandType === "MANAGE_ROOM_CATALOG") return <div className="effect-summary" data-testid="command-effect">
     <section className="effect-section"><h3>{String(effect.title)}</h3><ul>{Array.isArray(effect.description) ? effect.description.map((line, index) => <li key={index}>{String(line)}</li>) : null}</ul></section>
   </div>;
@@ -3829,6 +3869,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
   bookingChannelCode?: string | null;
 }) {
   const result = isRecord(receipt.result) ? receipt.result : undefined;
+  if (businessCommand === "MANAGE_MEMBERSHIP_CATALOG" || commandType === "MANAGE_MEMBERSHIP_CATALOG") return <section className={`receipt-panel ${receipt.businessCommitted ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt"><h3>{receipt.businessCommitted ? "会员产品已保存" : "会员产品未变更"}</h3><p>{receipt.businessCommitted ? String(result?.title ?? "可在变更历史中核对") : receipt.error?.message}</p></section>;
   if (businessCommand === "MANAGE_ROOM_CATALOG" || commandType === "MANAGE_ROOM_CATALOG") return <section className={`receipt-panel ${receipt.businessCommitted ? "receipt-success" : "receipt-rejected"}`} data-testid="command-receipt">
     <h3>{receipt.businessCommitted ? "房型与价格设置已保存" : "设置未变更"}</h3>
     <p>{receipt.businessCommitted ? String(result?.title ?? "操作已完成，可在修改记录中查看。") : receipt.error?.message}</p>
@@ -4002,7 +4043,7 @@ export function ReceiptPanel({ receipt, onNavigateToResource, businessCommand, c
           <p>{committed
             ? correctionDescription
               ?? (businessCommand === "ACTIVATE_MEMBERSHIP_ORDER"
-              ? "会员订单已生效，有效期和 30 夜权益已经生成。"
+              ? "会员订单已生效，有效期和本订单约定权益已经生成。"
               : businessCommand === "CORRECT_MEMBER_ENTITLEMENT_BALANCE"
                 ? "会员可住宿余额和权益变动历史已经更新。"
                 : "会员订单页面已更新。")
@@ -5290,6 +5331,13 @@ export function receiptHasCommandEvidence(
   if (commandType === "RECORD_REFUND" && receipt.businessCommitted
     && (isRefundReconciliationInput(input) || (isRecord(receipt.result) && receipt.result.operation === "RECONCILE_WECOM_REFUNDS"))) {
     return refundReconciliationReceiptHasEvidence(receipt, input, previewEffect, expectedEffectHash);
+  }
+  if (commandType === "MANAGE_MEMBERSHIP_CATALOG" && receipt.businessCommitted) {
+    const result = isRecord(receipt.result) ? receipt.result : undefined;
+    if (!result || !u1PreviewHasBusinessEvidence(commandType, result, input) || !nonblankString(result.changeId)
+      || !receipt.factRefs.includes(result.changeId) || !receipt.resourceRefs.includes(result.changeId)
+      || !nonblankString(result.propertyId) || !receipt.resourceRefs.includes(result.propertyId)) return false;
+    return !previewEffect || Object.entries(previewEffect).every(([key,value])=>evidenceValuesEqual(value,result[key]));
   }
   if (commandType === "MANAGE_ORDER_OCCUPANTS" && receipt.businessCommitted) {
     const result = isRecord(receipt.result) ? receipt.result : undefined;
@@ -7174,7 +7222,7 @@ export function CommandDialog({
             {...(request.initialReason?.note ? { reasonNote: request.initialReason.note } : {})}
             {...(summaryBusinessCommand ? { businessCommand: summaryBusinessCommand } : {})}
           />
-          {request.commandType === "MANAGE_ROOM_CATALOG" ? <section className="reason-section" aria-labelledby="catalog-reason-heading">
+          {["MANAGE_ROOM_CATALOG", "MANAGE_MEMBERSHIP_CATALOG"].includes(request.commandType) ? <section className="reason-section" aria-labelledby="catalog-reason-heading">
             <h3 id="catalog-reason-heading">修改原因</h3>
             <label>填写后保留在修改记录中
               <textarea value={reasonNote} onChange={(event) => setReasonNote(event.target.value)} required maxLength={500} rows={2} data-testid="reason-note" />

@@ -57,7 +57,9 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
 
   await page.getByTestId("create-membership-order").click();
   const product = page.getByTestId("membership-product");
-  await expect(product.locator("option")).toHaveCount(4);
+  for (const id of ["shared_bath_single", "private_bath_single", "shared_bath_quad", "private_bath_shared"]) {
+    await expect(product.locator(`option[value="membership_product_${id}_v1"]`)).toHaveCount(1);
+  }
   await expect(product.locator("option", { hasText: "公卫单人间会员 · ¥1,620.00" })).toHaveCount(1);
   await expect(product.locator("option", { hasText: "独卫单人间会员 · ¥2,160.00" })).toHaveCount(1);
   await expect(product.locator("option", { hasText: "公卫四人间会员 · ¥936.00" })).toHaveCount(1);
@@ -66,18 +68,18 @@ test("2B sells a fixed membership product with append-only WeCom payment correct
   await product.selectOption("membership_product_shared_bath_single_v1");
   await expect(productSummary).toContainText("¥1,620.00");
   await expect(productSummary).toContainText("30 间夜");
-  await expect(productSummary).toContainText("公卫单人间");
-  await expect(productSummary).toContainText("生效日起一年");
+  await expect(productSummary).toContainText("单人间（公卫）");
+  await expect(productSummary).toContainText("生效日起 1 年");
 
   await product.selectOption("membership_product_private_bath_single_v1");
   await expect(productSummary).toContainText("¥2,160.00");
   await expect(productSummary).toContainText("30 间夜");
-  await expect(productSummary).toContainText("独卫单人间");
+  await expect(productSummary).toContainText("单人间（独卫）");
 
   await product.selectOption("membership_product_shared_bath_quad_v1");
   await expect(productSummary).toContainText("¥936.00");
   await expect(productSummary).toContainText("30 床夜");
-  await expect(productSummary).toContainText("公卫四人间单床");
+  await expect(productSummary).toContainText("四人间（公卫）");
 
   await product.selectOption("membership_product_shared_bath_single_v1");
   await page.getByTestId("membership-agreed-price-yuan").fill("1600");
@@ -169,7 +171,7 @@ test("通用会员一次办理两房型共享30间夜且按一年生效", async 
   await page.getByTestId("create-membership-order").click();
   await page.getByTestId("membership-product").selectOption("membership_product_private_bath_shared_v1");
   const summary = page.getByLabel("会员产品信息");
-  for (const text of ["¥2,800.00", "30 间夜", "独卫标间／独卫大床", "生效日起一年"]) {
+  for (const text of ["¥2,800.00", "30 间夜", "标间（独卫）／大床房（独卫）", "生效日起 1 年"]) {
     await expect(summary).toContainText(text);
   }
   await expect(summary).not.toContainText("公卫四人间");

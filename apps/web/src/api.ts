@@ -1,3 +1,4 @@
+import type { MembershipCatalogView } from "@qintopia/contracts";
 import type { DashboardResponse, DashboardDetailsResponse, PaymentAllocationList, RetainedFundList, WorkbenchExceptionsQuery, WorkbenchExceptionsResponse, PaymentReconciliationQuery, PaymentReconciliationResponse } from "@qintopia/contracts";
 import type { AssistantSettings, AssistantSettingsInput, AssistantChatRequest, AssistantChatReply, AssistantQuestionFeedback, AssistantStreamEvent, AssistantSettingsAction, AssistantTestReply, AssistantRecoveryReply } from "../../../packages/contracts/src/assistant.ts";
 import { readAssistantResponseText, readAssistantStream } from "./assistant/stream";
@@ -205,6 +206,8 @@ export const api = {
   assistantRecoverPrimary: (body: AssistantSettingsAction) => request<AssistantRecoveryReply>("/api/v1/assistant/recover-primary", { method: "POST", body: JSON.stringify(body) }),
   assistantChat,
   assistantFeedback: (questionId: string, propertyId: string, feedback: AssistantQuestionFeedback) => request<{ saved: true }>(`/api/v1/assistant/questions/${encodeURIComponent(questionId)}/feedback`, { method: "POST", body: JSON.stringify({ propertyId, feedback }) }),
+  membershipVersions: (propertyId: string) => request<import("./types").MembershipProductDto[]>(`/api/v1/properties/${encodeURIComponent(propertyId)}/membership-versions`),
+  membershipCatalog: (propertyId: string) => request<MembershipCatalogView>(`/api/v1/properties/${encodeURIComponent(propertyId)}/membership-catalog`),
   roomCatalog: (propertyId: string) => request<RoomCatalogView>(`/api/v1/properties/${encodeURIComponent(propertyId)}/room-catalog`),
   roomRateTrial: (propertyId: string, body: { anchors: RoomRateAnchors; arrivalDate: string; departureDate: string; multiplier: number }) =>
     request<{ nights: number; anchorNights: number; amountMinor: number }>(`/api/v1/properties/${encodeURIComponent(propertyId)}/room-rate-trial`, { method: "POST", body: JSON.stringify(body) }),

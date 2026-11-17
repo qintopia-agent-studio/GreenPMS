@@ -1,3 +1,5 @@
+import { addMembershipValidity } from "@qintopia/domain";
+import { buildMembershipCatalogEffect, requireMembershipProduct } from "../membership-catalog.ts";
 import { buildChannelFundsEffect, channelOperatingSummary, externalChannel } from "../channel-operating.ts";
 import { canRepriceOrder, channelRecognitionDelta, validateOrderTargetAmount } from "@qintopia/domain";
 import { buildRetainedFundsEffect, isRetainedFundsCommand } from "../retained-funds.ts";
@@ -573,14 +575,6 @@ function money(currency: string, minorUnits: number) {
   return { currency, minorUnits };
 }
 
-function addOneCalendarYear(localDate: string): string {
-  const parsed = parseLocalDate(localDate);
-  const year = parsed.getUTCFullYear() + 1;
-  const month = parsed.getUTCMonth();
-  const day = parsed.getUTCDate();
-  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  return new Date(Date.UTC(year, month, Math.min(day, lastDay))).toISOString().slice(0, 10);
-}
 
 async function membershipPaymentState(db: DbExecutor, membershipOrderId: string) {
   const facts = await db.selectFrom("membership_payment_facts")
@@ -1042,6 +1036,7 @@ export async function buildCommandEffect(db: DbExecutor, commandType: CommandTyp
 async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, rawInput: unknown): Promise<BuiltCommandEffect> {
   const input = requireObject(rawInput);
   const propertyId = requireString(input, "propertyId");
+  if (commandType === "MANAGE_MEMBERSHIP_CATALOG") return buildMembershipCatalogEffect(db, input);
   if (commandType === "MANAGE_ROOM_CATALOG") return buildRoomCatalogEffect(db, input);
 
   if (commandType === HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND) {
@@ -1127,10 +1122,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       .where("member_property_links.property_id", "=", propertyId)
       .executeTakeFirst();
     if (!member) throw new DomainError("NOT_FOUND", "当前门店未找到该会员", 404);
-    const product = await db.selectFrom("membership_products").selectAll()
-      .where("id", "=", membershipProductId)
-      .where("status", "=", "PUBLISHED")
-      .executeTakeFirst();
+    const product = await requireMembershipProduct(db, propertyId, membershipProductId);
     if (!product) throw new DomainError("NOT_FOUND", "会员产品不存在", 404);
     const property = await db.selectFrom("properties").select("currency").where("id", "=", propertyId).executeTakeFirst();
     if (!property) throw new DomainError("NOT_FOUND", "Property not found", 404);
@@ -1151,6 +1143,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
         name: product.name,
         entitlementUnitKind: product.entitlement_unit_kind,
         entitlementUnits: product.entitlement_units,
+        validityPeriod: product.validity_period,
         allowedRoomTypeCode: product.allowed_room_type_code,
         ...(product.allowed_room_type_codes ? { allowedRoomTypeCodes: product.allowed_room_type_codes } : {}),
         allowedInventoryKind: product.allowed_inventory_kind
@@ -1164,7 +1157,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       status: "DRAFT"
     }, {
       member: { id: member.id, fullName: member.full_name },
-      product: { id: product.id, version: product.version, status: product.status }
+      product: { id: product.id, version: product.version, status: product.status, catalogRevision: product.catalog_revision }
     });
   }
 
@@ -1281,7 +1274,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       throw new DomainError("ENTITLEMENT_CONFLICT", "该会员已有生效中的会员记录，不能再次激活会员订单", 409);
     }
     const validFrom = await propertyLocalToday(db, propertyId);
-    const validUntil = addOneCalendarYear(validFrom);
+    const validUntil = addMembershipValidity(validFrom, order.validity_period);
     return finalize(propertyId, {
       operation: "ACTIVATE_MEMBERSHIP_ORDER",
       membershipOrderId: order.id,
@@ -1967,10 +1960,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
         .where("member_id", "=", memberId)
         .orderBy("property_id")
         .execute(),
-      db.selectFrom("membership_products").selectAll()
-        .where("id", "=", membershipProductId)
-        .where("status", "=", "PUBLISHED")
-        .executeTakeFirst()
+      requireMembershipProduct(db, propertyId, membershipProductId)
     ]);
     if (!member) throw new DomainError("NOT_FOUND", "当前门店未找到该会员", 404);
     if (memberPropertyLinks.length !== 1 || memberPropertyLinks[0]?.property_id !== propertyId) {
@@ -2156,7 +2146,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       note: remainingPaymentNote
     } : null;
     const validFrom = businessDate;
-    const validUntil = addOneCalendarYear(validFrom);
+    const validUntil = addMembershipValidity(validFrom, product.validity_period);
     const entitlementUnits = product.entitlement_units;
     const remainingUnits = entitlementUnits - serviceDates.length;
     return finalize(propertyId, {
@@ -2181,6 +2171,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
         name: product.name,
         entitlementUnitKind: product.entitlement_unit_kind,
         entitlementUnits,
+        validityPeriod: product.validity_period,
         allowedRoomTypeCode: product.allowed_room_type_code,
         ...(product.allowed_room_type_codes ? { allowedRoomTypeCodes: product.allowed_room_type_codes } : {}),
         allowedInventoryKind: product.allowed_inventory_kind
@@ -2236,7 +2227,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       ...baseBasis,
       businessDate,
       member: { id: member.id, phone: normalizedMemberPhone },
-      product: { id: product.id, version: product.version, status: product.status },
+      product: { id: product.id, version: product.version, status: product.status, catalogRevision: product.catalog_revision },
       stayTimeline,
       allOrderFunds: allOrderFunds.map((fact) => ({
         factId: fact.fact_id,

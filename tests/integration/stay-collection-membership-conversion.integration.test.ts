@@ -3138,6 +3138,45 @@ describe("shared private-bath membership upgrade", () => {
     expect(await conversionEntitlementBalance(lotId)).toBe(23);
     await assertConversionCommandStillValid(receipt.commandId);
   });
+  it("upgrades five standard and three king nights using a configurable twenty-night six-month product", async () => {
+    const admin: AuthPrincipal = { subjectId: demo.administratorSubjectId, credentialId: "session_configured_membership", credentialType: "SESSION", displayName: "合成管理员", ...authScope({credentialType:"SESSION",profile:"administrator"}) };
+    await db.insertInto("web_sessions").values({id:admin.credentialId,subject_id:admin.subjectId,secret_hash:"a".repeat(64),expires_at:new Date("2030-01-01"),revoked_at:null}).execute();
+    const configured = await createCommandPreview(db,admin,{commandType:"MANAGE_MEMBERSHIP_CATALOG",input:{propertyId:demo.propertyId,expectedRoomCatalogVersion:0,action:"CREATE",specification:{name:"升级20夜6个月",listPriceMinor:180000,entitlementUnits:20,validityPeriod:"P6M",allowedRoomTypeCodes:["private_bath_standard","private_bath_king"]}}},metadata("configure-preview"));
+    const configuredReceipt = await confirmCommandPreview(db,admin,configured.preview.previewId,{propertyId:demo.propertyId,commandType:"MANAGE_MEMBERSHIP_CATALOG",confirmation:true,expectedEffectHash:configured.preview.effectHash,reason:{code:"MEMBERSHIP_CATALOG_CHANGE",note:"合成规格"}},metadata("configure-confirm"));
+    expect(configuredReceipt.businessCommitted,JSON.stringify(configuredReceipt.error)).toBe(true);
+    const configuredProductId = ((configured.preview.effect.after as Record<string,unknown>).current as Record<string,unknown>).productId as string;
+    const businessDate = await propertyLocalToday(db, demo.propertyId);
+    const arrivalDate = shiftDate(businessDate, -5);
+    const departureDate = shiftDate(businessDate, 3);
+    const standard = await db.selectFrom("inventory_units").select("id").where("room_type_code", "=", "private_bath_standard").where("active", "=", true).where("kind", "=", "ROOM").executeTakeFirstOrThrow();
+    const king = await db.selectFrom("inventory_units").select("id").where("room_type_code", "=", "private_bath_king").where("active", "=", true).where("kind", "=", "ROOM").executeTakeFirstOrThrow();
+    const prefix = "configured-private-sequence";
+    const memberId = await createMember(`STAGE86-${prefix.toUpperCase()}-ID`, prefix);
+    const stay = await createCheckedOutStay({ prefix, documentNumber: `STAGE86-${prefix.toUpperCase()}-ID`, skipCheckOut: true,
+      unitId: standard.id, arrivalDate, departureDate, collectionAmountMinor: 72_000, transactionReference: "WX-SHARED-PRIVATE-SEQUENCE" });
+    const move = await execute({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId: stay.orderId,
+      newInventoryUnitId: king.id, effectiveDate: businessDate } }, `${prefix}-move`);
+    expect(move.businessCommitted, JSON.stringify(move.error)).toBe(true);
+    const envelope = conversionEnvelope({ orderId: stay.orderId, memberId, collectionFactId: stay.collectionFactId,
+      membershipProductId: configuredProductId, agreedPriceMinor: 180_000, remainingPaymentTransactionReference: "WX-SHARED-PRIVATE-REMAINING" });
+    const prepared = await preview(envelope, `${prefix}-upgrade`);
+    expect(prepared.preview.effect).not.toHaveProperty("crossRoomUpgrade");
+    expect(prepared.preview.effect.product).toMatchObject({ allowedRoomTypeCodes: ["private_bath_king", "private_bath_standard"] });
+    const receipt = await confirmPrepared(envelope, prepared, `${prefix}-upgrade`);
+    expect(receipt.businessCommitted, JSON.stringify(receipt.error)).toBe(true);
+    const lotId = receipt.result!.entitlementLotId as string;
+    const configuredOrder=await db.selectFrom("membership_orders").selectAll().where("entitlement_lot_id","=",lotId).executeTakeFirstOrThrow();
+    expect(configuredOrder.validity_period).toBe("P6M");
+    expect(configuredOrder.entitlement_units).toBe(20);
+    expect(await conversionEntitlementBalance(lotId)).toBe(12);
+    const consumedBefore = await db.selectFrom("entitlement_ledger").selectAll().where("lot_id", "=", lotId).execute();
+    const returnMove = await execute({ commandType: "MOVE_UNIT", input: { propertyId: demo.propertyId, orderId: stay.orderId,
+      newInventoryUnitId: standard.id, effectiveDate: shiftDate(businessDate, 1) } }, `${prefix}-return`);
+    expect(returnMove.businessCommitted, JSON.stringify(returnMove.error)).toBe(true);
+    expect(await db.selectFrom("entitlement_ledger").selectAll().where("lot_id", "=", lotId).execute()).toEqual(consumedBefore);
+    expect(await conversionEntitlementBalance(lotId)).toBe(12);
+    await assertConversionCommandStillValid(receipt.commandId);
+  });
 });
 
 describe("cross-room membership upgrade", () => {

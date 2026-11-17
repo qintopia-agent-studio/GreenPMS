@@ -1616,6 +1616,7 @@ export async function createCommandPreview(db: Kysely<Database>, principal: Auth
     const replay = await replayOrConflict(trx, { subjectId: principal.subjectId, propertyId: requestedPropertyId, commandType: executionType, idempotencyKey: headers.idempotencyKey, requestHash });
     if (replay) return { preview: previewFromReceipt(replay), receipt: replay };
     const frozenInput = freezeCreateOrderOccupantIds(normalizedEnvelope.commandType, normalizedEnvelope.input);
+    if (normalizedEnvelope.commandType === "MANAGE_MEMBERSHIP_CATALOG" && frozenInput.action === "CREATE") frozenInput.generatedProductCode = newId("membership");
     const built = await buildCommandEffect(trx, normalizedEnvelope.commandType, frozenInput);
     const authorizationAttempt = {
       stage: "PREVIEW" as const,
@@ -1804,7 +1805,7 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
       try {
         return await lockedDb.transaction().execute(async (trx) => {
         await lockCommandProtocolEpoch(trx);
-        await lockRoomCatalog(trx, propertyId, commandType === "MANAGE_ROOM_CATALOG");
+        await lockRoomCatalog(trx, propertyId, ["MANAGE_ROOM_CATALOG", "MANAGE_MEMBERSHIP_CATALOG"].includes(commandType));
         const previewIdentity = await trx.selectFrom("command_previews")
           .selectAll()
           .where("id", "=", previewId)
@@ -1980,8 +1981,9 @@ export async function confirmCommandPreview(db: Kysely<Database>, principal: Aut
               || (commandType === "CREATE_ORDER" && error.code === "VALIDATION_ERROR")
               || ((commandType === "RESCHEDULE_STAY" || commandType === "EXTEND_STAY" || commandType === "SHORTEN_STAY") && error.code === "VALIDATION_ERROR")
               || (commandType === "MOVE_UNIT" && error.code === "VALIDATION_ERROR")
-              || (["MANAGE_ORDER_OCCUPANTS", "MANAGE_ROOM_CATALOG"].includes(commandType) && ["VALIDATION_ERROR", "NOT_FOUND"].includes(error.code))
+              || (["MANAGE_ORDER_OCCUPANTS", "MANAGE_ROOM_CATALOG", "MANAGE_MEMBERSHIP_CATALOG"].includes(commandType) && ["VALIDATION_ERROR", "NOT_FOUND"].includes(error.code))
               || (commandType === "COMPLETE_STAY" && error.code === "VALIDATION_ERROR")
+              || (["CREATE_MEMBERSHIP_ORDER", "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP"].includes(commandType) && error.code === "NOT_FOUND")
               || (commandType === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP" && error.code === "VALIDATION_ERROR")
               || (commandType === "CORRECT_HISTORICAL_STAY_ARRANGEMENTS" && error.code === "VALIDATION_ERROR")
               || (isMemberCorrectionCommandType(commandType) && error.code === "VALIDATION_ERROR")

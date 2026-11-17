@@ -1,3 +1,4 @@
+import { MembershipCatalogInputSchema, MembershipCatalogEffectSchema, MembershipCatalogResultSchema, MembershipValiditySchema } from "./membership-catalog-schemas.ts";
 import { Type, type TObject, type TProperties } from "@sinclair/typebox";
 import {
   backfillCollectionMethods,
@@ -422,6 +423,7 @@ export const HistoricalCreateOrderReplayEnvelopeSchema = strictObject({
 });
 
 export const CommandEnvelopeSchema = Type.Union([
+  Type.Object({ commandType: Type.Literal("MANAGE_MEMBERSHIP_CATALOG"), input: MembershipCatalogInputSchema }, { additionalProperties: false }),
   Type.Object({ commandType: Type.Literal("MANAGE_ROOM_CATALOG"), input: RoomCatalogInputSchema }, { additionalProperties: false }),
   commandEnvelope("CREATE_MEMBER", strictObject({
     ...PropertyInput,
@@ -931,7 +933,7 @@ const AdminMembershipProductEffectSchema = strictObject({
   agreedPrice: Money,
   entitlementUnitKind: EntitlementUnitKindSchema,
   entitlementUnits: Type.Integer({ minimum: 1 }),
-  validityPeriod: Type.Literal("P1Y"),
+  validityPeriod: MembershipValiditySchema,
   allowedRoomTypeCode: ShortText,
   allowedRoomTypeCodes: Type.Optional(Type.Array(ShortText, { minItems: 1, uniqueItems: true })),
   allowedInventoryKind: InventoryUnitKindSchema
@@ -1020,6 +1022,7 @@ export const CommandEffectSchema = Type.Union([
   WecomRefundReconciliationEffectSchema,
   RetainedFundsEffectSchema,
   RoomCatalogEffectSchema,
+  MembershipCatalogEffectSchema,
   RevokeCheckOutEffectSchema,
   strictObject({
     operation: Type.Literal("CREATE_MEMBER_PROFILE"),
@@ -1043,6 +1046,7 @@ export const CommandEffectSchema = Type.Union([
       name: ShortText,
       entitlementUnitKind: EntitlementUnitKindSchema,
       entitlementUnits: Type.Integer({ minimum: 1 }),
+      validityPeriod: Type.Optional(MembershipValiditySchema),
       allowedRoomTypeCode: ShortText,
       allowedRoomTypeCodes: Type.Optional(Type.Array(ShortText, { minItems: 1, uniqueItems: true })),
       allowedInventoryKind: InventoryUnitKindSchema
@@ -1469,6 +1473,7 @@ export const CommandEffectSchema = Type.Union([
       name: ShortText,
       entitlementUnitKind: EntitlementUnitKindSchema,
       entitlementUnits: Type.Integer({ minimum: 1 }),
+      validityPeriod: Type.Optional(MembershipValiditySchema),
       allowedRoomTypeCode: ShortText,
       allowedRoomTypeCodes: Type.Optional(Type.Array(ShortText, { minItems: 1, uniqueItems: true })),
       allowedInventoryKind: InventoryUnitKindSchema
@@ -2240,6 +2245,7 @@ export const ExecutedCommandResultSchema = Type.Union([
   strictObject({ ...WecomRefundReconciliationEffectSchema.properties, sourceFactId: Id,
     refundFactIds: Type.Array(Id, { minItems: 1, maxItems: 50 }), effectHash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
   RoomCatalogResultSchema,
+  MembershipCatalogResultSchema,
   strictObject({ operation: Type.Literal("MANAGE_ORDER_OCCUPANTS"),
     ...TemporaryOtherRoomLifecycleEvidenceFields,
     action: Type.Union([Type.Literal("ADD"), Type.Literal("REMOVE")]),
@@ -2836,7 +2842,11 @@ const MemberRowSchema = strictObject({
   wechat: ShortText,
   created_at: DateTime
 });
-const MembershipProductRowSchema = strictObject({
+export const MembershipProductRowSchema = strictObject({
+  allowed_room_type_names: Type.Optional(Type.Array(Type.String())),
+  property_id: Id,
+  catalog_revision: Type.Integer({ minimum: 1 }),
+  sale_status: Type.Union([Type.Literal("ON_SALE"), Type.Literal("OFF_SALE")]),
   id: Id,
   code: ShortText,
   version: Type.Integer({ minimum: 1 }),
@@ -2845,7 +2855,7 @@ const MembershipProductRowSchema = strictObject({
   currency: Type.String({ minLength: 3, maxLength: 3 }),
   entitlement_unit_kind: EntitlementUnitKindSchema,
   entitlement_units: Type.Integer({ minimum: 1 }),
-  validity_period: Type.Literal("P1Y"),
+  validity_period: MembershipValiditySchema,
   allowed_room_type_code: ShortText,
   allowed_room_type_codes: Type.Optional(Type.Union([Type.Array(ShortText, { minItems: 1, uniqueItems: true }), Type.Null()])),
   allowed_inventory_kind: InventoryUnitKindSchema,
@@ -3402,7 +3412,7 @@ const MembershipOrderRowSchema = strictObject({
   currency: Type.String({ minLength: 3, maxLength: 3 }),
   entitlement_unit_kind: EntitlementUnitKindSchema,
   entitlement_units: Type.Integer({ minimum: 1 }),
-  validity_period: Type.Literal("P1Y"),
+  validity_period: MembershipValiditySchema,
   allowed_room_type_code: ShortText,
   allowed_room_type_codes: Type.Optional(Type.Union([Type.Array(ShortText, { minItems: 1, uniqueItems: true }), Type.Null()])),
   allowed_inventory_kind: InventoryUnitKindSchema,
@@ -3506,7 +3516,7 @@ const HistoricalMembershipBackfillRowSchema = strictObject({
   currency: Type.String({ minLength: 3, maxLength: 3 }),
   entitlement_unit_kind: EntitlementUnitKindSchema,
   entitlement_units: Type.Integer({ minimum: 1 }),
-  validity_period: Type.Literal("P1Y"),
+  validity_period: MembershipValiditySchema,
   allowed_room_type_code: ShortText,
   allowed_room_type_codes: Type.Optional(Type.Union([Type.Array(ShortText, { minItems: 1, uniqueItems: true }), Type.Null()])),
   allowed_inventory_kind: InventoryUnitKindSchema,
