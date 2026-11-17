@@ -1,3 +1,4 @@
+import { membershipCatalogReady } from "./membership-catalog-readiness.ts";
 import { membershipScopeReady } from "./membership-scope-readiness.ts";
 import { membershipCancellationReady } from "./membership-cancellation-readiness.ts";
 import { operatingSalesReady } from "./operating-sales-readiness.ts";
@@ -104,7 +105,8 @@ export const currentMigrationNames = [
   "079_ai_provider_failover.sql",
   "080_ai_provider_priority_swap.sql",
   "081_wecom_refund_reconciliation.sql",
-  "082_private_bath_shared_membership.sql"
+  "082_private_bath_shared_membership.sql",
+  "083_membership_product_catalog.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -152,7 +154,7 @@ const expectedStaffProfileCatalog = [
   ...administratorCommandGrants.map((commandType) => ({
     profile: "ADMIN" as const,
     command_type: commandType,
-    token_default: commandType !== "MANAGE_ROOM_CATALOG" && commandFeatureEnabled(commandType)
+    token_default: commandType !== "MANAGE_ROOM_CATALOG" && commandType !== "MANAGE_MEMBERSHIP_CATALOG" && commandFeatureEnabled(commandType)
   }))
 ].sort(compareStaffProfileCatalogRows);
 
@@ -2360,7 +2362,7 @@ export async function databaseReady(
           ('historical_membership_backfills', 'historical_membership_backfills_transaction_reference_check', 'c',
             'CHECK (((NULLIF(regexp_replace(btrim(transaction_reference), ''^[[:space:]]+|[[:space:]]+$''::text, ''''::text, ''g''::text), ''''::text) IS NOT NULL) AND (transaction_reference = regexp_replace(btrim(transaction_reference), ''^[[:space:]]+|[[:space:]]+$''::text, ''''::text, ''g''::text))))'),
           ('historical_membership_backfills', 'historical_membership_backfills_validity_period_check', 'c',
-            'CHECK ((validity_period = ''P1Y''::text))'),
+            'CHECK (qintopia_membership_validity_valid(validity_period))'),
           ('membership_payment_reclassifications', 'membership_payment_reclassifications_old_payment_fact_id_key', 'u',
             'UNIQUE (old_payment_fact_id)'),
           ('membership_payment_reclassifications', 'membership_payment_reclassifications_old_reversal_fact_id_key', 'u',
@@ -2409,10 +2411,10 @@ export async function databaseReady(
           ('qintopia_has_historical_command_fact_evidence(text,text,text,text,text)', 'd7fde4c9df35af9e9a3bf1d87e2eb70db2e79c0e8cc3ad773bca088d22e5712e', 'sql', 's', false),
           ('qintopia_has_exact_source_amendment_set(text,text,text)', '7bc120ec02f86adc183062354e7c6fd9d93bcd25fef482738b328a5a50c282a8', 'sql', 's', false),
           ('qintopia_validate_member_profile_correction()', '51908a84980ff376295b9c283cfc2a55a34ce35716639551b7bed882d9b64fca', 'plpgsql', 'v', false),
-          ('qintopia_validate_membership_effective_date_correction()', '97125ffced9ae1d76d17a97bf16cc0857734a33e041b03b63f51e7a12387a92e', 'plpgsql', 'v', false),
-          ('qintopia_validate_historical_membership_backfill()', '723b39cd35d1f92ee5e88d82548f0df7c3fccafd6db2ac9f68ee4ae8c9ba4285', 'plpgsql', 'v', false),
+          ('qintopia_validate_membership_effective_date_correction()', '9f2db7a819fa544de1dabf48f1abe8ac078866cf036ebcc39d91c28171e75b3b', 'plpgsql', 'v', false),
+          ('qintopia_validate_historical_membership_backfill()', '2c62ca86f859fae780dc9f28146e9982a2b9761bb0c05977ce7a76e98abc1658', 'plpgsql', 'v', false),
           ('qintopia_validate_membership_void_entitlement_fact()', 'a60cae95369c47eaf90f24937d927913a73f6207b318de0977d65460f20ad300', 'plpgsql', 'v', false),
-          ('qintopia_validate_membership_void_reconversion()', 'fe713a7a385c69715fc9f6d1af5b1ec92e9c8944edec93ae856f555adea06d11', 'plpgsql', 'v', false),
+          ('qintopia_validate_membership_void_reconversion()', 'ad6528158132840d9162e0d08d487a1cf4acb4646bb4bc22550d324fedf1969c', 'plpgsql', 'v', false),
           ('qintopia_assert_admin_membership_correction_child(text)', 'd6600cf5ff86052d542c0e1ed6a8b34e2bc10c0c7a4a4d76035873a7b8a72d76', 'plpgsql', 'v', false),
           ('qintopia_validate_admin_membership_direct_child()', 'fc83255e1e4977f18acd21a3bb3484e90abd55612ec167fcef1baccc50d85307', 'plpgsql', 'v', false),
           ('qintopia_validate_admin_membership_order_child()', 'c61c4258b25c87cd1b6646b55340d88c6c0faf540d71711e214b46e979a3ef16', 'plpgsql', 'v', false),
@@ -2620,7 +2622,7 @@ export async function databaseReady(
           ('admin_membership_payment_evidence_claims', '0674f8d9d3c380e5ddf15012c8d093628e38e86b1f107060b2a132f73133f4a5'),
           ('member_profile_corrections', 'b0ef6f22805398e05e7ad02b7fbbcd2b7acfb03181e481c3d3deb044f7aa52f8'),
           ('membership_effective_date_corrections', '53266d3722b9d963823ae45ce920c1eb8220c5a2d7dfa1812f8ee245b39f5dbb'),
-          ('historical_membership_backfills', '99b085af8a4a195346e6231165c67df207821413292acfab777ac34abe8c9157'),
+          ('historical_membership_backfills', 'f5a5729f615d55ad45046cda84ac0223f0bb7558bcdf5ee2d50d2c2c277dd768'),
           ('membership_payment_reclassifications', '7e39a365047f705c961d4296f6f4b9ba5e99817592f16f168dd9150ad775febb'),
           ('membership_void_reconversions', '0cf03ec66fad96a3ed4a7a1f3a6f42ee40ac056feded30455932766a7268a0e3')
       ),
@@ -2737,7 +2739,7 @@ export async function databaseReady(
           ('command_catalog', 'command_catalog_feature_key_check', 'c',
             'CHECK (((feature_key IS NULL) OR (command_type = ANY (ARRAY[''COMPLETE_CLEANING''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text]))))'),
           ('subject_command_grants', 'subject_command_grants_human_exact_check', 'c',
-            'CHECK ((command_type = ANY (ARRAY[''CREATE_MEMBER''::text, ''CREATE_MEMBERSHIP_ORDER''::text, ''RECORD_MEMBERSHIP_PAYMENT''::text, ''CORRECT_MEMBERSHIP_PAYMENT''::text, ''ACTIVATE_MEMBERSHIP_ORDER''::text, ''CANCEL_MEMBERSHIP_ORDER''::text, ''CREATE_ORDER''::text, ''CORRECT_ORDER_OCCUPANT''::text, ''MANAGE_ROOM_CATALOG''::text, ''MANAGE_ORDER_OCCUPANTS''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''CORRECT_MEMBER_PROFILE''::text, ''CORRECT_MEMBERSHIP_EFFECTIVE_DATE''::text, ''BACKFILL_HISTORICAL_MEMBERSHIP''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text, ''RESCHEDULE_STAY''::text, ''EXTEND_STAY''::text, ''SHORTEN_STAY''::text, ''MOVE_UNIT''::text, ''REPRICE_ORDER''::text, ''CANCEL_ORDER''::text, ''MARK_NO_SHOW''::text, ''REVOKE_CHECK_IN''::text, ''LOCK_MAINTENANCE''::text, ''RELEASE_MAINTENANCE''::text, ''COMPLETE_CLEANING''::text, ''RECORD_COLLECTION''::text, ''RETAIN_ORDER_FUNDS''::text, ''APPLY_RETAINED_FUNDS''::text, ''RELEASE_RETAINED_FUNDS''::text, ''REFUND_RETAINED_FUNDS''::text, ''RECORD_REFUND''::text, ''REVERSE_FACT''::text, ''CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP''::text, ''CHECK_IN''::text, ''CHECK_OUT''::text, ''REVOKE_CHECK_OUT''::text, ''COMPLETE_STAY''::text, ''CORRECT_MEMBER_ENTITLEMENT_BALANCE''::text, ''ISSUE_TOKEN''::text, ''ROTATE_TOKEN''::text, ''REVOKE_TOKEN''::text, ''PLACE_INTERNAL_USE''::text, ''RELEASE_INTERNAL_USE''::text, ''BACKFILL_COMPLETED_STAY''::text])))'),
+            'CHECK ((command_type = ANY (ARRAY[''CREATE_MEMBER''::text, ''CREATE_MEMBERSHIP_ORDER''::text, ''RECORD_MEMBERSHIP_PAYMENT''::text, ''CORRECT_MEMBERSHIP_PAYMENT''::text, ''ACTIVATE_MEMBERSHIP_ORDER''::text, ''CANCEL_MEMBERSHIP_ORDER''::text, ''CREATE_ORDER''::text, ''CORRECT_ORDER_OCCUPANT''::text, ''MANAGE_MEMBERSHIP_CATALOG''::text, ''MANAGE_ROOM_CATALOG''::text, ''MANAGE_ORDER_OCCUPANTS''::text, ''CORRECT_HISTORICAL_STAY_ARRANGEMENTS''::text, ''CORRECT_MEMBER_PROFILE''::text, ''CORRECT_MEMBERSHIP_EFFECTIVE_DATE''::text, ''BACKFILL_HISTORICAL_MEMBERSHIP''::text, ''VOID_ERRONEOUS_MEMBERSHIP_AND_RECONVERT_STAY''::text, ''RESCHEDULE_STAY''::text, ''EXTEND_STAY''::text, ''SHORTEN_STAY''::text, ''MOVE_UNIT''::text, ''REPRICE_ORDER''::text, ''CANCEL_ORDER''::text, ''MARK_NO_SHOW''::text, ''REVOKE_CHECK_IN''::text, ''LOCK_MAINTENANCE''::text, ''RELEASE_MAINTENANCE''::text, ''COMPLETE_CLEANING''::text, ''RECORD_COLLECTION''::text, ''RETAIN_ORDER_FUNDS''::text, ''APPLY_RETAINED_FUNDS''::text, ''RELEASE_RETAINED_FUNDS''::text, ''REFUND_RETAINED_FUNDS''::text, ''RECORD_REFUND''::text, ''REVERSE_FACT''::text, ''CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP''::text, ''CHECK_IN''::text, ''CHECK_OUT''::text, ''REVOKE_CHECK_OUT''::text, ''COMPLETE_STAY''::text, ''CORRECT_MEMBER_ENTITLEMENT_BALANCE''::text, ''ISSUE_TOKEN''::text, ''ROTATE_TOKEN''::text, ''REVOKE_TOKEN''::text, ''PLACE_INTERNAL_USE''::text, ''RELEASE_INTERNAL_USE''::text, ''BACKFILL_COMPLETED_STAY''::text])))'),
           ('membership_orders', 'membership_orders_status_check', 'c',
             'CHECK ((status = ANY (ARRAY[''DRAFT''::text, ''ACTIVE''::text, ''VOIDED''::text])))'),
           ('membership_orders', 'membership_orders_lifecycle_state_check', 'c',
@@ -3314,7 +3316,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await membershipScopeReady(db) && await membershipCancellationReady(db) && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db);
+    return finalReady && await membershipCatalogReady(db) && await membershipScopeReady(db) && await membershipCancellationReady(db) && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db);
   } catch {
     return false;
   }

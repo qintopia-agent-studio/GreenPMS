@@ -156,6 +156,87 @@ test("桌面管理员单房下拉直接保存：无需理由、可读回、房�
 });
 
 
+test("房型选择与编辑说明：桌面列表和手机下拉一致，标签与悬浮说明不触发写入", async ({ page, isMobile }) => {
+  const writes: string[] = [];
+  const errors: string[] = [];
+  page.on("request", request => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith("/api/v1/") && path !== "/api/v1/auth/login"
+      && !["GET", "HEAD", "OPTIONS"].includes(request.method())) writes.push(`${request.method()} ${path}`);
+  });
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto("/settings/rooms");
+  await page.getByTestId("login-username").fill("admin");
+  await page.getByTestId("login-password").fill("demo-pass-2026");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByRole("heading", { name: "房型与价格", exact: true })).toBeVisible();
+
+  const before = await catalog(page);
+  const activeTypes = before.types.filter(type => type.active);
+  const editable = activeTypes.find(type => type.saleMode === "ROOM" && before.prices.some(price => price.typeCode === type.code));
+  expect(editable, "种子目录应包含可编辑的整房房型和现行价格").toBeDefined();
+  const alternate = activeTypes.find(type => type.code !== editable!.code && before.prices.some(price => price.typeCode === type.code));
+  expect(alternate, "房型选择回归需要第二个有现行价格的房型").toBeDefined();
+  const picker = page.locator(".catalog-type-picker select");
+  const list = page.locator(".catalog-type-list");
+  await expect(picker.locator("option")).toHaveText(activeTypes.map(type => type.name));
+  await expect(list.locator("button strong")).toHaveText(activeTypes.map(type => type.name));
+  if (isMobile) {
+    await expect(page.getByRole("combobox", { name: "选择房型", exact: true })).toBeVisible();
+    await expect(list).toBeHidden();
+  } else {
+    await expect(list).toBeVisible();
+    await expect(picker).toBeHidden();
+  }
+
+  const detail = page.locator(".catalog-detail");
+  const money = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  for (const type of [alternate!, editable!]) {
+    if (isMobile) await picker.selectOption(type.code);
+    else await list.getByRole("button").filter({ has: page.getByText(type.name, { exact: true }) }).click();
+    await expect(detail.getByRole("heading", { name: type.name, exact: true })).toBeVisible();
+    await expect(picker).toHaveValue(type.code);
+    await expect(list.locator("button[aria-pressed='true'] strong")).toHaveText(type.name);
+    const prices = before.prices.find(price => price.typeCode === type.code)!;
+    await expect(detail.locator(".catalog-price-grid dd")).toHaveText(
+      (["1", "7", "14", "30"] as const).map(night => money.format(prices.anchors[night] / 100))
+    );
+    await expect(detail.getByRole("button", { name: "编辑房型", exact: true })).toBeEnabled();
+    await expect(detail.getByRole("button", { name: "调整价格", exact: true })).toBeEnabled();
+  }
+
+  await detail.getByRole("button", { name: "编辑房型", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "编辑房型", exact: true });
+  await expect(editor.getByRole("textbox", { name: "房型名称", exact: true })).toHaveValue(editable!.name);
+  const capacity = editor.getByRole("spinbutton", { name: "最多可住人数", exact: true });
+  await expect(capacity).toHaveValue(String(editable!.capacity));
+  await editor.getByText("最多可住人数", { exact: true }).click();
+  await expect(capacity).toBeFocused();
+
+  const hint = editor.getByRole("button", { name: "床位与入住人数说明", exact: true });
+  await hint.click();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toHaveText("物理床仅用于房间配置，不会自动变成可单卖的床位。");
+  await expect(tooltip).toBeVisible();
+  // A visible DOM box alone cannot detect a help bubble painted behind the native dialog.
+  await expect.poll(() => tooltip.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return element.contains(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2));
+  })).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(tooltip).toHaveCount(0);
+  await expect(editor).toBeVisible();
+  await expect(hint).toBeFocused();
+  await capacity.fill(editable!.capacity === 1 ? "2" : "1");
+  await expect(capacity).toHaveValue(editable!.capacity === 1 ? "2" : "1");
+  await editor.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(detail.getByRole("heading", { name: editable!.name, exact: true })).toBeVisible();
+  expect((await catalog(page)).version).toBe(before.version);
+  expect(writes).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test("房源分类筛选与滚动：查看分类不改数据，表格中央可上下滚动", async ({ page, isMobile }) => {
   await page.goto("/settings/rooms");
   await page.getByTestId("login-username").fill("admin");

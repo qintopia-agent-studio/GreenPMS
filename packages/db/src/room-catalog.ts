@@ -262,7 +262,7 @@ export async function buildRoomCatalogEffect(db: DbExecutor, raw: Record<string,
       `默认 ${bedCount} 床 / ${capacity} 人；已有房间的床位结构保持原记录`];
   } else if (input.action === "DELETE_TYPE") {
     const type = requireType();
-    const membership = await db.selectFrom("membership_products").select("id").where(sql<boolean>`${type.code} = ANY(coalesce(allowed_room_type_codes, ARRAY[allowed_room_type_code]))`).limit(1).executeTakeFirst();
+    const membership = await db.selectFrom("membership_products").innerJoin("membership_product_catalog as catalog", "catalog.code", "membership_products.code").select("id").where("catalog.property_id", "=", propertyId).where(sql<boolean>`${type.code} = ANY(coalesce(allowed_room_type_codes, ARRAY[allowed_room_type_code]))`).limit(1).executeTakeFirst();
     if (basis.units.some((unit) => unit.room_type_code === type.code) || next.rates.some((rate) => rate.typeCode === type.code) || membership) {
       throw new DomainError("VALIDATION_ERROR", "房型已有房间、价格或会员关联，不能删除；可停用并保留历史");
     }

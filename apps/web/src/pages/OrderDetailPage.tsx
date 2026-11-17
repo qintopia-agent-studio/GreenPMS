@@ -1118,8 +1118,8 @@ function StayCollectionConversionDialog({ view, members, membershipProducts, uni
   const matchedMembers = primaryPhone
     ? members.filter((member) => normalizePhoneNumber(member.phone) === primaryPhone)
     : [];
-  const eligibleProducts = membershipProducts.filter((product) => membershipProductMatchesCurrentStay(product, view, unitMap)
-    || membershipProductAllowsTemporaryUpgrade(product, view, unitMap));
+  const eligibleProducts = membershipProducts.filter((product) => (!product.property_id || product.property_id === view.order.property_id) && (membershipProductMatchesCurrentStay(product, view, unitMap)
+    || membershipProductAllowsTemporaryUpgrade(product, view, unitMap)));
   const multipleRoomSegments = new Set(view.effectiveArrangement.intervals.map((interval) => interval.inventoryUnitId)).size > 1;
   const fundsState = stayConversionFundsState(
     view.collectionFacts,

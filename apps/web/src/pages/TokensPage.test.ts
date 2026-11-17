@@ -79,14 +79,14 @@ describe("Token lifecycle status", () => {
       rotated_from_id: "token_internal_previous",
       replaced_by_id: "token_internal_next"
     });
-    expect(relationship).toBe("由旧 Token 轮换生成，现已由新 Token 替换");
+    expect(relationship).toBe("由旧密钥轮换生成，现已由新密钥替换");
     expect(relationship).not.toContain("token_internal");
   });
 });
 
 describe("Token command ceiling", () => {
   it("groups every command once and keeps the Operator shortcut aligned with the authorization policy", () => {
-    expect(tokenCommandGroups.flatMap((group) => group.commands).sort()).toEqual(administratorCommandGrants.filter((command) => command !== "MANAGE_ROOM_CATALOG").sort());
+    expect(tokenCommandGroups.flatMap((group) => group.commands).sort()).toEqual(administratorCommandGrants.filter((command) => command !== "MANAGE_ROOM_CATALOG" && command !== "MANAGE_MEMBERSHIP_CATALOG").sort());
     expect([...operatorTokenCommands].sort()).toEqual([...ordinaryStaffCommandGrants].filter(command => !(retainedFundsCommandTypes as readonly string[]).includes(command)).sort());
   });
 

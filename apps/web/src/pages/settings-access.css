@@ -1,0 +1,118 @@
+/* Settings-only presentation. Account and Token authorization stays in the page handlers. */
+.accounts-page .account-actions { justify-content: flex-end; flex-wrap: nowrap; gap: 8px; }
+.accounts-page .account-actions .button { min-height: 44px; }
+.accounts-page .account-table th:last-child { text-align: right; }
+.accounts-page > .page-header .button { min-height: 44px; }
+.account-more-menu {
+  position: fixed;
+  z-index: 1100;
+  width: 240px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 8px 28px rgba(24, 48, 36, 0.14);
+}
+.account-more-menu > button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 14px;
+}
+.account-more-menu > button:hover:not(:disabled),
+.account-more-menu > button:focus-visible { background: var(--surface-muted); }
+.account-more-menu > .account-menu-danger { color: var(--danger); }
+.account-menu-separator { margin: 5px 6px; border-top: 1px solid var(--border); }
+.account-menu-hint { margin: 2px 10px 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.accounts-page .account-history { margin-top: 28px; padding: 0 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.accounts-page .account-history > summary { min-height: 60px; }
+.accounts-page .account-history > p { margin: 0; padding-bottom: 18px; }
+.accounts-page .account-history[open] > summary { border-bottom: 1px solid var(--border); }
+.accounts-page .account-history > summary::after,
+.accounts-page .account-staff-collapsible > summary::after {
+  content: "";
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  margin-left: 4px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+}
+.accounts-page .account-history[open] > summary::after,
+.accounts-page .account-staff-collapsible[open] > summary::after { transform: rotate(225deg); }
+.accounts-page .account-staff-collapsible > summary .muted { margin-left: auto; }
+.accounts-page .account-staff-collapsible > summary { min-height: 44px; }
+
+.tokens-page .page-heading { align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+.access-page-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tokens-page .access-page-title h1 { margin: 0; font-size: 22px; }
+.tokens-page .token-page-actions { margin-left: auto; }
+.tokens-page .token-page-actions .button { min-height: 44px; }
+.access-field-label { display: inline-flex; align-items: center; gap: 5px; }
+.access-form-field { display: grid; align-content: start; gap: 7px; min-width: 0; }
+.tokens-page .token-issue-reason { margin: -8px 0 20px; color: var(--muted); font-size: 13px; text-align: right; }
+.token-copy-feedback { grid-column: 1 / -1; margin: 0; color: var(--brand); font-size: 13px; line-height: 1.5; }
+.token-copy-feedback.is-error { color: var(--danger); }
+.tokens-page .token-table { min-width: 820px; }
+.tokens-page .token-table th, .tokens-page .token-table td { padding: 14px 12px; vertical-align: top; }
+.tokens-page .token-name-cell { min-width: 120px; max-width: 220px; overflow-wrap: anywhere; }
+.tokens-page .token-subject-cell { max-width: 180px; overflow-wrap: anywhere; }
+.tokens-page .token-expiry-cell { white-space: nowrap; }
+.tokens-page .token-permissions { min-width: 130px; }
+.tokens-page .token-permissions summary { min-height: 44px; font-size: 13px; color: var(--brand); }
+.tokens-page .token-permissions dl { display: grid; gap: 12px; margin: 6px 0 0; max-width: 320px; font-size: 13px; line-height: 1.65; }
+.tokens-page .token-permissions dt { color: var(--muted); }
+.tokens-page .token-permissions dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.tokens-page .token-actions-heading { text-align: right; }
+.tokens-page .token-row-actions { justify-content: flex-end; flex-wrap: nowrap; }
+.tokens-page .token-row-actions .button { min-height: 44px; }
+
+@media (max-width: 860px) {
+  .tokens-page .token-table-region { border: 0; border-radius: 0; background: transparent; overflow: visible; }
+  .tokens-page .token-table, .tokens-page .token-table tbody { display: block; width: 100%; min-width: 0; }
+  .tokens-page .token-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  .tokens-page .token-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 16px;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+  .tokens-page .token-table tbody tr > th, .tokens-page .token-table tbody tr > td { display: block; min-width: 0; max-width: none; margin: 0; padding: 0; border: 0; background: transparent; }
+  .tokens-page .token-name-cell { grid-column: 1; grid-row: 1; align-self: center; font-size: 15px; }
+  .tokens-page .token-status-cell { grid-column: 2; grid-row: 1; justify-self: end; }
+  .tokens-page .token-subject-cell { grid-column: 1 / -1; grid-row: 2; }
+  .tokens-page .token-expiry-cell { grid-column: 1 / -1; grid-row: 3; white-space: normal; }
+  .tokens-page .token-access-cell { grid-column: 1 / -1; grid-row: 4; }
+  .tokens-page .token-table [data-label]::before { content: attr(data-label); display: inline-block; min-width: 64px; margin-right: 8px; color: var(--muted); font-size: 13px; }
+  .tokens-page .token-detail-cell { grid-column: 1 / -1; grid-row: 6; }
+  .tokens-page .token-actions-cell { grid-column: 1 / -1; grid-row: 5; }
+  .tokens-page .token-row-actions { justify-content: flex-end; }
+  .tokens-page .token-permissions { border-top: 1px solid var(--border); padding-top: 2px; }
+  .tokens-page .token-permissions dl { max-width: none; margin-top: 4px; padding-bottom: 2px; }
+  .tokens-page .token-principal-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .tokens-page .page-heading { gap: 14px; }
+  .tokens-page .token-page-actions { display: flex; width: auto; margin-left: auto; }
+  .tokens-page .token-page-actions .button { width: auto; padding-inline: 12px; }
+  .tokens-page .token-issue-reason { text-align: left; }
+  .accounts-page .account-table td:last-child { grid-column: 1 / -1; grid-row: 4; }
+  .accounts-page .account-table .account-actions { gap: 8px; }
+  .accounts-page .account-history { margin-top: 24px; padding-inline: 14px; }
+}

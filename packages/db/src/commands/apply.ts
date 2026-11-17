@@ -1,3 +1,4 @@
+import { applyMembershipCatalogEffect } from "../membership-catalog.ts";
 import { applyChannelFunds, externalChannel, recordChannelRevision } from "../channel-operating.ts";
 import { applyRetainedFundsCommand, isRetainedFundsCommand, lockPaymentAllocationResources } from "../retained-funds.ts";
 import { sql, type Transaction } from "kysely";
@@ -314,7 +315,7 @@ export async function lockCommandResources(trx: Transaction<Database>, commandTy
   await lockPaymentAllocationResources(trx, commandType, input);
   if (isRetainedFundsCommand(commandType)) return;
   const propertyId = requireString(input, "propertyId");
-  if (commandType === "MANAGE_ROOM_CATALOG") return;
+  if (commandType === "MANAGE_ROOM_CATALOG" || commandType === "MANAGE_MEMBERSHIP_CATALOG") return;
 
   if (commandType === HISTORICAL_STAY_ARRANGEMENT_CORRECTION_COMMAND) {
     await lockHistoricalStayArrangementCorrectionResources(trx, rawInput);
@@ -642,6 +643,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
     return applyRefundReconciliation(trx, effect as RefundReconciliationEffect, options.commandId, options.previewId);
   }
   if (isRetainedFundsCommand(options.commandType)) return applyRetainedFundsCommand(trx, options.commandType, effect, options.commandId);
+  if (options.commandType === "MANAGE_MEMBERSHIP_CATALOG") return applyMembershipCatalogEffect(trx, options.commandId, effect, options.reason.note);
   if (options.commandType === "MANAGE_ROOM_CATALOG") return applyRoomCatalogEffect(trx, options.commandId, effect, options.reason.note);
 
   if (isMemberCorrectionCommandType(options.commandType)) {
@@ -710,6 +712,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       property_id: propertyId,
       member_id: requireString(member, "memberId"),
       product_id: requireString(product, "productId"),
+      validity_period: requireString(product, "validityPeriod"),
       product_code: requireString(product, "code"),
       product_version: productVersion as number,
       product_name: requireString(product, "name"),
@@ -1506,6 +1509,7 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       property_id: propertyId,
       member_id: requireString(member, "memberId"),
       product_id: requireString(product, "productId"),
+      validity_period: requireString(product, "validityPeriod"),
       product_code: requireString(product, "code"),
       product_version: productVersion as number,
       product_name: requireString(product, "name"),

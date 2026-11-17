@@ -28,9 +28,10 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
-    { question: "2800元通用会员是标间30夜再加大床30夜吗，何时到期？", ids: ["membership-sale", "member-stay"], facts: ["默认2800元", "两房型共用一份30间夜", "生效日起一个日历年", "共用8间夜、余22", "不是各有30夜", "不自动转换旧会员"] },
+    { question: "员工能改20夜半年套餐吗，停售影响旧会员吗？", ids: ["membership-catalog"], facts: ["员工和Token不能管理", "20夜用了5+3剩12", "DRAFT也已锁定规格", "停售不影响老会员", "补录须选真实历史版本", "未查询不能猜商品或余额"] },
+    { question: "2800元通用会员是标间30夜再加大床30夜吗，何时到期？", ids: ["membership-sale", "member-stay"], facts: ["2800元", "共享30间夜", "一年期限", "共用8间夜、余22", "不是各有30夜", "不自动转换旧会员"] },
     { question: "通用会员从标间换到大床要填临时安排吗，余额不足怎么办？", ids: ["member-stay"], facts: ["两房型正常入住与换房不需临时安排原因", "不重发权益或重算有效期", "覆盖不足时查看逐段覆盖和未覆盖部分报价", "其他房型仍按原规则核对"] },
-    { question: "住过标间和大床，现在升级通用会员，需要确认前期临时安置吗？", ids: ["membership-conversion"], facts: ["全部属于独卫标间／独卫大床时按普通匹配升级", "无需确认临时安置", "按最终预览确认"] },
+    { question: "住过标间和大床，现在升级通用会员，需要确认前期临时安置吗？", ids: ["membership-conversion"], facts: ["全部属于所选在售产品的适用房型时按普通匹配升级", "无需确认临时安置", "按最终预览确认"] },
     { question: "订单已取消，收1000退1000都没登记，要先恢复订单吗？", ids: ["refund-reconciliation"], facts: ["一起补齐真实收退款", "收款和退款两项权限", "不恢复订单", "不改变住宿、计价或库存", "优先已有可退原款补退款", "另有漏记份额才补原款", "收1000退1000保留两笔"] },
     { question: "昨天漏记的退款今天还会提示吗，收退净额为0就对平了吗？", ids: ["refund-reconciliation"], facts: ["跨日期保留未处理项", "收款与退款分别逐笔对平", "净额相等不代表已对平", "同步延迟不能解释为无异常", "只读核对不自动登记或发起退款"] },
     { question: "到店还没办理、取消后仍占房和退款漏记各在哪里看，打开异常默认是什么？", ids: ["workbench-exceptions", "refund-reconciliation"], facts: ["工作台→异常", "“业务异常”（默认）", "“财务异常”", "逾期未办入住/退房", "结束后仍占房/会员天数", "订单与住宿状态不一致", "财务看订单款项及企微收退款漏记/金额不符"] },
@@ -85,6 +86,8 @@ describe("versioned employee operating knowledge", () => {
   scenarios.push({ question: "备用供应商怎么设置，主恢复后什么时候切回？", ids: ["assistant-help"], facts: ["主用/备用两张卡", "改连接须重测", "设为主用", "无需重填Key", "使旧对话失效", "最多自动切备用一次", "用备用重新回答", "10分钟", "无人提问不探测", "不发送业务资料", "不让用户等待", "立即检查恢复", "不改主备身份", "不能凭知识断言当前供应商"] });
   scenarios.push({ question: "已经查到订单或显示半截回答后失败，还要手动切备用吗？", ids: ["assistant-help"], facts: ["每问最多重试当前供应商一次", "复用已完成查询", "最多自动切备用一次", "从原问题与历史上下文重答", "清除失败草稿与暂存入口", "不拼接主的中间回答", "切备用后失败不循环", "累计4次模型/6次工具预算不重置", "普通界面仅思考/查询/回答", "最终失败才报错"] });
   scenarios.push({ question: "权限失效或供应商额度不足时也会反复调用吗？", ids: ["assistant-help"], facts: ["鉴权/额度故障可直接备用", "参数/内容过滤、安全、权限、保存配置、取消不重试", "停止、断线、退出或权限失效不触发备用"] });
+  scenarios.push({ question: "AI 设置勾选就生效吗，刷新会丢掉修改吗？", ids: ["assistant-help"], facts: ["全局启停立即生效", "供应商勾选须保存", "刷新先确认放弃草稿/测试结果"] });
+  scenarios.push({ question: "员工的停用入口在哪里，访问密钥复制失败怎么办？", ids: ["accounts-tokens"], facts: ["行内“更多”", "复制失败手动保存", "权限与轮换详情可展开"] });
   it.each(scenarios)("supplies required evidence for: $question", ({ ids, facts }) => {
     const evidence = assistantKnowledgeTopics.filter(topic => ids.includes(topic.id)).map(topic => topic.content).join("\n");
     const prompt = buildAssistantSystemPrompt(context);
@@ -96,8 +99,8 @@ describe("versioned employee operating knowledge", () => {
       const prompt = buildAssistantSystemPrompt({ ...context, page });
       expect(prompt).toContain(renderAssistantKnowledge());
       expect(prompt).toContain("不是生产部署状态证明");
-      expect(prompt).toContain("知识没有覆盖的问题明确说明不确定");
-      expect(prompt).toContain("settings仅是AI助手设置");
+      expect(prompt).toContain("未覆盖规则说明不确定");
+      expect(prompt).toContain("settings仅为AI助手设置");
       for (const action of assistantOrderActions) expect(prompt).toContain(action);
     }
   });

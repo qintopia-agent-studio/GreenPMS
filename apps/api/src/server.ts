@@ -1,3 +1,5 @@
+import { membershipProductsForProperty } from "../../../packages/db/src/membership-catalog.ts";
+import { registerMembershipCatalog } from "./membership-catalog.ts";
 import { registerDashboard } from "./dashboard.ts";
 import { registerWorkbench } from "./workbench.ts";
 import { registerPaymentReconciliation } from './payment-reconciliation.ts';
@@ -677,6 +679,7 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   registerAccountManagement(app, db);
   registerAssistant(app, db, options.assistantTransport);
   registerRoomCatalog(app, db);
+  registerMembershipCatalog(app, db);
   registerPmsIntegration(app, db);
   registerExternalPayments(app, db);
   registerPaymentAllocation(app, db);
@@ -692,7 +695,7 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
       propertyIds.length ? db.selectFrom("properties").selectAll().where("id", "in", propertyIds).orderBy("code").execute() : [],
       propertyIds.length ? db.selectFrom("inventory_units").selectAll().where("property_id", "in", propertyIds).where("active", "=", true).orderBy("code").execute() : [],
       propertyIds.length ? db.selectFrom("pricing_policy_versions").selectAll().where("property_id", "in", propertyIds).orderBy("code").execute() : [],
-      propertyIds.length ? db.selectFrom("membership_products").selectAll().where("status", "=", "PUBLISHED").orderBy("code").execute() : []
+      Promise.all(propertyIds.map(id => membershipProductsForProperty(db, id))).then(groups => groups.flat())
     ]);
     return { properties, inventoryUnits: await projectCatalogUnitNames(db, units), pricingPolicyVersions: policies, members: [], memberContracts: [], membershipProducts };
   });

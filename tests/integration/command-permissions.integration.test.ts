@@ -332,8 +332,8 @@ describe("exact command permissions on PostgreSQL", () => {
   });
 
   it("covers every catalog command in the operator/admin authorization stage matrix", async () => {
-    expect(commandTypes).toHaveLength(45);
-    expect(commandCatalogTypes).toHaveLength(49);
+    expect(commandTypes).toHaveLength(47);
+    expect(commandCatalogTypes).toHaveLength(51);
     expect(ordinaryCommands).toContain("MANAGE_ORDER_OCCUPANTS");
     expect(administratorCommands).toContain("MANAGE_ORDER_OCCUPANTS");
     await grant(demo.operatorSubjectId, historicalReadCommands);
@@ -363,7 +363,7 @@ describe("exact command permissions on PostgreSQL", () => {
         {
           code: "INSUFFICIENT_ACCESS",
           statusCode: 403,
-          denialReason: commandType === "MANAGE_ROOM_CATALOG" && principal.subjectId === demo.operatorSubjectId
+          denialReason: ["MANAGE_ROOM_CATALOG", "MANAGE_MEMBERSHIP_CATALOG"].includes(commandType) && principal.subjectId === demo.operatorSubjectId
             ? "ADMIN_SESSION_REQUIRED"
             : mode === "EXECUTE" && granted && !commandFeatureEnabledInRelease(commandType)
             ? "FEATURE_DISABLED"

@@ -19,7 +19,7 @@ const publicCommandEnvelopeTypes = commandTypes.filter((commandType): commandTyp
   (humanGrantableCommandTypes as readonly string[]).includes(commandType)
 );
 
-const commandInputContract: Record<Exclude<PublicCommandEnvelopeType, "MANAGE_ROOM_CATALOG">, { required: string[]; properties: string[] }> = {
+const commandInputContract: Record<Exclude<PublicCommandEnvelopeType, "MANAGE_ROOM_CATALOG" | "MANAGE_MEMBERSHIP_CATALOG">, { required: string[]; properties: string[] }> = {
   MANAGE_ORDER_OCCUPANTS: { required: ["propertyId", "orderId", "action"], properties: ["propertyId", "orderId", "action", "guest", "occupantId"] },
   CREATE_MEMBER: {
     required: ["propertyId", "fullName", "nickname", "phone", "wechat"],
@@ -313,6 +313,14 @@ describe("OpenAPI 3.1 command contract", () => {
       const input = (variant.properties as Record<string, JsonSchema>).input!;
       expect(variant.additionalProperties, commandType).toBe(false);
       expect(variant.required, commandType).toEqual(["commandType", "input"]);
+      if (commandType === "MANAGE_MEMBERSHIP_CATALOG") {
+        expect(input.discriminator).toEqual({ propertyName: "action" });
+        const actions = input.oneOf as JsonSchema[];
+        expect(actions).toHaveLength(3);
+        expect(actions.map(shape => ((shape.properties as Record<string, JsonSchema>).action!.const ?? ((shape.properties as Record<string, JsonSchema>).action!.enum as string[])[0]))).toEqual(["CREATE", "UPDATE", "SET_SALE_STATUS"]);
+        for (const shape of actions) expect(shape.additionalProperties).toBe(false);
+        continue;
+      }
       if (commandType === "MANAGE_ROOM_CATALOG") {
         const shapes: Record<string, { required: string[]; optional?: string[] }> = {
           SET_OPERATING_STATISTICS: { required: ["assetIds", "included"] },
@@ -1918,8 +1926,8 @@ describe("OpenAPI 3.1 command contract", () => {
         propertyId: demo.propertyId,
         inventoryUnitId: demo.roomId,
         stayType: "TRANSIENT",
-        arrivalDate: "2026-11-10",
-        departureDate: "2026-11-12",
+        arrivalDate: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+        departureDate: new Date(Date.now() + 32 * 86400000).toISOString().slice(0, 10),
         pricingPolicyVersionId: demo.transientPolicyId
       }
     });

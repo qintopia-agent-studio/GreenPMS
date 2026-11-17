@@ -222,6 +222,10 @@ export interface MemberViewDto {
 }
 
 export interface MembershipProductDto {
+  allowed_room_type_names?: string[];
+  property_id?: string;
+  catalog_revision?: number;
+  sale_status?: "ON_SALE" | "OFF_SALE";
   id: string;
   code: string;
   version: number;
@@ -230,7 +234,7 @@ export interface MembershipProductDto {
   currency: string;
   entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
   entitlement_units: number;
-  validity_period: "P1Y";
+  validity_period: string;
   allowed_room_type_code: string;
   allowed_room_type_codes?: string[] | null;
   allowed_inventory_kind: "ROOM" | "BED";
@@ -253,7 +257,7 @@ export interface MembershipOrderDto {
   currency: string;
   entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
   entitlement_units: number;
-  validity_period: "P1Y";
+  validity_period: string;
   allowed_room_type_code: string;
   allowed_room_type_codes?: string[] | null;
   allowed_inventory_kind: "ROOM" | "BED";
@@ -355,7 +359,7 @@ export interface HistoricalMembershipBackfillDto extends MemberCorrectionAuditDt
   currency: string;
   entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT";
   entitlement_units: number;
-  validity_period: "P1Y";
+  validity_period: string;
   allowed_room_type_code: string;
   allowed_room_type_codes?: string[] | null;
   allowed_inventory_kind: "ROOM" | "BED";

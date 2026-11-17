@@ -129,8 +129,8 @@ export function stayMembershipUpgradeEntry(
 ): StayMembershipUpgradeEntry {
   const action = view.allowedActions.find((candidate) => candidate.code === "CONVERT_STAY_COLLECTIONS_TO_MEMBERSHIP");
   if (!action?.enabled) return { state: "UNAVAILABLE", reason: "ACTION_NOT_AVAILABLE" };
-  if (!membershipProducts.some((product) => membershipProductMatchesCurrentStay(product, view, unitMap)
-    || membershipProductAllowsTemporaryUpgrade(product, view, unitMap))) {
+  if (!membershipProducts.some((product) => (!product.property_id || product.property_id === view.order.property_id) && (membershipProductMatchesCurrentStay(product, view, unitMap)
+    || membershipProductAllowsTemporaryUpgrade(product, view, unitMap)))) {
     return { state: "UNAVAILABLE", reason: "MEMBERSHIP_PRODUCT_NOT_APPLICABLE" };
   }
   const primary = view.occupants.find((occupant) => occupant.role === "PRIMARY");

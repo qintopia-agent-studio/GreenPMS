@@ -7,6 +7,7 @@ import { installDashboardUiFixture } from "../helpers/dashboard-ui-fixture";
 async function fixture(page: Page) {
   const base = await installDashboardUiFixture(page);
   const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+  let settingsReads = 0;
   let settings: AssistantSettings = { version: 3, enabled: true, baseUrl: "https://primary.example/v1", model: "slow", hasKey: true, keyReady: true, canManage: true, managementPropertyId: "ui-a", updatedAt: null,
     providers: { primary: { name: "主供应商", enabled: true, baseUrl: "https://primary.example/v1", model: "slow", hasKey: true, testedAt: null }, backup: { name: "备用供应商", enabled: false, baseUrl: "", model: "", hasKey: false, testedAt: null } },
     routing: { state: "primary", retryAfter: null, lastFailure: null, lastCheckedAt: null } };
@@ -15,6 +16,7 @@ async function fixture(page: Page) {
     const body = route.request().method() === "GET" ? undefined : route.request().postDataJSON();
     if (body) requests.push({ path, body });
     if (path.endsWith("/settings")) {
+      if (!body) settingsReads++;
       if (body) {
         const input = body as AssistantSettingsInput, role = input.provider ?? "primary", provider = settings.providers![role];
         settings = { ...settings, version: settings.version + 1, enabled: input.enabled, providers: { ...settings.providers!, [role]: { ...provider,
@@ -36,7 +38,7 @@ async function fixture(page: Page) {
     }
     return route.fallback();
   });
-  return { base, requests, get settings() { return settings; }, set settings(next: AssistantSettings) { settings = next; } };
+  return { base, requests, get settingsReads() { return settingsReads; }, get settings() { return settings; }, set settings(next: AssistantSettings) { settings = next; } };
 }
 
 const frame = (event: object) => `data: ${JSON.stringify(event)}\n\n`;
@@ -188,7 +190,8 @@ test("provider cards bind test receipts to connection changes and promote saved 
   expect(state.requests.filter(request => request.path.endsWith("/settings")).at(-1)?.body).toMatchObject({ provider: "backup", expectedVersion: 3, testToken: "test-3-backup", providerEnabled: true, model: "stable-new" });
   await primary.getByLabel("主用供应商名称").fill("未保存名称");
   await expect(backup.getByRole("button", { name: "设为主用", exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "重新载入", exact: true }).click();
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await page.getByRole("dialog", { name: "放弃修改并刷新？" }).getByRole("button", { name: "放弃修改并刷新", exact: true }).click();
   await backup.getByRole("button", { name: "设为主用", exact: true }).click();
   await expect(primary.getByLabel("Base URL", { exact: true })).toHaveValue("https://backup.example/v1");
   await expect(backup.getByLabel("备用 Base URL", { exact: true })).toHaveValue("https://primary.example/v1");
@@ -200,6 +203,82 @@ test("provider cards bind test receipts to connection changes and promote saved 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.evaluate(() => { (document.activeElement as HTMLElement | null)?.blur(); window.scrollTo(0, 0); });
   await page.screenshot({ path: test.info().outputPath("provider-settings.png"), fullPage: true });
+  expect(state.base.unexpected).toEqual([]);
+});
+
+test("refresh cancellation preserves provider drafts and confirmed refresh discards them without a write", async ({ page }) => {
+  const state = await fixture(page);
+  await page.goto("/settings/ai");
+  const primary = page.getByRole("form", { name: "主用供应商", exact: true });
+  const name = primary.getByLabel("主用供应商名称", { exact: true });
+  await expect(name).toHaveValue("主供应商");
+  await name.fill("尚未保存的供应商名称");
+  await expect(primary.getByText("未保存", { exact: true })).toBeVisible();
+  const settingsReads = state.settingsReads;
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  const confirmation = page.getByRole("dialog", { name: "放弃修改并刷新？" });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "继续编辑", exact: true }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect(name).toHaveValue("尚未保存的供应商名称");
+  expect(state.settingsReads).toBe(settingsReads);
+  expect(state.requests).toEqual([]);
+
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await confirmation.getByRole("button", { name: "放弃修改并刷新", exact: true }).click();
+  await expect(name).toHaveValue("主供应商");
+  await expect(primary.getByText("未保存", { exact: true })).toHaveCount(0);
+  await expect.poll(() => state.settingsReads).toBeGreaterThan(settingsReads);
+  expect(state.requests).toEqual([]);
+  expect(state.base.unexpected).toEqual([]);
+});
+
+test("refresh also protects an unsaved connection test receipt when no field changed", async ({ page }) => {
+  const state = await fixture(page);
+  await page.goto("/settings/ai");
+  const primary = page.getByRole("form", { name: "主用供应商", exact: true });
+  await primary.getByRole("button", { name: "测试连接", exact: true }).click();
+  await expect(primary.getByText("本次连接测试通过，请保存配置。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  const confirmation = page.getByRole("dialog", { name: "放弃修改并刷新？" });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "继续编辑", exact: true }).click();
+  await primary.getByRole("button", { name: "保存配置", exact: true }).click();
+  await expect(primary.getByText("未保存", { exact: true })).toHaveCount(0);
+  expect(state.requests.filter(request => request.path.endsWith("/settings"))).toHaveLength(1);
+  expect(state.requests.find(request => request.path.endsWith("/settings"))?.body).toMatchObject({ provider: "primary", testToken: "test-3-primary", providerEnabled: true });
+  expect(state.base.unexpected).toEqual([]);
+});
+
+test("service enablement is immediate while provider enablement stays a draft until saved", async ({ page }) => {
+  const state = await fixture(page);
+  await page.goto("/settings/ai");
+  const primary = page.getByRole("form", { name: "主用供应商", exact: true });
+  await expect(primary.getByText("保存后生效", { exact: true })).toBeVisible();
+  await primary.getByLabel("启用主用供应商", { exact: true }).uncheck();
+  await expect(primary.getByText("未保存", { exact: true })).toBeVisible();
+  await expect(primary.getByText("当前已启用", { exact: true })).toBeVisible();
+  expect(state.requests).toEqual([]);
+
+  const service = page.getByRole("region", { name: "助手服务", exact: true });
+  await expect(service.getByText("立即生效", { exact: true })).toBeVisible();
+  const serviceEnabled = service.getByLabel("启用 AI 助手", { exact: true });
+  await expect(serviceEnabled).toBeChecked();
+  // This checkbox reflects the saved API state: React retains its value while
+  // the update is pending. Wait for that state, rather than uncheck()'s immediate
+  // post-click check, without optimistically claiming that the service stopped.
+  await serviceEnabled.click();
+  await expect(serviceEnabled).not.toBeChecked();
+  await expect(service.getByText("助手已停用", { exact: true })).toBeVisible();
+  expect(state.settings.enabled).toBe(false);
+  expect(state.requests.filter(request => request.path.endsWith("/settings"))).toHaveLength(1);
+  expect(state.requests.find(request => request.path.endsWith("/settings"))?.body).toMatchObject({ enabled: false, providerEnabled: true });
+  await expect(primary.getByLabel("启用主用供应商", { exact: true })).not.toBeChecked();
+  await expect(primary.getByText("未保存", { exact: true })).toBeVisible();
+  await primary.getByRole("button", { name: "保存配置", exact: true }).click();
+  await expect(primary.getByText("当前已停用", { exact: true })).toBeVisible();
+  expect(state.requests.filter(request => request.path.endsWith("/settings"))).toHaveLength(2);
+  expect(state.requests.filter(request => request.path.endsWith("/settings")).at(-1)?.body).toMatchObject({ enabled: false, providerEnabled: false });
   expect(state.base.unexpected).toEqual([]);
 });
 

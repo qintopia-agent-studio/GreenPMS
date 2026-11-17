@@ -24,7 +24,7 @@ describe("历史住宿统计的既有员工知识", () => {
         expect(prompt).toContain(fact);
       }
       expect(prompt).toContain("最多20条订单不是全店统计");
-      expect(prompt).toContain("不是当前用户权限、当前订单状态或实时余额");
+      expect(prompt).toContain("不代表当前权限、订单状态或余额");
     }
   });
 });

@@ -16,8 +16,8 @@ export async function membershipScopeReady(db: Kysely<Database>): Promise<boolea
       ('qintopia_validate_conversion_consume_entitlement_fact()', '9da328e757d777ad7c36611a87a68d231d5f6fd6690f35c9d376d6517867dcaf'),
       ('qintopia_assert_stage13_stay_conversion_command_v033(text)', '36297eb71b15c6ca4ff887805d94112246492e5c6fd718fd6903315a33f759d3'),
       ('qintopia_assert_converted_stay_fulfillment_command(text)', '1ee7afb83a223322b49218cd666d45c0c24c14b887244232c5566119434e0304'),
-      ('qintopia_validate_membership_effective_date_correction()', '97125ffced9ae1d76d17a97bf16cc0857734a33e041b03b63f51e7a12387a92e'),
-      ('qintopia_validate_membership_void_reconversion()', 'fe713a7a385c69715fc9f6d1af5b1ec92e9c8944edec93ae856f555adea06d11'),
+      ('qintopia_validate_membership_effective_date_correction()', '9f2db7a819fa544de1dabf48f1abe8ac078866cf036ebcc39d91c28171e75b3b'),
+      ('qintopia_validate_membership_void_reconversion()', 'ad6528158132840d9162e0d08d487a1cf4acb4646bb4bc22550d324fedf1969c'),
       ('qintopia_validate_temporary_other_room_create_order()', '164da03059d257973ee957a3465e1fd4c7d8520d54a04d1db043db9cb9d81b50'),
       ('qintopia_apply_room_catalog(text,jsonb,text)', 'b264c78496af279f37ca7c5a71bf950ef5cb678df0bb37ff8cea0e3762655676'),
       ('qintopia_cross_room_upgrade_matches(text,text,text,date)', '57dc896ff3bc7ac53b48ca78f7e144597b5347e35c8648bc1e3e1de75cce48f4')

@@ -1,3 +1,4 @@
+const MembershipCatalogPage = lazy(() => import("./pages/MembershipCatalogPage").then(module => ({ default: module.MembershipCatalogPage })));
 import { AssistantSettingsPage } from "./assistant/AssistantSettingsPage";
 import { lazy, useEffect, useRef, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
@@ -83,6 +84,7 @@ export default function App() {
             <Route path="dashboard" element={<DashboardPage />} />
             <Route path="settings" element={<SettingsPage />}>
               <Route path="rooms" element={<RoomCatalogPage />} />
+              <Route path="memberships" element={<MembershipCatalogPage />} />
               <Route path="ai" element={<AssistantSettingsPage />} />
               <Route path="tokens" element={<TokensPage />} />
               <Route path="accounts" element={<AccountsPage />} />

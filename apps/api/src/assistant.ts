@@ -1,3 +1,4 @@
+import { membershipProductsForProperty, membershipVersion } from "../../../packages/db/src/membership-catalog.ts";
 import { randomUUID } from "node:crypto";
 import { setTimeout as retryDelay } from "node:timers/promises";
 import { buildAssistantSystemPrompt } from "./assistant-prompt.ts";
@@ -331,8 +332,9 @@ export function registerAssistant(app: FastifyInstance, db: Kysely<Database>, tr
       lifetime.start();
       if (router.needsProbe(settings)) void router.probe(settings, signal => runRecovery(settings, signal));
       const today = await wait(propertyLocalToday(db, body.propertyId));
+      const membershipProducts = await wait(membershipProductsForProperty(db, body.propertyId));
       const messages: ModelMessage[] = [{ role: "system", content: buildAssistantSystemPrompt({
-        today, page: body.page, ...(body.orderId ? { orderId: body.orderId } : {}), paymentAllocationEnabled: paymentAllocationEnabled()
+        membershipProducts: membershipProducts.map(membershipVersion), today, page: body.page, ...(body.orderId ? { orderId: body.orderId } : {}), paymentAllocationEnabled: paymentAllocationEnabled()
       }) }, ...conversation.messages, { role: "user", content: body.message }];
       // Only successful earlier conversation turns survive a provider hand-off.
       // Failed drafts, reasoning, tool messages and pending entries are local to this question.

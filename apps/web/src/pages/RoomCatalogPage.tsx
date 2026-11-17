@@ -5,10 +5,11 @@ import type { ManagedRoom, ManagedRoomType, RoomCatalogInput, RoomCatalogView, R
 import { api } from "../api";
 import { principalCan, useWorkspace } from "../session";
 import type { CommandRequest } from "../types";
-import { CommandDialog, CommandRecoveryBar, DamagedCommandRecoveryNotice, EmptyState, InfoHint, InlineError, LoadingBlock, Modal,
+import { CommandDialog, CommandRecoveryBar, DamagedCommandRecoveryNotice, EmptyState, InlineError, LoadingBlock, Modal,
   QuoteRecoveryConflictNotice, formatDateTime, formatMinor, isTerminalCommandRecovery, recoveryCommandRequest, usePersistentCommandRecovery } from "../ui";
 import { BuildingOrderEditor } from "./BuildingOrderEditor";
 import { saveRoomCategory } from "./saveRoomCategory";
+import { SettingsHint as InfoHint } from "../components/SettingsHint";
 import "./room-catalog.css";
 
 const nights = ["1", "7", "14", "30"] as const;
@@ -111,8 +112,8 @@ function CatalogEditor({ editor, data, draft, onClose, onSubmit }: { editor: Edi
       </>}
       {editor.kind !== "RATES" ? <><div className="catalog-form-pair">
         <label className="field"><span>{editor.kind === "TYPE" ? "默认物理床数" : "物理床数"}</span><input type="number" min="1" max="100" step="1" required value={beds} onChange={(e) => setBeds(e.target.value)} /></label>
-        <label className="field"><span>最多可住人数</span><input type="number" min="1" max="100" step="1" required value={mode === "BED" ? beds : capacity} disabled={mode === "BED"} onChange={(e) => setCapacity(e.target.value)} /></label>
-      </div><p className="catalog-hint">{mode === "BED" ? "每床住一人。整间销售将占用全部有效床位。" : "物理床仅用于房间配置，不会自动变成可单卖的床位。"}</p></> : null}
+        <div className="field"><span className="catalog-title"><label htmlFor="catalog-room-capacity">最多可住人数</label><InfoHint label="床位与入住人数说明" text={mode === "BED" ? "每床住一人。整间销售将占用全部有效床位。" : "物理床仅用于房间配置，不会自动变成可单卖的床位。"} /></span><input id="catalog-room-capacity" type="number" min="1" max="100" step="1" required value={mode === "BED" ? beds : capacity} disabled={mode === "BED"} onChange={(e) => setCapacity(e.target.value)} /></div>
+      </div></> : null}
       <label className="field"><span>修改原因</span><textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} rows={2} required placeholder="记录这次调整的原因" /></label>
       <InlineError error={error} title="请检查填写内容" />
     </form>
@@ -206,7 +207,7 @@ export function RoomCatalogPage() {
         </div></td></tr>)}</tbody></table></div>;
   }
   return <div className="room-catalog-page">
-    <header className="page-heading page-heading-actions"><div><p className="eyebrow">房源配置</p><h1>房型与价格</h1><p>管理房型、实际房间与床位，统一维护住宿价格</p></div>
+    <header className="page-heading catalog-page-heading"><div className="catalog-title"><h1>房型与价格</h1><InfoHint label="房型与价格说明" text="管理房型、实际房间与床位，统一维护住宿价格。修改前核对销售单位和关联影响；已建订单保留原价格快照。" /></div>
       <div className="catalog-page-actions"><button className="button button-secondary" onClick={() => void refresh()} disabled={loading || Boolean(savingCategory)}><RefreshCw size={16} aria-hidden="true" />刷新</button>
         <button className="button button-primary" disabled={blocked} onClick={() => setEditor(tab === "ROOMS" ? { kind: "ROOM" } : { kind: "TYPE" })}><Plus size={17} aria-hidden="true" />{tab === "ROOMS" ? "新增房间" : "新增房型"}</button></div></header>
     {!canManage ? <p className="catalog-hint">当前账号可查看配置，修改由管理员操作。</p> : null}
@@ -221,22 +222,21 @@ export function RoomCatalogPage() {
     ] as const).map(([value, label, Icon]) => <button key={value} className={tab === value ? "is-selected" : ""} aria-pressed={tab === value} onClick={() => setTab(value)}><Icon size={16} aria-hidden="true" />{label}</button>)}</nav>
       {tab !== "HISTORY" ? <label className="catalog-check"><input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />显示停用项</label> : null}</div>
     {loading && !data ? <LoadingBlock label="正在载入房型与价格" /> : data && !error ? <>
-      {tab === "TYPES" ? <div className="catalog-workspace"><aside className="catalog-type-list" aria-label="房型列表">
+      {tab === "TYPES" ? <div className="catalog-workspace"><label className="catalog-type-picker"><span>房型</span><select aria-label="选择房型" value={activeType?.code ?? ""} onChange={event => setSelected(event.target.value)}>{visibleTypes.map(type => <option key={type.code} value={type.code}>{type.name}{type.active ? "" : " · 已停用"}</option>)}</select></label><aside className="catalog-type-list" aria-label="房型列表">
         {visibleTypes.map((type) => <button key={type.code} onClick={() => setSelected(type.code)} aria-pressed={activeType?.code === type.code} className={activeType?.code === type.code ? "is-selected" : ""}>
           <span><strong>{type.name}</strong><small>{type.saleMode === "BED" ? "按床位销售" : "按整房销售"}{type.active ? "" : " · 已停用"}</small></span><span>{data.rooms.filter((room) => room.active && room.typeCode === type.code).length} 间</span></button>)}
       </aside>{activeType ? <section className="catalog-detail"><header className="catalog-detail-heading"><div><h2>{activeType.name}</h2><p>{activeType.bathroom === "PRIVATE" ? "独立卫浴" : "公共卫浴"} · 默认 {activeType.bedCount} 床 / {activeType.capacity} 人 · {typeRooms.filter((room) => room.active).length} 间启用</p></div>
         <button className="button button-secondary button-compact" disabled={blocked} onClick={() => setEditor({ kind: "TYPE", type: activeType })}><Settings2 size={15} aria-hidden="true" />编辑房型</button></header>
-        <section className="catalog-prices"><div className="catalog-section-heading"><div><h3>现行价格</h3><p>{data.businessDate} 入住 · 基准总价 / {activeType.saleMode === "BED" ? "床位" : "整房"}</p></div>
+        <section className="catalog-prices"><div className="catalog-section-heading"><div><div className="catalog-title"><h3>现行价格</h3>{activeType.saleMode === "BED" ? <InfoHint label="多人间整租价格说明" text="多人间整租按床位基准价 × 该房物理床数计算，最后对住宿总额取整。" /> : null}</div><p>{data.businessDate} 入住 · 基准总价 / {activeType.saleMode === "BED" ? "床位" : "整房"}</p></div>
           <button className="button button-primary button-compact" disabled={blocked || !activeType.active} onClick={() => setEditor({ kind: "RATES", type: activeType })}>调整价格</button></div>
           <dl className="catalog-price-grid">{nights.map((night) => <div key={night}><dt>{night} 晚</dt><dd>{price ? money(price.anchors[night]) : "未设置"}</dd></div>)}</dl>
-          {activeType.saleMode === "BED" ? <p className="catalog-hint">多人间整租按床位基准价 × 该房物理床数计算，最后对住宿总额取整。</p> : null}
           {data.rates.filter((rate) => rate.typeCode === activeType.code).length ? <details className="catalog-rate-history"><summary>查看价格版本与生效安排</summary>
             {[...data.rates].filter((rate) => rate.typeCode === activeType.code).sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom) || b.version - a.version).map((rate) => {
               const superseded = data.rates.some((other) => other.typeCode === rate.typeCode && other.effectiveFrom === rate.effectiveFrom && other.version > rate.version);
               return <div key={rate.id}><strong>{rate.effectiveFrom} 起</strong><span>{superseded ? "同日版本已被更正" : rate.effectiveFrom > data.businessDate ? "待生效" : "已发布"}</span><p>{nights.map((night) => `${night} 晚 ${money(rate.anchors[night])}`).join(" · ")}</p></div>;
             })}</details> : null}
         </section>
-        <section><div className="catalog-section-heading"><div><h3>关联房间</h3><p>查看实际房间，并调整房型和床位结构</p></div><button className="button button-secondary button-compact" disabled={blocked || !activeType.active} onClick={() => { setTab("ROOMS"); setEditor({ kind: "ROOM", type: activeType }); }}><Plus size={15} aria-hidden="true" />新增房间</button></div>
+        <section><div className="catalog-section-heading"><div className="catalog-title"><h3>关联房间</h3><InfoHint label="关联房间说明" text="查看实际房间，并调整房型和床位结构。占用或关联条件不满足时，请先按页面提示处理。" /></div><button className="button button-secondary button-compact" disabled={blocked || !activeType.active} onClick={() => { setTab("ROOMS"); setEditor({ kind: "ROOM", type: activeType }); }}><Plus size={15} aria-hidden="true" />新增房间</button></div>
           {typeRooms.some((room) => showInactive || room.active) ? roomRows(typeRooms) : <div className="catalog-empty"><BedDouble size={25} aria-hidden="true" /><p>暂无关联的启用房间</p><button className="button button-secondary" disabled={blocked || !activeType.active} onClick={() => setTab("ROOMS")}>去分配已有房间</button></div>}</section>
         <footer className="catalog-type-footer"><span>停用会同时停止关联房间与床位的销售，历史记录保留。</span><div className="row-actions"><button className="button button-secondary button-compact" disabled={blocked}
           onClick={() => simple({ action: "SET_TYPE_ACTIVE", typeCode: activeType.code, active: !activeType.active }, `${activeType.active ? "停用" : "启用"}房型`)}>{activeType.active ? "停用房型" : "启用房型"}</button>
@@ -260,7 +260,7 @@ export function RoomCatalogPage() {
         </div>
         {filteredRooms.length ? roomRows(filteredRooms) : <EmptyState title="没有符合条件的房间" detail="试试其他分类或楼栋，也可以勾选“显示停用项”。" />}
       </section>
-      : <section className="catalog-history"><h2>最近修改</h2><p className="muted">保留操作人、时间、原因和前后内容，最多展示最近 100 次操作。</p>{data.history.length ? data.history.map((item) => <article key={item.id}><header><h3>{item.title}</h3><time>{formatDateTime(item.createdAt)}</time></header><p>{item.operator} · {item.reason}</p><ul>{item.description.map((line, index) => <li key={index}>{line}</li>)}</ul></article>) : <EmptyState title="暂无修改记录" detail="首次保存或发布价格后，记录会显示在这里。" />}</section>}
+      : <section className="catalog-history"><div className="catalog-title"><h2>最近修改</h2><InfoHint label="修改记录说明" text="保留操作人、时间、原因和前后内容，最多展示最近 100 次操作。" /></div>{data.history.length ? data.history.map((item) => <article key={item.id}><header><h3>{item.title}</h3><time>{formatDateTime(item.createdAt)}</time></header><p>{item.operator} · {item.reason}</p><details className="catalog-history-detail"><summary>查看修改内容</summary><ul>{item.description.map((line, index) => <li key={index}>{line}</li>)}</ul></details></article>) : <EmptyState title="暂无修改记录" detail="首次保存或发布价格后，记录会显示在这里。" />}</section>}
     </> : null}
     {ordering && data && !command ? <BuildingOrderEditor data={data} {...(buildingDraft ? { draft: buildingDraft } : {})} onClose={() => setOrdering(false)} onSubmit={(buildingOrder) => {
       setBuildingDraft(buildingOrder);

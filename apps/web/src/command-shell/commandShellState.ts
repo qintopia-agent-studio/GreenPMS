@@ -2,6 +2,7 @@ import type { HistoricalCommandType } from "@qintopia/contracts";
 
 export const u1CommandTypes = [
   "MANAGE_ROOM_CATALOG",
+  "MANAGE_MEMBERSHIP_CATALOG",
   "CREATE_ORDER",
   "CREATE_MEMBER",
   "CREATE_MEMBERSHIP_ORDER",
@@ -136,6 +137,7 @@ export function transitionCommandShell(
 export function commandShellSuccessMessage(commandType: U1CommandType): string {
   switch (commandType) {
     case "MANAGE_ROOM_CATALOG": return "房型与价格设置已保存，页面已刷新。";
+    case "MANAGE_MEMBERSHIP_CATALOG": return "会员产品已保存，页面已刷新。";
     case "CREATE_ORDER": return "住宿订单已创建，页面已刷新。";
     case "CREATE_MEMBER": return "会员档案已创建，会员列表已刷新。";
     case "CREATE_MEMBERSHIP_ORDER": return "会员订单已创建，会员资料已刷新。";
@@ -166,6 +168,7 @@ export function commandShellSuccessMessage(commandType: U1CommandType): string {
 export function commandShellLabel(commandType: U1CommandType): string {
   switch (commandType) {
     case "MANAGE_ROOM_CATALOG": return "修改房型与价格";
+    case "MANAGE_MEMBERSHIP_CATALOG": return "修改会员产品";
     case "CREATE_ORDER": return "创建住宿订单";
     case "CREATE_MEMBER": return "创建会员档案";
     case "CREATE_MEMBERSHIP_ORDER": return "创建会员订单";

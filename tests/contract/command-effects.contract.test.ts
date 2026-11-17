@@ -25,6 +25,7 @@ const effectContractDatabaseUrl = process.env.EFFECT_CONTRACT_DATABASE_URL
   ?? "postgres://qintopia:qintopia@127.0.0.1:55432/qintopia_effect_contract";
 
 const expectedEffectKeys: Record<CommandType, string[]> = {
+  MANAGE_MEMBERSHIP_CATALOG: ["operation", "propertyId", "action", "before", "after", "roomCatalogVersion", "title", "description"],
   MANAGE_ROOM_CATALOG: ["action", "after", "beforeVersion", "description", "insertUnits", "operation", "policies", "propertyId", "retireUnitIds", "roomLink", "title"],
   CREATE_MEMBER: ["member", "memberId", "operation", "propertyLink"],
   CREATE_MEMBERSHIP_ORDER: ["member", "operation", "pricing", "product", "status"],
@@ -1463,6 +1464,18 @@ describe("Command effect HTTP contract", () => {
     expect(Object.keys(catalogEffect).sort()).toEqual(expectedEffectKeys.MANAGE_ROOM_CATALOG);
     expect(Value.Check(CommandEffectSchema, catalogEffect)).toBe(true);
     covered.add("MANAGE_ROOM_CATALOG");
+    const membershipCatalogResponse = await app.inject({ method: "POST", url: "/api/v1/command-previews",
+      cookies: { qintopia_session: adminSession!.value },
+      headers: { "idempotency-key": "effect-membership-catalog", "x-correlation-id": "effect-membership-catalog" },
+      payload: { commandType: "MANAGE_MEMBERSHIP_CATALOG", input: { propertyId: demo.propertyId, expectedRoomCatalogVersion: 0,
+        action: "CREATE", specification: { name: "契约会员", listPriceMinor: 180000, entitlementUnits: 20,
+          validityPeriod: "P6M", allowedRoomTypeCodes: ["private_bath_king"] } } } });
+    expect(membershipCatalogResponse.statusCode, membershipCatalogResponse.body).toBe(200);
+    const membershipEffect = membershipCatalogResponse.json().preview.effect;
+    expect(Object.keys(membershipEffect).sort()).toEqual([...expectedEffectKeys.MANAGE_MEMBERSHIP_CATALOG].sort());
+    expect(Value.Check(CommandEffectSchema, membershipEffect)).toBe(true);
+    covered.add("MANAGE_MEMBERSHIP_CATALOG");
+
     // New commands are session-authorized; do not silently extend existing token grants.
     const previousAllocationFlag = process.env.PMS_PAYMENT_ALLOCATION_ENABLED;
     process.env.PMS_PAYMENT_ALLOCATION_ENABLED = "true";

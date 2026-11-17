@@ -1,3 +1,4 @@
+import { membershipProductsForProperty } from "./membership-catalog.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { sql } from "kysely";
 import { DomainError } from "@qintopia/contracts";
@@ -197,11 +198,7 @@ export async function getMemberView(db: DbExecutor, propertyId: string, memberId
     .orderBy("created_at")
     .orderBy("id")
     .execute();
-  const membershipProducts = await db.selectFrom("membership_products").selectAll()
-    .where("status", "=", "PUBLISHED")
-    .orderBy("list_price_minor")
-    .orderBy("code")
-    .execute();
+  const membershipProducts = await membershipProductsForProperty(db, propertyId);
   const membershipOrderRows = await db.selectFrom("membership_orders").selectAll()
     .where("member_id", "=", memberId)
     .where("property_id", "=", propertyId)
@@ -290,8 +287,6 @@ export async function getMemberView(db: DbExecutor, propertyId: string, memberId
     const paymentFacts = factsByOrder.get(order.id) ?? [];
     const paymentTotalMinor = paymentFacts.reduce((sum, fact) => sum + fact.net_effect_minor, 0);
     if (!Number.isSafeInteger(paymentTotalMinor)) throw new DomainError("INTERNAL_ERROR", "会员订单收款合计超出支持范围", 500);
-    const product = membershipProducts.find((item) => item.id === order.product_id);
-    if (!product) throw new DomainError("INTERNAL_ERROR", "会员订单缺少产品有效期规则", 500);
     return {
       cancellation: (() => {
         const record = cancellations.find((item) => item.membership_order_id === order.id);
@@ -299,7 +294,7 @@ export async function getMemberView(db: DbExecutor, propertyId: string, memberId
         const { membership_order_id: _, ...details } = record;
         return details;
       })(),
-      order: { ...order, validity_period: product.validity_period },
+      order,
       paymentFacts,
       paymentTotalMinor,
       paymentDifferenceMinor: paymentTotalMinor - order.agreed_price_minor

@@ -1,3 +1,4 @@
+import { membershipPeriodLabel } from "./MembershipCatalogPage";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { BadgeCheck, CalendarClock, CircleDollarSign, CreditCard, FilePenLine, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
@@ -275,8 +276,7 @@ function entitlementLabel(unitKind: "ROOM_NIGHT" | "BED_NIGHT", units: number): 
 }
 
 function productScopeLabel(product: MembershipProductDto): string {
-  const names: Record<string, string> = { shared_bath_single: "公卫单人间", private_bath_single: "独卫单人间", shared_bath_quad: "公卫四人间", private_bath_standard: "独卫标间", private_bath_king: "独卫大床" };
-  return (product.allowed_room_type_codes ?? [product.allowed_room_type_code]).map((code) => names[code] ?? code).join("／") + (product.allowed_inventory_kind === "BED" ? "单床" : "");
+  return (product.allowed_room_type_names ?? product.allowed_room_type_codes ?? [product.allowed_room_type_code]).join("／") + (product.allowed_inventory_kind === "BED" ? "单床" : "");
 }
 
 function CreateMemberDialog({ propertyId, draft, prefill, onCorrectSource, onClose, onSubmit }: {
@@ -408,7 +408,7 @@ function CreateMembershipOrderDialog({ propertyId, member, products, draft, onCl
           <div><span>默认价</span><strong>{formatMinor(selectedProduct.list_price_minor, selectedProduct.currency)}</strong></div>
           <div><span>发放权益</span><strong>{entitlementLabel(selectedProduct.entitlement_unit_kind, selectedProduct.entitlement_units)}</strong></div>
           <div><span>适用范围</span><strong>{productScopeLabel(selectedProduct)}</strong></div>
-          <div><span>有效期</span><strong>生效日起一年</strong></div>
+          <div><span>有效期</span><strong>生效日起 {membershipPeriodLabel(selectedProduct.validity_period)}</strong></div>
         </div> : null}
         <label>实际成交价（人民币元）<input type="number" min="0" step="1" inputMode="numeric" value={agreedPriceYuan} onChange={(event) => { setAgreedPriceYuan(event.target.value); setValidationError(undefined); }} required data-testid="membership-agreed-price-yuan" /></label>
         {selectedProduct && yuanInputToMinor(agreedPriceYuan, true) !== selectedProduct.list_price_minor ? <label>调价原因<textarea rows={3} value={adjustmentReason} onChange={(event) => { setAdjustmentReason(event.target.value); setValidationError(undefined); }} required maxLength={1000} data-testid="membership-price-adjustment-reason" /></label> : null}
@@ -612,7 +612,7 @@ export function MemberCorrectionHistoryPanel({ view }: { view: MemberViewDto }) 
             <div><dt>会员产品</dt><dd>{entry.row.product_name}</dd></div>
             <div><dt>会员开始日期</dt><dd>{formatDate(entry.row.actual_membership_date)}</dd></div>
             <div><dt>合同有效期</dt><dd>{formatDate(entry.row.actual_membership_date)} 至 {formatDate(entry.row.valid_until)}</dd></div>
-            <div><dt>有效期规则</dt><dd>{entry.row.validity_period === "P1Y" ? "1 年" : entry.row.validity_period}</dd></div>
+            <div><dt>有效期规则</dt><dd>{membershipPeriodLabel(entry.row.validity_period)}</dd></div>
             <div><dt>成交价与权益</dt><dd>{formatMinor(entry.row.agreed_price_minor, entry.row.currency)} · {entitlementLabel(entry.row.entitlement_unit_kind, entry.row.entitlement_units)}</dd></div>
             <div><dt>企业微信收款日期</dt><dd>{formatDate(entry.row.business_date)}</dd></div>
             <div><dt>交易单号</dt><dd><code>{entry.row.transaction_reference}</code></dd></div>
@@ -705,7 +705,16 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
   const [phone, setPhone] = useState(() => typeof correctedProfileDraft?.phone === "string" ? correctedProfileDraft.phone : view.member.phone);
   const [wechat, setWechat] = useState(() => typeof correctedProfileDraft?.wechat === "string" ? correctedProfileDraft.wechat : view.member.wechat);
   const [membershipOrderId, setMembershipOrderId] = useState(() => typeof draft?.input.membershipOrderId === "string" ? draft.input.membershipOrderId : activeOrders[0]?.order.id ?? "");
-  const [membershipProductId, setMembershipProductId] = useState(() => typeof draft?.input.membershipProductId === "string" ? draft.input.membershipProductId : view.membershipProducts[0]?.id ?? "");
+  const [membershipProductId, setMembershipProductId] = useState(() => typeof draft?.input.membershipProductId === "string" ? draft.input.membershipProductId : "");
+  const [historicalProducts, setHistoricalProducts] = useState<MembershipProductDto[]>([]);
+  const [historicalProductsError, setHistoricalProductsError] = useState<unknown>();
+  useEffect(() => {
+    if (mode !== "BACKFILL_HISTORICAL_MEMBERSHIP") return;
+    let active = true;
+    api.membershipVersions(propertyId).then(rows => { if (active) setHistoricalProducts(rows); })
+      .catch(error => { if (active) setHistoricalProductsError(error); });
+    return () => { active = false; };
+  }, [mode, propertyId]);
   const [actualMembershipDate, setActualMembershipDate] = useState(() => typeof draft?.input.actualMembershipDate === "string" ? draft.input.actualMembershipDate : "");
   const [paymentAmountYuan, setPaymentAmountYuan] = useState(() => typeof paymentDraft?.amountMinor === "number" ? String(paymentDraft.amountMinor / 100) : "");
   const [paymentDate, setPaymentDate] = useState(() => typeof paymentDraft?.businessDate === "string" ? paymentDraft.businessDate : "");
@@ -855,9 +864,9 @@ export function MemberCorrectionDialog({ propertyId, view, availableCommands, st
           <div className="membership-product-summary span-two" aria-label="系统保持一致的会员事实"><div><span>合同截止日</span><strong>系统计算</strong></div><div><span>权益有效期</span><strong>系统计算</strong></div><div><span>资金与产品</span><strong>保持不变</strong></div><div><span>已用与剩余权益</span><strong>保持不变</strong></div></div>
         </> : null}
 
-        {mode === "BACKFILL_HISTORICAL_MEMBERSHIP" ? <>
+        {mode === "BACKFILL_HISTORICAL_MEMBERSHIP" ? <><InlineError error={historicalProductsError} />
           <label className="span-two">会员产品<select value={membershipProductId} onChange={(event) => setMembershipProductId(event.target.value)} required data-testid="backfill-membership-product">
-            {view.membershipProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {entitlementLabel(product.entitlement_unit_kind, product.entitlement_units)}</option>)}
+            <option value="">请选择与真实历史一致的产品版本</option>{historicalProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · 版本{product.version} · {formatMinor(product.list_price_minor, product.currency)} · {entitlementLabel(product.entitlement_unit_kind, product.entitlement_units)} · {membershipPeriodLabel(product.validity_period)} · {productScopeLabel(product)}</option>)}
           </select></label>
           <label><span className="form-label-with-hint">会员开始日期<InfoHint label="会员开始日期说明" text={membershipStartDateHelp} /></span><input type="date" max={view.balanceAsOfDate} value={actualMembershipDate} onChange={(event) => setActualMembershipDate(event.target.value)} required data-testid="actual-membership-date" /></label>
           <label>真实企微收款金额（人民币元）<input type="number" min="0.01" step="0.01" inputMode="decimal" value={paymentAmountYuan} onChange={(event) => setPaymentAmountYuan(event.target.value)} required data-testid="historical-membership-payment-yuan" /></label>
@@ -1548,7 +1557,7 @@ export function MembersPage() {
           onActivate={(summary) => startCommand({
             commandType: "ACTIVATE_MEMBERSHIP_ORDER",
             title: "生效会员订单",
-            description: "确认当前企微收款合计和差额后，使会员订单生效并从今天起计算一年有效期。",
+            description: "确认当前企微收款合计和差额后，使会员订单生效并从今天起按本订单锁定期限计算有效期。",
             input: { propertyId, membershipOrderId: summary.order.id }
           })}
         />

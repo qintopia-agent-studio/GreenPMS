@@ -4947,19 +4947,21 @@ pre {
 .settings-breadcrumb a { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; color: var(--brand); text-decoration: none; }
 .settings-breadcrumb a:hover { text-decoration: underline; }
 .settings-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
-.settings-link { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; min-width: 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface); text-decoration: none; font-weight: 650; }
+.settings-link { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; min-width: 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface); text-decoration: none; font-weight: 650; white-space: nowrap; }
 .settings-link svg { flex-shrink: 0; }
 .settings-link:hover, .settings-link.active { color: var(--brand); background: var(--brand-soft); border-color: var(--border-strong); }
 @media (max-width: 1050px) {
   .settings-cards { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 860px) {
-  .settings-navigation { top: 56px; }
+  .settings-navigation { top: 56px; padding-top: 0; }
+  .settings-tabs { flex-wrap: nowrap; overflow-x: auto; padding: 3px 2px 6px; scrollbar-width: thin; }
+  .settings-link { flex: 0 0 auto; padding: 10px 14px; font-size: 13px; }
+  .settings-link svg { display: none; }
+  .settings-breadcrumb a { min-height: 44px; }
 }
 @media (max-width: 540px) {
-  .settings-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .settings-link { padding: 9px 6px; font-size: 12px; text-align: center; }
-  .settings-link svg { display: none; }
+  .settings-link { font-size: 12px; }
   .settings-card { padding: 20px; }
 }
 .member-directory-list { min-width: 0; }

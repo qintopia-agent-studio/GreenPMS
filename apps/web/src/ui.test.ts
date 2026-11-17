@@ -4589,3 +4589,18 @@ it("uses current room labels in confirmation without mutating canonical effect e
   expect(html).not.toContain("01 原房间");
   expect(unit.code).toBe("01");
 });
+
+describe("membership catalog preview evidence", () => {
+  const specification = { name: "半年20夜", listPriceMinor: 180000, entitlementUnits: 20, validityPeriod: "P6M", allowedRoomTypeCodes: ["standard","king"] };
+  const current = { ...specification, productId:"product_v1",code:"product",version:1,currency:"CNY",allowedInventoryKind:"ROOM",entitlementUnitKind:"ROOM_NIGHT",allowedRoomTypeCode:"standard" };
+  const input = {propertyId:"property_1",action:"CREATE",expectedRoomCatalogVersion:3,specification};
+  const effect = {operation:"MANAGE_MEMBERSHIP_CATALOG",propertyId:"property_1",action:"CREATE",roomCatalogVersion:3,before:null,after:{propertyId:"property_1",code:"product",revision:1,saleStatus:"ON_SALE",current},title:"新增会员产品",description:["保留旧权益"]};
+  it("requires complete matching price, scope, units and duration before confirmation", () => {
+    expect(u1PreviewHasBusinessEvidence("MANAGE_MEMBERSHIP_CATALOG",effect,input)).toBe(true);
+    for (const change of [{listPriceMinor:1},{entitlementUnits:30},{validityPeriod:"P1Y"},{currency:undefined},{allowedRoomTypeCodes:["other"]},{allowedInventoryKind:"BED"},{productId:undefined}]) {
+      expect(u1PreviewHasBusinessEvidence("MANAGE_MEMBERSHIP_CATALOG",{...effect,after:{...effect.after,current:{...current,...change}}},input)).toBe(false);
+    }
+    expect(u1PreviewHasBusinessEvidence("MANAGE_MEMBERSHIP_CATALOG",{...effect,roomCatalogVersion:4},input)).toBe(false);
+    expect(u1PreviewHasBusinessEvidence("MANAGE_MEMBERSHIP_CATALOG",{...effect,propertyId:"other"},input)).toBe(false);
+  });
+});
