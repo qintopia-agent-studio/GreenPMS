@@ -12,6 +12,16 @@ test("administrator configures, edits, stops and copies membership products",asy
  await page.getByTestId("reason-note").fill("合成浏览器验收");await page.getByTestId("command-return-to-edit").click();await expect(page.getByLabel("产品名称",{exact:true})).toHaveValue(name);await expect(page.getByLabel("总夜数",{exact:true})).toHaveValue("20");await page.getByRole("button",{name:"核对产品",exact:true}).click();await expect(page.getByTestId("reason-note")).toHaveValue("合成浏览器验收");await page.getByTestId("confirm-command").click();
  const card=page.locator("section.catalog-detail").filter({has:page.getByRole("heading",{name,exact:true})});await expect(card).toBeVisible();await expect(card).toContainText("6 个月");
 
+ // Cancelling a returned draft must not leak its reason into a different operation.
+ await card.getByRole("button",{name:"编辑",exact:true}).click();
+ await page.getByRole("button",{name:"核对产品",exact:true}).click();
+ await page.getByTestId("reason-note").fill("此修改已取消");
+ await page.getByTestId("command-return-to-edit").click();
+ await page.getByRole("dialog").getByRole("button",{name:"取消",exact:true}).click();
+ await card.getByRole("button",{name:"停售",exact:true}).click();
+ await expect(page.getByTestId("reason-note")).toHaveValue("");
+ await page.getByRole("dialog").getByRole("button",{name:"关闭",exact:true}).click();
+
  const commit=async()=>{await expect(page.getByTestId("confirm-command")).toBeEnabled();await page.getByTestId("confirm-command").click();await expect(page.locator("dialog.modal-wide")).toBeHidden({timeout:15000});};
  await page.goto("/members");await page.getByTestId("create-member").click();
  await page.getByTestId("member-full-name").fill(`配置套餐会员-${info.project.name}`);await page.getByTestId("member-nickname").fill(`配置套餐会员-${info.project.name}`);
