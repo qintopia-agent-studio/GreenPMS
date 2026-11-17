@@ -119,9 +119,9 @@ node --test scripts/check-pr-tests.mjs
 
 - [x] 在主计划填写工程状态，提供本功能三组具体人工验收步骤、合成账号／可访问环境、操作、预期结果与尚未验证项；用户未反馈前保持“待人工验收”。真实助手问答单列，不以模拟模型代替。
 - [x] 复核最终 diff 和业务不变量，尤其迁移、旧 DRAFT、停售、门店边界及 SQL／TS 日期一致性。low effort 不降低验证要求；复杂失败要重新定位原因，不能删测试、弱化门禁或扩改 CI。
-- [ ] 按 `docs/repository-contributing.md` 和 `.github/PULL_REQUEST_TEMPLATE.md` 提交并创建 PR；概述功能结果、同版本知识、实际验证和回退限制。将本规格与清单随功能一并提交。
-- [ ] 创建成功后在**新开发对话**调用 `attach_artifact` 关联 PR，并用 `list_artifacts` 回读仓库与 URL；工具受阻明确标记关联未完成，不以回复链接代替。
-- [ ] 检查实际 PR／CI 状态，交付 PR 链接、提交、验证结果和人工验收步骤；**保持未合并、未发布**。如果没有生产写入或真实人工反馈，必须如实报告。
+- [x] 按 `docs/repository-contributing.md` 和 `.github/PULL_REQUEST_TEMPLATE.md` 提交并创建 PR；概述功能结果、同版本知识、实际验证和回退限制。将本规格与清单随功能一并提交。
+- [x] 创建成功后在**新开发对话**调用 `attach_artifact` 关联 PR，并用 `list_artifacts` 回读仓库与 URL；工具受阻明确标记关联未完成，不以回复链接代替。
+- [x] 检查实际 PR／CI 状态，交付 PR 链接、提交、验证结果和人工验收步骤；**保持未合并、未发布**。如果没有生产写入或真实人工反馈，必须如实报告。
 
 本清单的完成范围止于可审阅 PR 与验收交付，后续合并／生产发布需要对应授权；不增设后台监控任务。
 
@@ -135,3 +135,5 @@ node --test scripts/check-pr-tests.mjs
 - 全量E2E出现连续失败后停止：34通过、12失败、1中断、2跳过、451未运行。员工停用及房型变更后旧报价夹具4项在main复现，其余失败未全部归因；完整浏览器回归仍有缺口，不以定向成功替代全量成功。
 - 人工环境：[会员产品页](http://127.0.0.1:4181/settings/memberships)，本机合成账号admin／operator，密码均为demo-pass-2026。API4111，独立合成库，不随测试reset清空。已备1800元20间夜6个月双房型样例；桌面及390px手机截图已检查。
 - 日志、main对照源码、截图及本地交付记录保留于已忽略的`.local-workspace/membership-product-management/`。人工业务验收与真实付费模型问答未执行，生产未连接／未写入。
+
+交付：已创建[Draft PR #153](https://github.com/qintopia-agent-studio/GreenPMS/pull/153)，已在开发对话关联并回读确认仓库与URL；保留Draft供审阅。在线检查的最终状态与提交记录在本地交付记录及对话，不代表人工验收通过。
