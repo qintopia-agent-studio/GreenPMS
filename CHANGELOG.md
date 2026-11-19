@@ -2,6 +2,13 @@
 
 每个部署版本使用独立 Git 标签和 GitHub Release，优化说明与升级说明随代码保存。版本规则及发布步骤见 [发布约定](docs/releases/README.md)。
 
+## [1.22.1](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.22.0...v1.22.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **room-status:** 按最后一晚实际入住房间显示待退提醒 ([#157](https://github.com/qintopia-agent-studio/GreenPMS/issues/157)) ([283583b](https://github.com/qintopia-agent-studio/GreenPMS/commit/283583b4cb8a8c273a4feaec89b373c84f0b7b36))
+
 ## [1.22.0](https://github.com/qintopia-agent-studio/GreenPMS/compare/v1.21.0...v1.22.0) (2026-11-17)
 
 
