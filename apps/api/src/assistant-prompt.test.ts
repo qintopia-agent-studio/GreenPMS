@@ -28,6 +28,7 @@ describe("versioned employee operating knowledge", () => {
 
   // These are required evidence supplied to the model, not proof of a live model's answer quality.
   const scenarios = [
+    { question: "老会员怎样绑定服务号，何时收到到期提醒？", ids: ["wechat-member-entitlements"], facts: ["回拨档案预留手机号", "换绑先解除原微信", "金额和住客资料不展示", "固定提前60天和30天", "一次性授权对应一条"] },
     { question: "员工能改20夜半年套餐吗，停售影响旧会员吗？", ids: ["membership-catalog"], facts: ["员工和Token不能管理", "20夜用了5+3剩12", "DRAFT也已锁定规格", "停售不影响老会员", "补录须选真实历史版本", "未查询不能猜商品或余额"] },
     { question: "2800元通用会员是标间30夜再加大床30夜吗，何时到期？", ids: ["membership-sale", "member-stay"], facts: ["2800元", "共享30间夜", "一年期限", "共用8间夜、余22", "不是各有30夜", "不自动转换旧会员"] },
     { question: "通用会员从标间换到大床要填临时安排吗，余额不足怎么办？", ids: ["member-stay"], facts: ["两房型正常入住与换房不需临时安排原因", "不重发权益或重算有效期", "覆盖不足时查看逐段覆盖和未覆盖部分报价", "其他房型仍按原规则核对"] },

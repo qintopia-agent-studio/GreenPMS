@@ -11,3 +11,4 @@ export * from "./staff-profile-manifest.ts";
 export * from "./current-order-guests.ts";
 
 export { listOrders, type OrderListQuery } from "./order-list.ts";
+export * from "./wechat-member-view.ts";

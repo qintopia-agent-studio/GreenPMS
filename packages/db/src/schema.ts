@@ -9,6 +9,19 @@ type NullableInsert<T> = ColumnType<T | null, T | null | undefined, T | null>;
 type Json = ColumnType<unknown, unknown, unknown>;
 
 export interface Database {
+  wechat_member_sessions: {
+    secret_hash: string; app_id: string; property_id: string; open_id: string; expires_at: Timestamp;
+    pairing_hash: NullableInsert<string>; pairing_expires_at: NullableGeneratedTimestamp;
+  };
+  wechat_member_bindings: {
+    id: string; app_id: string; property_id: string; member_id: string; open_id: string | null;
+    verified_by: string; verification: "IN_PERSON" | "REGISTERED_PHONE"; bound_at: GeneratedTimestamp;
+    subscription_template: NullableInsert<string>; revoked_at: NullableGeneratedTimestamp; revoked_by: NullableInsert<string>;
+  };
+  wechat_member_expiry_notices: {
+    app_id: string; order_id: string; expires_on: LocalDate; lead_days: number; binding_id: string;
+    state: "UNKNOWN" | "ACCEPTED" | "REJECTED" | "RETRY"; attempted_at: GeneratedTimestamp; error_code: NullableInsert<number>;
+  };
   external_payment_allocations: { id: string; bill_id: string; collection_fact_id: string; amount_minor: number; command_id: NullableInsert<string>; origin: "CONFIRMED" | "HISTORICAL_LINK"; created_at: GeneratedTimestamp };
   external_payment_allocation_releases: { id: string; allocation_id: string; reversal_fact_id: string; command_id: string; created_at: GeneratedTimestamp };
   retained_funds: { id: string; property_id: string; source_order_id: string; source_fact_id: string; bill_id: string; owner_name: string; owner_contact: string; confirmation_note: string; amount_minor: number; command_id: string; created_at: GeneratedTimestamp };

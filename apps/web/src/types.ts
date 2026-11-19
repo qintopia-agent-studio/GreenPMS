@@ -421,6 +421,7 @@ export interface MemberSummaryDto {
 }
 
 export interface MetaDto {
+  wechatMemberPropertyId?: string;
   properties: PropertyDto[];
   inventoryUnits: InventoryUnitDto[];
   pricingPolicyVersions: PricingPolicyVersionDto[];

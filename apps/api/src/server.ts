@@ -1,3 +1,5 @@
+import { officialAccount, wechatMemberConfig, type WechatMemberConfig, type WechatService } from "./wechat-official-account.ts";
+import { registerWechatMemberCenter } from "./wechat-member-center.ts";
 import { membershipProductsForProperty } from "../../../packages/db/src/membership-catalog.ts";
 import { registerMembershipCatalog } from "./membership-catalog.ts";
 import { registerDashboard } from "./dashboard.ts";
@@ -550,7 +552,7 @@ async function replayHistoricalCreateOrderPreview(
   return { preview, receipt };
 }
 
-export async function buildServer(db: Kysely<Database>, options: { assistantTransport?: ModelTransport } = {}) {
+export async function buildServer(db: Kysely<Database>, options: { assistantTransport?: ModelTransport; wechatMember?: { config: WechatMemberConfig; service: WechatService } } = {}) {
   const allowedWebOrigins = webOriginAllowlist();
   const app = Fastify({ ajv: { customOptions: { discriminator: true } }, logger: { level: process.env.LOG_LEVEL ?? "info" }, genReqId: () => crypto.randomUUID() });
   const receiptSerializerCompiler = createReceiptSerializerCompiler();
@@ -676,6 +678,8 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
     return projectMeResponse(principal);
   });
 
+  const wechatConfig = options.wechatMember?.config ?? wechatMemberConfig();
+  registerWechatMemberCenter(app, db, wechatConfig, options.wechatMember?.service ?? (wechatConfig ? officialAccount(wechatConfig) : undefined));
   registerAccountManagement(app, db);
   registerAssistant(app, db, options.assistantTransport);
   registerRoomCatalog(app, db);
@@ -697,7 +701,8 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
       propertyIds.length ? db.selectFrom("pricing_policy_versions").selectAll().where("property_id", "in", propertyIds).orderBy("code").execute() : [],
       Promise.all(propertyIds.map(id => membershipProductsForProperty(db, id))).then(groups => groups.flat())
     ]);
-    return { properties, inventoryUnits: await projectCatalogUnitNames(db, units), pricingPolicyVersions: policies, members: [], memberContracts: [], membershipProducts };
+    return { ...(wechatConfig && propertyIds.includes(wechatConfig.propertyId) ? { wechatMemberPropertyId: wechatConfig.propertyId } : {}),
+      properties, inventoryUnits: await projectCatalogUnitNames(db, units), pricingPolicyVersions: policies, members: [], memberContracts: [], membershipProducts };
   });
 
   app.get("/api/v1/properties/:id/availability", {

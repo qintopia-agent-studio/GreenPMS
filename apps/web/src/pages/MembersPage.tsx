@@ -1,3 +1,4 @@
+import { WechatMemberBinding } from "../components/WechatMemberBinding";
 import { membershipPeriodLabel } from "./MembershipCatalogPage";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { BadgeCheck, CalendarClock, CircleDollarSign, CreditCard, FilePenLine, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
@@ -1175,7 +1176,7 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
 export function MembersPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { principal, propertyId, refreshMeta } = useWorkspace();
+  const { principal, propertyId, meta, refreshMeta } = useWorkspace();
   const initialDeepLink = useRef(parseMemberDeepLink(location.search));
   const initialStayUpgradeCreation = useRef(stayUpgradeMemberCreationState(parseStayUpgradeMemberCreationIntent(location.search)));
   const memberParams = new URLSearchParams(location.search);
@@ -1538,6 +1539,7 @@ export function MembersPage() {
       </div>
       {currentMemberId ? <button type="button" className="button button-secondary member-list-return" onClick={() => { setSelectedMemberId(""); changeMemberUrl({ memberId: undefined }); }}>返回会员列表</button> : null}
       {loadingMember ? <LoadingBlock label="正在载入会员档案" /> : member ? <div className="member-detail-stack">
+        {meta.wechatMemberPropertyId === propertyId && canCreateMember && principal.credentialType === "SESSION" && <WechatMemberBinding key={propertyId + member.member.id} propertyId={propertyId} memberId={member.member.id} name={member.member.full_name} />}
         <MemberProfile member={member} canCorrect={canCorrectMemberRecords} disabled={commandsBlocked} onCorrect={openMemberCorrections} deletionControl={canCorrectMemberRecords && principal.credentialType === "SESSION" ? <MemberDeletionButton key={`${propertyId}:${member.member.id}`} propertyId={propertyId} memberId={member.member.id} disabled={commandsBlocked} onDeleted={() => { setSelectedMemberId(""); setMember(undefined); setCommandNotice("会员已删除，原档案与删除记录已保留。"); refresh(); }} /> : undefined} />
         {principalCan(principal, propertyId, "CREATE_ORDER") ? <div className="member-stay-continuation"><InfoHint label="安排住宿说明" text="前往房态选择日期与房间，自动带入当前会员。" /><button type="button" className="button button-primary" disabled={commandsBlocked} onClick={() => navigate(memberStayHref(propertyId, member.member.id))} data-testid="arrange-member-stay"><CalendarClock aria-hidden="true" size={17} />安排住宿</button></div> : null}
         <MemberEntitlementsPanel view={member} disabled={commandsBlocked} canCorrect={canCorrectEntitlementBalance} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />

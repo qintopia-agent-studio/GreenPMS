@@ -1142,3 +1142,4 @@ export class DomainError extends Error {
     if (details !== undefined) this.details = details;
   }
 }
+export * from "./wechat-member.ts";

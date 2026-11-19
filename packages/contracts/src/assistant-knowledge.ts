@@ -13,10 +13,14 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-17.2";
+export const assistantKnowledgeRevision = "2026-11-19.1";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
+  { id: "wechat-member-entitlements", title: "服务号查会员权益、绑定与到期提醒", commands: [],
+    sources: ["docs/implementation/spec-wechat-member-entitlements.md", "apps/web/src/components/WechatMemberBinding.tsx"],
+    content: `开通后，会员从服务号「我的权益」取绑定码。有建档权限的员工在会员详情点「服务号绑定」，现场核身或回拨档案预留手机号，核对本人绑定码。换绑先解除原微信。只查本人间夜、床夜及预留、核销、返还。金额和住客资料不展示。每份权益固定提前60天和30天提醒；推送须有匹配模板及微信授权，一次性授权对应一条。送达需核实。`
+  },
   { id: "membership-catalog", title: "会员产品设置与历史权益", commands: ["MANAGE_MEMBERSHIP_CATALOG"],
     sources: ["docs/implementation/spec-membership-product-management.md", "apps/web/src/pages/MembershipCatalogPage.tsx"],
     content: `设置→会员产品：管理员新增、行内编辑/复制/停售/恢复；员工和Token不能管理。名称、正整数元售价、同类房型、总夜数和月／年期限可设置，间夜与床夜不混用。同范围共享额度，20夜用了5+3剩12。DRAFT也已锁定规格；编辑只影响新订单，停售不影响老会员。补录须选真实历史版本，无匹配则停止。期限一次加日历月／年，月末取月底，到期日可用。在售看本店目录，未查询不能猜商品或余额。`
@@ -164,23 +168,23 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
   {
     id: "member-profile", title: "会员档案、查重与误建删除", commands: ["CREATE_MEMBER", "CORRECT_MEMBER_PROFILE"], accountActions: ["DELETE_MEMBER"],
     sources: ["docs/implementation/member-directory-overview.md", "docs/implementation/spec-step-2a-member-directory.md", "待开发项/QinTopia-PMS-会员资料字段调整-实施规格.md", "待开发项/QinTopia-PMS-第9步-9.6-账号管理与误建会员删除-实施规格.md", "apps/web/src/pages/MembersPage.tsx"],
-    content: `会员列表按最近加入本店排序，依据加入当前门店的时间，不是买卡或最近消费时间。左侧名单直接显示每份会员权益的状态、剩余间夜或床夜及对应到期日，不混加不同权益。待生效尚未发放显示—，已到期或作废权益不可用，无会员订单显示未购买。列表余额已扣除冻结占用；办理仍以服务端实时核对为准。桌面进入时右侧默认展开首位会员详情，点击左侧会员直接切换详情办理业务，搜索和分页保持可见；手机进入详情后可返回名单，保留搜索、分页和浏览位置。
-在会员页按姓名、昵称、手机号或微信号搜索，确认不是已有会员再新建。手机号需要查重，证件号可选；相同姓名不代表同一人。新建档案本身不产生可住宿权益。
-打开会员档案查看合同、余额、收款及关联住宿。资料错误通过有权限的“修改会员记录”办理，填写原因并核对；不要为改资料另建重复会员。管理员可删除无业务记录或已办卡但从未核销的误建会员；先取消关联预订，存在误录收款时必须额外确认其为误录，系统追加冲销并作废未用权益，保留历史而不是实际退款。有历史核销、住宿转会员或其他禁止关联时不能删除；真正收过的钱需要退回时，不用误建删除冒充退款。`
+    content: `会员列表按最近加入本店的时间排序，与购卡、消费时间无关。左侧列每份会员权益的状态、剩余夜数及到期日，不混加不同权益。待发放显示—，到期或作废不可用，无订单显示未购买。余额已扣除冻结占用，办理时实时核对。桌面右侧默认展开首位会员详情，点名单切换，搜索与分页仍可见。手机返回名单保留搜索、分页和浏览位置。
+建档前按姓名、昵称、手机号或微信号搜索。手机号查重，证件号可选；同名须核实。建档不产生住宿权益。档案可查合同、余额、收款和关联住宿。资料有误用“修改会员记录”，需权限、原因及核对，勿另建档。
+管理员可删除无业务或已办卡但从未核销的误建会员。先取消预订；误录收款须额外确认，追加冲销并作废未用权益，保留历史。历史核销、住宿转会员等禁止关联会阻止删除；实际收款退回须办理退款。`
   },
   {
     id: "membership-sale", title: "会员订单、收款、生效、更正与空白订单取消", commands: ["CREATE_MEMBERSHIP_ORDER", "RECORD_MEMBERSHIP_PAYMENT", "CORRECT_MEMBERSHIP_PAYMENT", "ACTIVATE_MEMBERSHIP_ORDER", "CANCEL_MEMBERSHIP_ORDER"],
     sources: ["docs/implementation/spec-private-bath-shared-membership.md", "docs/implementation/spec-cancel-empty-membership-order.md", "docs/implementation/spec-step-2b-membership-orders.md", "apps/web/src/pages/MembersPage.tsx", "docs/implementation/spec-payment-allocation-retained-funds.md"],
-    content: `会员档案中创建会员订单，按当前发布产品核对权益、房型、价格、有效期；调价填原因。助手不承诺固定价格。真实企微收款须核对归属，会员收款整笔独占，不支持住宿多单分配。
+    content: `会员档案建单，按本店在售规格核对权益、房型、价格和期限；调价填原因。企微收款核对归属，会员收款整笔独占，不参与住宿多单分配。
 原通用会员2800元、共享30间夜和一年期限按订单快照保留；新办核对本店在售产品，不自动转换旧会员。
-至少有一笔有效收款才能明确办理生效；建档、建单、收款不等于权益生效。收款差额按页面核对，不自动改价或宣称结清。
+至少一笔有效收款后另办生效。建档、建单或收款均未生效。差额按页面核对，不自动改价或结清。
 误建空白单在会员档案对应订单点“取消订单”、填原因并核对确认。仅待生效、从未有任何收款记录、未关联合同或权益可取消；收款已冲销为零也不属于空白订单。取消保留订单、原因、操作人与时间，显示“已取消”，隐藏差额及收款/生效操作，不影响其他正常订单及核销。不能用删除会员或“撤销错误办卡并重新升级”代替取消草稿。
 错记收款用“更正企微收款”，原记录及更正历史保留。会员退费尚无通用功能，不能用住宿退款或留存冒充。`
   },
   {
     id: "member-stay", title: "会员住宿覆盖、余额与临时其他整间房", commands: ["CORRECT_MEMBER_ENTITLEMENT_BALANCE"],
     sources: ["docs/implementation/spec-private-bath-shared-membership.md", "docs/implementation/spec-step-2c-member-balances-and-stays.md", "待开发项/QinTopia-PMS-会员临时安排其他整间房型-实施规格.md", "apps/web/src/pages/MembersPage.tsx"],
-    content: `安排住宿选会员，核对房型、有效日期、权益及补差。预订冻结、入住核销；剩余夜数不是现金，有会员档案不保证所有日期房型免费。
+    content: `会员住宿核对房型、日期、权益和补差。预订冻结、入住核销。余夜是权益，免费范围以覆盖结果为准。
 原30夜通用会员在独卫标间与独卫大床每间每晚扣1间夜；例如标间5晚加大床3晚，共用8间夜、余22，不是各有30夜。其他规格按订单快照扣夜。两房型正常入住与换房不需临时安排原因，不重发权益或重算有效期。其他房型仍按原规则核对。
 覆盖不足时查看逐段覆盖和未覆盖部分报价；多份权益重叠须先处理歧义，助手不指定消耗顺序。余额更正在会员权益区填目标剩余数与原因、核对提交，不改档案数字替代流水。
 临时安排其他整间房：房态选空整房、建单选会员，勾选临时安排并填原因；唯一有效整房权益须覆盖全部日期，每晚扣原权益1间夜，只占实际房间，不加差价、不改未来适用房型。余额不足不回退现金补差，不用于床位与整房互换、不新增审批。`

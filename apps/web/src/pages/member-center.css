@@ -1,0 +1,123 @@
+.member-center {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+  color: var(--text);
+}
+.member-center header {
+  padding: .75rem .25rem 1rem;
+}
+.member-center header span {
+  color: var(--brand);
+  font-weight: 600;
+}
+.member-center h1 {
+  margin: .3rem 0;
+  font-size: 1.85rem;
+}
+.member-center h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+.member-center section {
+  margin-bottom: .85rem;
+  padding: 1.1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.member-center p {
+  margin: .6rem 0;
+  line-height: 1.6;
+}
+.member-center button,
+.member-center a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  margin: .25rem .4rem .25rem 0;
+  padding: .5rem .8rem;
+  color: var(--brand);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+}
+.member-center .member-primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: white;
+}
+.member-center .member-card {
+  border-top: 3px solid var(--brand);
+}
+.member-card-head,
+.member-center li > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .6rem;
+}
+.member-card-head span {
+  color: var(--brand);
+  white-space: nowrap;
+}
+.member-center .member-rooms,
+.member-center small,
+.member-dates dt,
+.member-nights span {
+  color: var(--muted);
+}
+.member-nights {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: .9rem 0;
+}
+.member-nights span,
+.member-center small {
+  display: block;
+}
+.member-nights strong {
+  font-size: 2rem;
+  font-variant-numeric: tabular-nums;
+}
+.member-nights > div:first-child strong {
+  color: var(--brand);
+}
+.member-dates {
+  padding-top: .65rem;
+  border-top: 1px solid var(--border);
+  margin: 0;
+  font-size: .86rem;
+}
+.member-dates > div {
+  display: grid;
+  grid-template-columns: 5em 1fr;
+  gap: .4rem;
+  margin: .3rem 0;
+}
+.member-dates dd {
+  margin: 0;
+}
+.member-center ol {
+  padding: 0;
+  margin: .5rem 0 0;
+  list-style: none;
+}
+.member-center li {
+  padding: .65rem 0;
+}
+.member-center li + li {
+  border-top: 1px solid var(--border);
+}
+.member-center small {
+  margin-top: .25rem;
+}
+.member-pair-code {
+  font-family: monospace;
+  font-size: 1.45rem;
+  letter-spacing: .08em;
+}
+.member-center wx-open-subscribe {
+  display: block;
+  min-height: 44px;
+}
