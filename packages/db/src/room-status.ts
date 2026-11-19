@@ -1188,16 +1188,18 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     const operationalOrderIds = operationalOrderCandidates
       .slice(0, ROOM_STATUS_OPERATIONAL_TASK_LIMIT)
       .map((row) => row.id);
+    // A due-out stay hands over its last occupied night. The departure date has no lodging Claim.
+    const operationalClaimDate = sql<string>`case
+      when "order".status = 'CHECKED_IN' and "order".departure_date = ${businessDate}::date
+      then "order".departure_date - 1 else ${businessDate}::date end`;
     const operationalOrderRows = operationalOrderIds.length === 0 ? [] : await trx.selectFrom("orders as order")
       .innerJoin("stays as stay", "stay.order_id", "order.id")
       .innerJoin("stay_segments as segment", "segment.stay_id", "stay.id")
       .leftJoin("inventory_claims as operational_claim", (join) => join
-        .on((expression) => expression("operational_claim.source_id", "in", expression
-          .selectFrom("stay_segments as claim_segment")
-          .select("claim_segment.id")
-          .whereRef("claim_segment.stay_id", "=", "segment.stay_id")))
+        .onRef("operational_claim.source_id", "=", "segment.id")
+        .onRef("operational_claim.property_id", "=", "order.property_id")
         .on("operational_claim.source_type", "=", "ORDER_SEGMENT")
-        .on("operational_claim.service_date", "=", businessDate)
+        .on("operational_claim.service_date", "=", operationalClaimDate)
         .on("operational_claim.active", "=", true))
       .innerJoin("inventory_units as unit", "unit.id", "segment.inventory_unit_id")
       .leftJoin("amendments as amendment", "amendment.id", "segment.amendment_id")
@@ -1210,7 +1212,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         "segment.arrival_date as segment_arrival_date", "segment.departure_date as segment_departure_date",
         "segment.inventory_unit_id", "segment.created_at as segment_created_at", "amendment.command_id as segment_command_id",
         "unit.parent_room_id", "unit.code as unit_code", "unit.name as unit_name",
-        "operational_claim.id as operational_claim_id"
+        "operational_claim.id as operational_claim_id", "operational_claim.inventory_unit_id as occupied_unit_id",
+        "operational_claim.room_id as occupied_room_id"
       ])
       .where("order.property_id", "=", options.propertyId)
       .where("order.id", "in", operationalOrderIds)
@@ -1276,7 +1279,6 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
     const operationalTaskSeeds: OperationalTaskSeed[] = [];
     const syntheticOccupancyEvents: ProjectionEvent[] = [];
     let partial = false;
-    let missingOperationalClaim = false;
     let inconsistentOperationalLifecycle = false;
     for (const rows of operationalOrderGroups.values()) {
       const order = rows[0]!;
@@ -1302,16 +1304,20 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         exceptionReason = "订单状态与住宿状态不一致";
         inconsistentOperationalLifecycle = true;
       }
-      const segment = [...rows].reverse().find((row) => row.segment_arrival_date <= businessDate && businessDate < row.segment_departure_date)
-        ?? rows.at(-1)!;
       const departureDayInHouse = order.order_status === "CHECKED_IN" && order.order_departure_date === businessDate;
       const dateCoveredByOrder = order.order_arrival_date <= businessDate && businessDate < order.order_departure_date;
-      const claimId = segment.operational_claim_id;
-      const missingCurrentClaim = dateCoveredByOrder && !claimId;
-      if (missingCurrentClaim) {
+      const occupiedRows = rows.filter((row) => row.operational_claim_id !== null);
+      const departureClaim = departureDayInHouse && occupiedRows.length === 1 ? occupiedRows[0] : undefined;
+      const segment = (departureDayInHouse ? departureClaim : [...rows].reverse().find((row) =>
+        row.segment_arrival_date <= businessDate && businessDate < row.segment_departure_date)) ?? rows.at(-1)!;
+      const unitId = departureClaim?.occupied_unit_id ?? segment.inventory_unit_id;
+      const claimId = departureDayInHouse ? null : occupiedRows[0]?.operational_claim_id ?? null;
+      const claimIssue = departureDayInHouse && !departureClaim ? "无法核对最后一晚的唯一住宿占用记录"
+        : dateCoveredByOrder && !claimId ? `营业日 ${businessDate} 的住宿订单占用记录缺失` : null;
+      if (claimIssue) {
         taskKind = "EXCEPTION";
-        exceptionReason = `营业日 ${businessDate} 的住宿订单占用记录缺失`;
-        missingOperationalClaim = true;
+        exceptionReason = claimIssue;
+        partial = true;
       }
       blocking = departureDayInHouse || dateCoveredByOrder;
       const orderRef = reference("ORDER", order.order_id, `Order ${order.order_id}`, `/orders/${order.order_id}`);
@@ -1320,6 +1326,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       const sourceMetadataDamageReason = roomStatusSourceMetadataDamageReason(sourceKind, order);
       const sourceMetadataDamaged = sourceMetadataDamageReason !== null;
       if (sourceMetadataDamaged) partial = true;
+      const validTaskSource = lifecycleConsistent && !claimIssue && !sourceMetadataDamaged;
       const freeStayReason = sourceKind === "FREE_STAY" ? order.free_stay_reason : null;
       const taskReason = [
         exceptionReason,
@@ -1329,8 +1336,8 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       ].filter(Boolean).join("；") || null;
       const projectedOccupants = occupantsByOrder.get(order.order_id) ?? [];
       const taskEvent: ProjectionEvent = {
-        actualInventoryUnitId: segment.inventory_unit_id,
-        roomId: segment.parent_room_id ?? segment.inventory_unit_id,
+        actualInventoryUnitId: unitId,
+        roomId: departureClaim?.occupied_room_id ?? segment.parent_room_id ?? unitId,
         serviceDate: businessDate,
         sourceStartDate: order.order_arrival_date,
         sourceEndDate: order.order_departure_date,
@@ -1339,9 +1346,9 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         sourceKey: `order-task:${order.order_id}:${taskKind}`,
         sourceKind,
         ...orderSourceFields,
-        status: missingCurrentClaim || !lifecycleConsistent || sourceMetadataDamaged ? "UNKNOWN" : order.order_status === "RESERVED" ? "RESERVED" : "IN_HOUSE",
+        status: !validTaskSource ? "UNKNOWN" : order.order_status === "RESERVED" ? "RESERVED" : "IN_HOUSE",
         attention: null,
-        operationalAttention: !missingCurrentClaim && lifecycleConsistent && !sourceMetadataDamaged
+        operationalAttention: validTaskSource
           ? operationalAttentionForOrder({
             orderStatus: order.order_status,
             stayStatus: order.stay_status,
@@ -1350,26 +1357,26 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           }, businessDate)
           : null,
         label: `${sourceKind === "FREE_STAY" ? "免费入住" : "订单"} ${order.order_id}`,
-        primaryOccupantLabel: lifecycleConsistent && !missingCurrentClaim && !sourceMetadataDamaged
+        primaryOccupantLabel: validTaskSource
           ? projectedOccupants[0]?.nickname ?? primaryOccupantLabel(order.primary_guest_snapshot)
           : null,
-        occupants: lifecycleConsistent && !missingCurrentClaim && !sourceMetadataDamaged ? projectedOccupants : [],
+        occupants: validTaskSource ? projectedOccupants : [],
         reason: taskReason,
         blocking,
         current: true,
-        blockingFactKind: departureDayInHouse && lifecycleConsistent && !sourceMetadataDamaged
+        blockingFactKind: departureDayInHouse && validTaskSource
           ? "DUE_OUT"
           : claimId
             ? "CLAIM"
             : blocking
               ? "LODGING_ORDER"
               : null,
-        claimId: departureDayInHouse ? null : claimId ?? null,
+        claimId,
         references: [
-          ...(!departureDayInHouse && claimId ? [reference("CLAIM", claimId, `Claim ${claimId}`)] : []),
+          ...(claimId ? [reference("CLAIM", claimId, `Claim ${claimId}`)] : []),
           orderRef,
           reference("STAY", order.stay_id, `Stay ${order.stay_id}`),
-          reference("INVENTORY_UNIT", segment.inventory_unit_id, inventoryRows.find((unit) => unit.id === segment.inventory_unit_id)?.name ?? `${segment.unit_code} · ${segment.unit_name}`)
+          reference("INVENTORY_UNIT", unitId, inventoryRows.find((unit) => unit.id === unitId)?.name ?? `${segment.unit_code} · ${segment.unit_name}`)
         ],
         histories: [{
           action: "ORDER_TASK_SOURCE",
@@ -1384,7 +1391,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
         targetReference: orderRef,
         orderId: order.order_id
       };
-      if (!missingCurrentClaim && lifecycleConsistent && !sourceMetadataDamaged) {
+      if (validTaskSource) {
         operationalTaskSeeds.push({
           taskKind,
           businessDate,
@@ -1393,18 +1400,16 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
           event: taskEvent
         });
       }
-      if (departureDayInHouse && (!lifecycleConsistent || sourceMetadataDamaged)) {
+      if (departureDayInHouse && !validTaskSource) {
         syntheticOccupancyEvents.push({
           ...taskEvent,
           sourceStartDate: businessDate,
           sourceEndDate: dateAfter(businessDate),
           sourceKey: `departure-day-in-house:${order.order_id}:${businessDate}`,
-          blockingFactKind: lifecycleConsistent && !sourceMetadataDamaged ? "DUE_OUT" : "LODGING_ORDER",
-          claimId: null,
-          references: taskEvent.references.filter((item) => item.type !== "CLAIM")
+          blockingFactKind: "LODGING_ORDER"
         });
       }
-      else if (missingCurrentClaim) {
+      else if (claimIssue) {
         syntheticOccupancyEvents.push({
           ...taskEvent,
           sourceKey: `missing-order-claim:${order.order_id}:${businessDate}`
@@ -2161,7 +2166,7 @@ export async function getRoomStatusBoard(db: Kysely<Database>, options: {
       amendmentsByOrder.set(amendment.order_id, rows);
     }
 
-    partial = partial || missingOperationalClaim || inconsistentOperationalLifecycle || operationalOrdersTruncated || inactiveUnitsTruncated;
+    partial = partial || inconsistentOperationalLifecycle || operationalOrdersTruncated || inactiveUnitsTruncated;
     const projectActiveArrearsEvent = (
       event: ProjectionEvent,
       target: "CURRENT_GRID" | "CURRENT_OPERATIONAL_TASK" = "CURRENT_GRID"
