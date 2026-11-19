@@ -5,6 +5,10 @@ export function memberFacingLabel(label: string, fallback = "住宿会员权益"
 
 export type MemberCardStatus = "ACTIVE" | "PENDING" | "EXPIRED" | "VOIDED" | "CANCELLED";
 export type MemberNightUnit = "ROOM_NIGHT" | "BED_NIGHT";
+export function mainlandMemberPhone(input: string): string | undefined {
+  const number = input.replace(/[\s()-]/g, "").replace(/^(?:\+86|0086|86)/, "");
+  return /^1[3-9]\d{9}$/.test(number) ? number : undefined;
+}
 export interface MemberEntitlementCard {
   product: string;
   rooms: string[];
@@ -31,5 +35,6 @@ export interface MemberCenterView {
   next: string | null;
 }
 export type MemberCenterState =
-  | { status: "DISABLED" | "SIGNED_OUT" | "UNBOUND" }
+  | { status: "DISABLED" | "SIGNED_OUT" }
+  | { status: "UNBOUND"; smsAvailable: boolean }
   | { status: "BOUND"; view: MemberCenterView; remindersEnabled: boolean; subscribed: boolean };

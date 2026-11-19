@@ -112,11 +112,35 @@
 .member-center small {
   margin-top: .25rem;
 }
-.member-pair-code {
-  font-family: monospace;
-  font-size: 1.45rem;
-  letter-spacing: .08em;
+.member-sms {
+  display: grid;
+  gap: .45rem;
+  margin-top: 1.1rem;
 }
+.member-sms label {
+  font-weight: 600;
+}
+.member-sms input {
+  min-height: 44px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: .5rem .7rem;
+  font: inherit;
+  font-size: 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+}
+.member-sms-code {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: .5rem;
+}
+.member-sms button { justify-content: center; margin: 0; }
+.member-sms button:disabled { opacity: .55; }
+.member-sms .member-primary, .member-sms label + input { margin-bottom: .5rem; }
+.member-sms .member-primary { margin-top: .5rem; }
+.member-sms-help { font-size: .88rem; color: var(--muted); }
 .member-center wx-open-subscribe {
   display: block;
   min-height: 44px;

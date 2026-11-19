@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { MemberCenterState, MemberNightUnit } from "@qintopia/contracts";
+import { mainlandMemberPhone, type MemberCenterState, type MemberNightUnit } from "@qintopia/contracts";
 import "./member-center.css";
 
 const root = "/api/wechat/member";
 export async function memberRequest<T>(suffix = "", body?: object): Promise<T> {
   const reply = await fetch(root + suffix, { credentials: "same-origin", cache: "no-store",
     ...(body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) });
-  if (!reply.ok) throw new Error(reply.status === 403 ? "身份或绑定状态已变化，请重新打开我的权益。" : "暂时无法读取，请稍后再试。");
+  if (!reply.ok) {
+    if (reply.status === 403) throw new Error("身份或绑定状态已变化，请从服务号重新打开我的权益。");
+    if (reply.status === 429) throw new Error("操作过于频繁，请稍后再试。");
+    if (suffix.startsWith("/sms/")) {
+      if (reply.status === 503) throw new Error("本店短信验证暂不可用，请稍后再试。");
+      const detail = await reply.json().catch(() => undefined);
+      if (detail?.code === "VALIDATION_ERROR" && typeof detail.message === "string") throw new Error(detail.message);
+    }
+    throw new Error("暂时无法读取，请稍后再试。");
+  }
   return await reply.json() as T;
 }
 const unitName = (unit: MemberNightUnit) => unit === "ROOM_NIGHT" ? "间夜" : "床夜";
@@ -78,9 +87,60 @@ function Subscription({ subscribed, onChange }: { subscribed: boolean; onChange(
     {message && <p role="status">{message}</p>}</section>;
 }
 
+function PhoneBinding({ onBound }: { onBound(): Promise<void> }) {
+  const [phone, setPhone] = useState(""), [code, setCode] = useState("");
+  const [pending, setPending] = useState<"send" | "verify">(), [message, setMessage] = useState("");
+  const [retryAt, setRetryAt] = useState(0), [seconds, setSeconds] = useState(0);
+  const codeInput = useRef<HTMLInputElement>(null);
+  const number = mainlandMemberPhone(phone);
+  useEffect(() => {
+    if (!retryAt) return;
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((retryAt - Date.now()) / 1000));
+      setSeconds(left);
+      if (!left) setRetryAt(0);
+    };
+    tick();
+    const interval = window.setInterval(tick, 500);
+    return () => window.clearInterval(interval);
+  }, [retryAt]);
+  async function sendCode() {
+    if (!number || pending || seconds) return;
+    setPending("send"); setMessage("");
+    try {
+      const { retryAfterSeconds } = await memberRequest<{ retryAfterSeconds: number }>("/sms/request", { phone: number });
+      setCode(""); setSeconds(retryAfterSeconds); setRetryAt(Date.now() + retryAfterSeconds * 1000);
+      setMessage("如果号码与本店会员档案匹配，你将收到短信。验证码 5 分钟内有效。");
+      codeInput.current?.focus();
+    } catch (error) { setMessage(errorText(error)); }
+    finally { setPending(undefined); }
+  }
+  async function bind() {
+    if (!number || !/^\d{6}$/.test(code) || pending) return;
+    setPending("verify"); setMessage("");
+    try { await memberRequest("/sms/verify", { phone: number, code }); await onBound(); }
+    catch (error) { setMessage(errorText(error)); }
+    finally { setPending(undefined); }
+  }
+  return <section><h2>绑定我的会员档案</h2><p>首次使用，请验证办卡时预留的中国大陆手机号。绑定后，用这个微信即可查看住宿权益。</p>
+    <form className="member-sms" onSubmit={event => { event.preventDefault(); void bind(); }}>
+      <label htmlFor="member-phone">预留手机号</label>
+      <input id="member-phone" type="tel" autoComplete="tel" inputMode="tel" maxLength={32} value={phone}
+        readOnly={Boolean(pending)} onChange={e => { setPhone(e.target.value); setCode(""); setMessage(""); }} />
+      <label htmlFor="member-code">短信验证码</label>
+      <div className="member-sms-code"><input ref={codeInput} id="member-code" type="text" inputMode="numeric" autoComplete="one-time-code"
+        maxLength={6} placeholder="6 位数字" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} />
+        <button type="button" disabled={!number || Boolean(pending) || seconds > 0} onClick={() => void sendCode()}>
+          {pending === "send" ? "正在请求…" : seconds ? seconds + " 秒后重发" : "获取验证码"}</button></div>
+      {message && <p role="status">{message}</p>}
+      <button className="member-primary" type="submit" disabled={!number || code.length !== 6 || Boolean(pending)}>
+        {pending === "verify" ? "正在绑定…" : "同意绑定并查看权益"}</button>
+    </form><p className="member-sms-help">原号码已停用，可联系门店核实并更正会员档案。</p></section>;
+}
+
 export default function MemberCenterPage() {
   const [state, setState] = useState<MemberCenterState>(), [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
-  const [pair, setPair] = useState<{ code: string; expiresAt: string }>(), [confirmUnlink, setConfirmUnlink] = useState(false);
+  const [confirmUnlink, setConfirmUnlink] = useState(false);
   const readGeneration = useRef(0);
   const refresh = useCallback(async () => {
     const generation = ++readGeneration.current;
@@ -88,7 +148,6 @@ export default function MemberCenterPage() {
       const data = await memberRequest<MemberCenterState>();
       if (generation !== readGeneration.current) return;
       setState(data); setMessage("");
-      if (data.status !== "UNBOUND") setPair(undefined);
       if (data.status === "SIGNED_OUT" && wxBrowser() && location.hash !== "#auth-failed") location.replace(root + "/login");
     } catch(e) { if (generation === readGeneration.current) { setState(undefined); setMessage(errorText(e)); } }
   }, []);
@@ -112,10 +171,8 @@ export default function MemberCenterPage() {
     {message && <p role="alert">{message} <button onClick={() => void refresh()}>重新读取</button></p>}
     {state?.status === "DISABLED" && <p>本服务号尚未开通会员权益查询。</p>}
     {state?.status === "SIGNED_OUT" && <section><h2>验证微信身份</h2><p>请从秦托邦服务号打开「我的权益」。</p>{wxBrowser() && <a href={root + "/login"}>用当前微信继续</a>}</section>}
-    {state?.status === "UNBOUND" && <section><h2>绑定我的会员档案</h2><p>生成绑定码并向前台出示。异地办理可请前台回拨会员档案预留手机号核实本人。</p>
-      {pair && <p role="status"><strong className="member-pair-code">{pair.code}</strong><br />有效至 {new Date(pair.expiresAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</p>}
-      <button className="member-primary" disabled={busy} onClick={() => void act(async () => setPair(await memberRequest("/pair", {})))}>{pair ? "重新生成绑定码" : "同意绑定并生成绑定码"}</button>
-      <button onClick={() => void refresh()}>已完成核验</button></section>}
+    {state?.status === "UNBOUND" && (state.smsAvailable ? <PhoneBinding onBound={refresh} />
+      : <section><h2>绑定我的会员档案</h2><p>本店尚未开通短信验证，请稍后再来。</p></section>)}
     {bound && <>
       {bound.view.cards.length === 0 && <p>当前没有已办理的住宿权益。</p>}
       {bound.view.cards.map((card, index) => (
@@ -148,7 +205,7 @@ export default function MemberCenterPage() {
         })}>查看更多明细</button>}</section>
       {bound.remindersEnabled && <Subscription subscribed={bound.subscribed} onChange={refresh} />}
       {confirmUnlink ? <section><p>解除后，当前微信将停止查询和接收提醒。</p><button onClick={() => setConfirmUnlink(false)}>保留绑定</button>
-        <button disabled={busy} onClick={() => void act(async () => { await memberRequest("/unlink", {}); setPair(undefined); setConfirmUnlink(false); await refresh(); })}>确认解除</button></section>
+        <button disabled={busy} onClick={() => void act(async () => { await memberRequest("/unlink", {}); setConfirmUnlink(false); await refresh(); })}>确认解除</button></section>
         : <button onClick={() => setConfirmUnlink(true)}>解除微信绑定</button>}</>}
   </main>;
 }

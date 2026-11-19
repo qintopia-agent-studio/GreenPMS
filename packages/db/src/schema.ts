@@ -15,8 +15,12 @@ export interface Database {
   };
   wechat_member_bindings: {
     id: string; app_id: string; property_id: string; member_id: string; open_id: string | null;
-    verified_by: string; verification: "IN_PERSON" | "REGISTERED_PHONE"; bound_at: GeneratedTimestamp;
+    verified_by: string | null; verification: "IN_PERSON" | "REGISTERED_PHONE" | "SMS_OTP"; bound_at: GeneratedTimestamp;
     subscription_template: NullableInsert<string>; revoked_at: NullableGeneratedTimestamp; revoked_by: NullableInsert<string>;
+  };
+  wechat_member_sms_challenges: {
+    id: string; app_id: string; property_id: string; session_hash: string; wechat_key: string; phone_key: string;
+    member_id: string | null; code_mac: string; attempts_left: ColumnType<number, number | undefined, number>; issued_at: GeneratedTimestamp;
   };
   wechat_member_expiry_notices: {
     app_id: string; order_id: string; expires_on: LocalDate; lead_days: number; binding_id: string;

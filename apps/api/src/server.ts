@@ -1,5 +1,6 @@
 import { officialAccount, wechatMemberConfig, type WechatMemberConfig, type WechatService } from "./wechat-official-account.ts";
 import { registerWechatMemberCenter } from "./wechat-member-center.ts";
+import { tencentMemberSms, type MemberSms } from "./tencent-member-sms.ts";
 import { membershipProductsForProperty } from "../../../packages/db/src/membership-catalog.ts";
 import { registerMembershipCatalog } from "./membership-catalog.ts";
 import { registerDashboard } from "./dashboard.ts";
@@ -552,7 +553,7 @@ async function replayHistoricalCreateOrderPreview(
   return { preview, receipt };
 }
 
-export async function buildServer(db: Kysely<Database>, options: { assistantTransport?: ModelTransport; wechatMember?: { config: WechatMemberConfig; service: WechatService } } = {}) {
+export async function buildServer(db: Kysely<Database>, options: { assistantTransport?: ModelTransport; wechatMember?: { config: WechatMemberConfig; service: WechatService; sms?: MemberSms } } = {}) {
   const allowedWebOrigins = webOriginAllowlist();
   const app = Fastify({ ajv: { customOptions: { discriminator: true } }, logger: { level: process.env.LOG_LEVEL ?? "info" }, genReqId: () => crypto.randomUUID() });
   const receiptSerializerCompiler = createReceiptSerializerCompiler();
@@ -679,7 +680,12 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
   });
 
   const wechatConfig = options.wechatMember?.config ?? wechatMemberConfig();
-  registerWechatMemberCenter(app, db, wechatConfig, options.wechatMember?.service ?? (wechatConfig ? officialAccount(wechatConfig) : undefined));
+  let sms = options.wechatMember?.sms;
+  if (!options.wechatMember && wechatConfig) {
+    try { sms = tencentMemberSms(); }
+    catch { app.log.warn("会员短信配置不完整，新会员绑定暂未开通。"); }
+  }
+  registerWechatMemberCenter(app, db, wechatConfig, options.wechatMember?.service ?? (wechatConfig ? officialAccount(wechatConfig) : undefined), sms);
   registerAccountManagement(app, db);
   registerAssistant(app, db, options.assistantTransport);
   registerRoomCatalog(app, db);

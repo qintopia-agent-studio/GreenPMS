@@ -187,7 +187,7 @@ function normalizeCommandResult(
 export const api = {
   wechatBinding: (property: string, member: string) => request<{ enabled: boolean; bindingId?: string | null }>(
     `/api/v1/wechat-member-bindings/${encodeURIComponent(property)}/${encodeURIComponent(member)}`),
-  changeWechatBinding: (property: string, member: string, change: { action: "BIND"; code: string; method: "IN_PERSON" | "REGISTERED_PHONE" } | { action: "REVOKE"; bindingId: string }) =>
+  changeWechatBinding: (property: string, member: string, change: { action: "REVOKE"; bindingId: string }) =>
     request<{ bindingId: string | null }>(`/api/v1/wechat-member-bindings/${encodeURIComponent(property)}/${encodeURIComponent(member)}`, { method: "POST", body: JSON.stringify(change) }),
   paymentReconciliation: (query: PaymentReconciliationQuery, signal?: AbortSignal) => {
     const params = new URLSearchParams({ propertyId: query.propertyId });

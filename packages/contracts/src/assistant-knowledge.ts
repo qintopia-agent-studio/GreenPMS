@@ -13,13 +13,13 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-19.1";
+export const assistantKnowledgeRevision = "2026-11-19.2";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   { id: "wechat-member-entitlements", title: "服务号查会员权益、绑定与到期提醒", commands: [],
     sources: ["docs/implementation/spec-wechat-member-entitlements.md", "apps/web/src/components/WechatMemberBinding.tsx"],
-    content: `开通后，会员从服务号「我的权益」取绑定码。有建档权限的员工在会员详情点「服务号绑定」，现场核身或回拨档案预留手机号，核对本人绑定码。换绑先解除原微信。只查本人间夜、床夜及预留、核销、返还。金额和住客资料不展示。每份权益固定提前60天和30天提醒；推送须有匹配模板及微信授权，一次性授权对应一条。送达需核实。`
+    content: `开通后，会员打开服务号「我的权益」，用办卡预留手机号和短信验证码自助绑定，以后微信直接查。原号码停用请联系门店核实更正。换绑先解除原微信。只查本人间夜、床夜及预留、核销、返还。金额和住客资料不展示。每份权益固定提前60天和30天提醒；推送须有匹配模板及微信授权，一次性授权对应一条。送达需核实。`
   },
   { id: "membership-catalog", title: "会员产品设置与历史权益", commands: ["MANAGE_MEMBERSHIP_CATALOG"],
     sources: ["docs/implementation/spec-membership-product-management.md", "apps/web/src/pages/MembershipCatalogPage.tsx"],

@@ -108,7 +108,8 @@ export const currentMigrationNames = [
   "081_wecom_refund_reconciliation.sql",
   "082_private_bath_shared_membership.sql",
   "083_membership_product_catalog.sql",
-  "084_wechat_member_entitlements.sql"
+  "084_wechat_member_entitlements.sql",
+  "085_wechat_member_sms_binding.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -363,6 +364,7 @@ export async function databaseReady(
           ('membership_orders', 'valid_from'),
           ('membership_orders', 'valid_until'),
           ('wechat_member_sessions', 'expires_at'),
+          ('wechat_member_sms_challenges', 'attempts_left'),
           ('wechat_member_sessions', 'pairing_hash'),
           ('wechat_member_sessions', 'pairing_expires_at'),
           ('wechat_member_bindings', 'open_id'),
