@@ -9,6 +9,16 @@ type NullableInsert<T> = ColumnType<T | null, T | null | undefined, T | null>;
 type Json = ColumnType<unknown, unknown, unknown>;
 
 export interface Database {
+  wechat_member_rule_versions: { property_id: string; version: number; settings: Json; updated_by: string; created_at: GeneratedTimestamp };
+  wechat_member_booking_requests: {app_id:string;property_id:string;member_id:string;request_key:string;booking_id:string};
+  wechat_member_bookings: { id: string; app_id: string; property_id: string; member_id: string; binding_id: string;
+    arrival_date: LocalDate; departure_date: LocalDate; room_type_code: string; room_type_name: string; inventory_kind: "ROOM" | "BED";
+    status: ColumnType<"PENDING" | "CONFIRMED" | "DECLINED","PENDING" | undefined,"CONFIRMED" | "DECLINED">;
+    order_id: NullableInsert<string>; decided_by: NullableInsert<string>; decided_at: NullableGeneratedTimestamp; created_at: GeneratedTimestamp };
+  wechat_member_interactions: { event_key: string; app_id: string; property_id: string; member_id: NullableInsert<string>;
+    binding_id: NullableInsert<string>; booking_id: NullableInsert<string>; kind: string;
+    state: "PENDING" | "ACCEPTED" | "REJECTED" | "UNKNOWN" | "SKIPPED" | "RECORDED"; detail: string;
+    template_id: NullableInsert<string>; content: ColumnType<unknown,unknown,unknown>; created_at: GeneratedTimestamp; updated_at: GeneratedTimestamp };
   wechat_member_sessions: {
     secret_hash: string; app_id: string; property_id: string; open_id: string; expires_at: Timestamp;
     pairing_hash: NullableInsert<string>; pairing_expires_at: NullableGeneratedTimestamp;
@@ -16,7 +26,7 @@ export interface Database {
   wechat_member_bindings: {
     id: string; app_id: string; property_id: string; member_id: string; open_id: string | null;
     verified_by: string | null; verification: "IN_PERSON" | "REGISTERED_PHONE" | "SMS_OTP"; bound_at: GeneratedTimestamp;
-    subscription_template: NullableInsert<string>; revoked_at: NullableGeneratedTimestamp; revoked_by: NullableInsert<string>;
+    booking_template: NullableInsert<string>; subscription_template: NullableInsert<string>; revoked_at: NullableGeneratedTimestamp; revoked_by: NullableInsert<string>;
   };
   wechat_member_sms_challenges: {
     id: string; app_id: string; property_id: string; session_hash: string; wechat_key: string; phone_key: string;
@@ -90,7 +100,7 @@ export interface Database {
   historical_membership_backfills: { id: string; property_id: string; member_id: string; membership_order_id: string; contract_id: string; entitlement_lot_id: string; payment_fact_id: string; actual_membership_date: string; valid_until: string; business_date: string; transaction_reference: string; product_id: string; product_code: string; product_version: number; product_name: string; listed_price_minor: number; agreed_price_minor: number; currency: string; entitlement_unit_kind: "ROOM_NIGHT" | "BED_NIGHT"; entitlement_units: number; validity_period: string; allowed_room_type_code: string; allowed_room_type_codes: NullableInsert<string[]>; allowed_inventory_kind: "ROOM" | "BED"; evidence_note: string; command_id: string; created_at: GeneratedTimestamp };
   membership_payment_reclassifications: { id: string; property_id: string; member_id: string; old_membership_order_id: string; old_payment_fact_id: string; old_reversal_fact_id: string; new_membership_order_id: string; new_payment_fact_id: string | null; amount_minor: number; currency: string; evidence_note: string; command_id: string; created_at: GeneratedTimestamp };
   membership_void_reconversions: { id: string; property_id: string; member_id: string; old_membership_order_id: string; old_contract_id: string; old_entitlement_lot_id: string; prior_old_order_version: number; prior_old_contract_version: number; prior_old_lot_version: number; source_order_id: string; source_stay_id: string; prior_source_order_version: number; new_membership_order_id: string; new_contract_id: string; new_entitlement_lot_id: string; replacement_payment_fact_id: string | null; replacement_business_date: string | null; replacement_transaction_reference: string | null; actual_membership_date: string; valid_until: string; old_direct_collection_total_minor: number; stay_transfer_total_minor: number; membership_agreed_price_minor: number; service_dates: ColumnType<string[], string[], string[]>; evidence_note: string; command_id: string; created_at: GeneratedTimestamp };
-  quotes: { id: string; property_id: string; inventory_unit_id: string; stay_type: string; arrival_date: string; departure_date: string; policy_version_id: string; member_id: NullableInsert<string>; member_contract_id: string | null; requester_subject_id: string | null; input_hash: string; temporary_other_room_arrangement: Json | null; coverage_set: Json; cash_lines: Json; cash_remainder_minor: number; current_contract_amount_minor: number; currency: string; expires_at: Timestamp; created_at: GeneratedTimestamp };
+  quotes: { wechat_booking_id: NullableInsert<string>; id: string; property_id: string; inventory_unit_id: string; stay_type: string; arrival_date: string; departure_date: string; policy_version_id: string; member_id: NullableInsert<string>; member_contract_id: string | null; requester_subject_id: string | null; input_hash: string; temporary_other_room_arrangement: Json | null; coverage_set: Json; cash_lines: Json; cash_remainder_minor: number; current_contract_amount_minor: number; currency: string; expires_at: Timestamp; created_at: GeneratedTimestamp };
   orders: { id: string; property_id: string; status: string; stay_type: string; arrival_date: string; departure_date: string; primary_guest_snapshot: Json; booking_channel_code: BookingChannelCode | null; channel_order_reference: string | null; free_stay_reason: NullableInsert<string>; free_stay_category_code: NullableInsert<string>; pricing_policy_version_id: string; member_id: NullableInsert<string>; member_contract_id: string | null; current_revision_id: string | null; version: number; created_at: GeneratedTimestamp; updated_at: GeneratedTimestamp };
   order_occupants: { id: string; order_id: string; ordinal: number; role: "PRIMARY" | "ADDITIONAL"; full_name: string | null; nickname: string | null; phone: string | null; document_number: string | null; created_by_command_id: string | null; created_at: GeneratedTimestamp };
   order_occupant_corrections: { id: string; order_id: string; occupant_id: string; sequence: number; prior_full_name: string | null; prior_nickname: string | null; prior_phone: string | null; prior_document_number: string | null; corrected_full_name: string; corrected_nickname: string; corrected_phone: string | null; corrected_document_number: string | null; reason_code: string; reason_note: string; actor_subject_id: string; amendment_id: string; created_by_command_id: string; created_at: GeneratedTimestamp };

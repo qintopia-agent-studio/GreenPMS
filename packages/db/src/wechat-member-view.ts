@@ -1,12 +1,12 @@
 import { sql } from "kysely";
-import { DomainError, memberFacingLabel, type MemberCenterView } from "@qintopia/contracts";
+import { defaultNoticeRules, DomainError, memberFacingLabel, type MemberCenterView } from "@qintopia/contracts";
 import { parseLocalDate, sha256 } from "@qintopia/domain";
 import type { DbExecutor } from "./inventory.ts";
 import { memberDirectoryEntitlements } from "./members.ts";
 import { readRoomCatalog } from "./room-catalog.ts";
 import type { Database } from "./schema.ts";
 
-export const expiryLeadDays = [60, 30] as const;
+
 
 export function shiftMemberDate(localDate: string, days: number) {
   const date = parseLocalDate(localDate);
@@ -21,7 +21,7 @@ const actions: Record<Database["entitlement_ledger"]["entry_type"], string> = {
 
 const invalidCursor = () => new DomainError("VALIDATION_ERROR", "明细页码已失效，请重新读取我的权益。", 400);
 
-export async function memberCenterView(db: DbExecutor, propertyId: string, memberId: string, cursor?: string): Promise<MemberCenterView> {
+export async function memberCenterView(db: DbExecutor, propertyId: string, memberId: string, cursor?: string, leadDays = defaultNoticeRules.leadDays): Promise<MemberCenterView> {
   const summary = await memberDirectoryEntitlements(db, propertyId, [memberId]);
   const entries = summary.byMember.get(memberId) ?? [];
   if (!entries.length) {
@@ -40,7 +40,7 @@ export async function memberCenterView(db: DbExecutor, propertyId: string, membe
     return { product: memberFacingLabel(entry.productName), unit: entry.unitKind, status: entry.status, available: entry.availableUnits,
       held: order.held, startsOn: order.valid_from, expiresOn: entry.expiresOn,
       rooms: (order.allowed_room_type_codes ?? [order.allowed_room_type_code]).map(code => memberFacingLabel(names.get(code) ?? code, "适用房型")),
-      reminderDates: entry.status === "ACTIVE" && entry.expiresOn ? expiryLeadDays.map(days => shiftMemberDate(entry.expiresOn!, -days))
+      reminderDates: entry.status === "ACTIVE" && entry.expiresOn ? leadDays.map(days => shiftMemberDate(entry.expiresOn!, -days))
         .filter(date => !order.valid_from || date >= order.valid_from) : [] };
   });
   let historyQuery = db.selectFrom("entitlement_ledger as e").innerJoin("membership_orders as o", "o.entitlement_lot_id", "e.lot_id")

@@ -1,7 +1,7 @@
 import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { sql, type Transaction } from "kysely";
 import { DomainError, mainlandMemberPhone } from "@qintopia/contracts";
-import type { Database } from "@qintopia/db";
+import { recordMemberInteraction, type Database } from "@qintopia/db";
 import { newId } from "@qintopia/domain";
 import type { WechatMemberConfig } from "./wechat-official-account.ts";
 
@@ -51,7 +51,7 @@ export async function requestMemberCode(trx: Trx, c: WechatMemberConfig, session
   await trx.insertInto("wechat_member_sms_challenges").values({ id, app_id: c.appId, property_id: c.propertyId,
     member_id: member, session_hash: session.secret_hash, wechat_key: wechatKey, phone_key: phoneKey,
     code_mac: mac(c, "code", id, session.secret_hash, phoneKey, code) }).execute();
-  if (member) return { phone: "+86" + number, code };
+  if (member) return { id, member, phone: "+86" + number, code };
 }
 
 export async function verifyMemberCode(trx: Trx, c: WechatMemberConfig, session: Session, raw: string, code: string) {
@@ -69,8 +69,10 @@ export async function verifyMemberCode(trx: Trx, c: WechatMemberConfig, session:
     .where("property_id", "=", c.propertyId).where("revoked_at", "is", null)
     .where(eb => eb.or([eb("open_id", "=", session.open_id), eb("member_id", "=", member)])).executeTakeFirst();
   if (occupied) return "CONFLICT";
-  await trx.insertInto("wechat_member_bindings").values({ id: newId("wxbind"), app_id: c.appId, property_id: c.propertyId,
+  const bindingId = newId("wxbind");
+  await trx.insertInto("wechat_member_bindings").values({ id: bindingId, app_id: c.appId, property_id: c.propertyId,
     member_id: member, open_id: session.open_id, verified_by: null, verification: "SMS_OTP" }).execute();
+  await recordMemberInteraction(trx,{event_key:"bind:"+bindingId,app_id:c.appId,property_id:c.propertyId,member_id:member,binding_id:bindingId,kind:"微信绑定",state:"RECORDED",detail:"会员已验证预留手机",content:"{}"});
   await clearMemberCodes(trx, c, member);
   return "BOUND";
 }

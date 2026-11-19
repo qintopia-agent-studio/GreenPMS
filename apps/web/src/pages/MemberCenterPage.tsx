@@ -2,22 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { mainlandMemberPhone, type MemberCenterState, type MemberNightUnit } from "@qintopia/contracts";
 import "./member-center.css";
 
-const root = "/api/wechat/member";
-export async function memberRequest<T>(suffix = "", body?: object): Promise<T> {
-  const reply = await fetch(root + suffix, { credentials: "same-origin", cache: "no-store",
-    ...(body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) });
-  if (!reply.ok) {
-    if (reply.status === 403) throw new Error("身份或绑定状态已变化，请从服务号重新打开我的权益。");
-    if (reply.status === 429) throw new Error("操作过于频繁，请稍后再试。");
-    if (suffix.startsWith("/sms/")) {
-      if (reply.status === 503) throw new Error("本店短信验证暂不可用，请稍后再试。");
-      const detail = await reply.json().catch(() => undefined);
-      if (detail?.code === "VALIDATION_ERROR" && typeof detail.message === "string") throw new Error(detail.message);
-    }
-    throw new Error("暂时无法读取，请稍后再试。");
-  }
-  return await reply.json() as T;
-}
+import { memberRequest, root } from "./member-request";
+import { bookingAnchor, MemberBookingPanel } from "./MemberBookings";
 const unitName = (unit: MemberNightUnit) => unit === "ROOM_NIGHT" ? "间夜" : "床夜";
 const statusNames = { ACTIVE: "生效中", PENDING: "待生效", EXPIRED: "已到期", VOIDED: "已作废", CANCELLED: "已取消" };
 const wxBrowser = () => /MicroMessenger/i.test(navigator.userAgent);
@@ -48,13 +34,13 @@ export function acceptedSubscription(detail: { errMsg?: string; subscribeDetails
   } catch { return false; }
 }
 
-function Subscription({ subscribed, onChange }: { subscribed: boolean; onChange(): void }) {
+function Subscription({ subscribed, onChange, kind, days }: { subscribed: boolean; onChange(): void; kind:"expiry"|"booking"; days?:number[] }) {
   const host = useRef<HTMLDivElement>(null), [template, setTemplate] = useState(""), [message, setMessage] = useState("");
   useEffect(() => {
     let active = true;
     const target = host.current!;
     async function mount() {
-      const { template: id, ...signature } = await memberRequest<{ template: string; appId: string; timestamp: number; nonceStr: string; signature: string }>("/subscription");
+      const { template: id, ...signature } = await memberRequest<{ template: string; appId: string; timestamp: number; nonceStr: string; signature: string }>("/subscription?kind="+kind);
       if (!active) return;
       setTemplate(id);
       const wx = await loadSdk();
@@ -70,7 +56,7 @@ function Subscription({ subscribed, onChange }: { subscribed: boolean; onChange(
         button.appendChild(content);
         button.addEventListener("success", async event => {
           if (!acceptedSubscription((event as CustomEvent).detail, id)) { setMessage("本次没有新增接收授权。"); return; }
-          try { await memberRequest("/subscription", { enabled: true, template: id }); if (active) { setMessage("已记录本次接收授权。"); onChange(); } }
+          try { await memberRequest("/subscription", { enabled: true, template: id, kind }); if (active) { setMessage("已记录本次接收授权。"); onChange(); } }
           catch (e) { if (active) setMessage(errorText(e)); }
         });
         button.addEventListener("error", () => setMessage("微信未完成授权，请在微信中重新打开。"));
@@ -81,9 +67,9 @@ function Subscription({ subscribed, onChange }: { subscribed: boolean; onChange(
     }
     void mount().catch(e => { if (active) setMessage(errorText(e)); });
     return () => { active = false; target.replaceChildren(); };
-  }, [onChange]);
-  return <section><h2>微信到期提醒</h2><p>到期前 60 天和 30 天各提醒一次。一次微信授权可接收一条。</p><div ref={host} />
-    {subscribed && template && <button onClick={async () => { try { await memberRequest("/subscription", { enabled: false, template }); setMessage("已关闭微信提醒。"); onChange(); } catch (e) { setMessage(errorText(e)); } }}>关闭提醒</button>}
+  }, [onChange,kind]);
+  return <section><h2>{kind==="expiry"?"微信到期提醒":"预订结果通知"}</h2><p>{kind==="expiry"?"按门店规则，到期提前天数为 "+days?.join("、")+" 天。":"同意接收门店的排房结果。"}一次微信授权可接收一条。</p><div ref={host} />
+    {subscribed && template && <button onClick={async () => { try { await memberRequest("/subscription", { enabled: false, template, kind }); setMessage("已关闭微信提醒。"); onChange(); } catch (e) { setMessage(errorText(e)); } }}>关闭提醒</button>}
     {message && <p role="status">{message}</p>}</section>;
 }
 
@@ -141,6 +127,11 @@ function PhoneBinding({ onBound }: { onBound(): Promise<void> }) {
 export default function MemberCenterPage() {
   const [state, setState] = useState<MemberCenterState>(), [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
   const [confirmUnlink, setConfirmUnlink] = useState(false);
+  const [focusId,setFocusId]=useState(bookingAnchor);
+  const [panel,setPanel]=useState<"rights"|"form"|"list">(()=>bookingAnchor()?"list":"rights");
+  function openPanel(value:"rights"|"form"|"list") {
+    sessionStorage.removeItem("member-booking-link");history.replaceState(null,"",location.pathname);setFocusId("");setPanel(value);
+  }
   const readGeneration = useRef(0);
   const refresh = useCallback(async () => {
     const generation = ++readGeneration.current;
@@ -173,7 +164,13 @@ export default function MemberCenterPage() {
     {state?.status === "SIGNED_OUT" && <section><h2>验证微信身份</h2><p>请从秦托邦服务号打开「我的权益」。</p>{wxBrowser() && <a href={root + "/login"}>用当前微信继续</a>}</section>}
     {state?.status === "UNBOUND" && (state.smsAvailable ? <PhoneBinding onBound={refresh} />
       : <section><h2>绑定我的会员档案</h2><p>本店尚未开通短信验证，请稍后再来。</p></section>)}
-    {bound && <>
+    {bound && <><nav className="member-tabs" aria-label="会员服务">
+      <button aria-pressed={panel==="rights"} onClick={()=>openPanel("rights")}>我的权益</button>
+      <button aria-pressed={panel==="form"} onClick={()=>openPanel("form")}>预订住宿</button>
+      <button aria-pressed={panel==="list"} onClick={()=>openPanel("list")}>我的预订</button></nav>
+      {panel!=="rights"&&<><MemberBookingPanel key={panel+focusId} form={panel==="form"} focusId={focusId} onSubmitted={id=>{setFocusId(id);setPanel("list");history.replaceState(null,"","#booking="+id);}}/>
+        {bound.bookingNoticeEnabled&&<Subscription kind="booking" subscribed={bound.bookingSubscribed} onChange={refresh}/>}</>}
+      {panel==="rights"&&<>
       {bound.view.cards.length === 0 && <p>当前没有已办理的住宿权益。</p>}
       {bound.view.cards.map((card, index) => (
         <section className="member-card" key={index}>
@@ -203,9 +200,9 @@ export default function MemberCenterPage() {
           if (next.status !== "BOUND") { setState(next); return; }
           setState({ ...next, view: { ...next.view, history: [...bound.view.history, ...next.view.history] } });
         })}>查看更多明细</button>}</section>
-      {bound.remindersEnabled && <Subscription subscribed={bound.subscribed} onChange={refresh} />}
+      {bound.remindersEnabled && <Subscription kind="expiry" days={bound.leadDays} subscribed={bound.subscribed} onChange={refresh} />}
       {confirmUnlink ? <section><p>解除后，当前微信将停止查询和接收提醒。</p><button onClick={() => setConfirmUnlink(false)}>保留绑定</button>
         <button disabled={busy} onClick={() => void act(async () => { await memberRequest("/unlink", {}); setConfirmUnlink(false); await refresh(); })}>确认解除</button></section>
-        : <button onClick={() => setConfirmUnlink(true)}>解除微信绑定</button>}</>}
+        : <button onClick={() => setConfirmUnlink(true)}>解除微信绑定</button>}</>}</>}
   </main>;
 }

@@ -37,4 +37,4 @@ export interface MemberCenterView {
 export type MemberCenterState =
   | { status: "DISABLED" | "SIGNED_OUT" }
   | { status: "UNBOUND"; smsAvailable: boolean }
-  | { status: "BOUND"; view: MemberCenterView; remindersEnabled: boolean; subscribed: boolean };
+  | { status: "BOUND"; view: MemberCenterView; remindersEnabled: boolean; subscribed: boolean; bookingNoticeEnabled: boolean; bookingSubscribed: boolean; leadDays: number[] };

@@ -13,13 +13,13 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-19.3";
+export const assistantKnowledgeRevision = "2026-11-19.4";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
-  { id: "wechat-member-entitlements", title: "服务号查会员权益、绑定与到期提醒", commands: [],
-    sources: ["docs/implementation/spec-wechat-member-entitlements.md", "apps/web/src/components/WechatMemberBinding.tsx"],
-    content: `开通后，会员打开服务号「我的权益」，用办卡预留手机号和短信验证码自助绑定，以后微信直接查。原号码停用请联系门店核实更正。换绑先解除原微信。只查本人间夜、床夜及预留、核销、返还。金额和住客资料不展示。每份权益固定提前60天和30天提醒；推送须有匹配模板及微信授权，一次性授权对应一条。送达需核实。`
+  { id: "wechat-member-entitlements", title: "服务号绑定、住宿预订和通知", commands: [],
+    sources: ["docs/implementation/spec-wechat-member-entitlements.md", "apps/web/src/pages/WechatBookingOperations.tsx"],
+    content: `服务号「我的权益」用办卡预留手机号和短信验证码自助绑定。旧号停用找门店核实更正。换绑先解除原微信。只查本人间夜、床夜及预留、核销、返还。金额和住客资料不展示。随时可预订住宿。权益不足请联系服务号客服。待排房不占房，会员→服务号预订与交互确认排房后建单并预留权益。我的预订查结果。管理员在设置→会员通知定提前天数（默认60天和30天）和已审核模板。一次性授权对应一条。交互记录可查发送内容和未发原因，平台受理不能证明送达。`
   },
   { id: "membership-catalog", title: "会员产品设置与历史权益", commands: ["MANAGE_MEMBERSHIP_CATALOG"],
     sources: ["docs/implementation/spec-membership-product-management.md", "apps/web/src/pages/MembershipCatalogPage.tsx"],
@@ -239,5 +239,5 @@ C以后取消，不会自动恢复B已用的400元；应在C按符合条件的�
 
 export function renderAssistantKnowledge(): string {
   return `员工操作知识（修订 ${assistantKnowledgeRevision}；已核对功能基线 ${assistantKnowledgeBaseline}，不是生产部署状态证明）\n` +
-    assistantKnowledgeTopics.map(topic => `【${topic.title}】\n${topic.content}`).join("\n\n");
+    assistantKnowledgeTopics.map(topic => `${topic.title}\n${topic.content}`).join("\n\n");
 }

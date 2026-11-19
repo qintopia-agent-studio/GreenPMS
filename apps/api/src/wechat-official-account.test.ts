@@ -42,4 +42,7 @@ it("uses the service account identity, signs the canonical member page and submi
   expect(sent).toEqual([{ touser: "test-openid", template_id: "expiry", lang: "zh_CN", miniprogram_state: "formal",
     data: { thing1: { value: "住宿会员权益" }, date2: { value: "2026年12月1日" }, number3: { value: "30" } } }]);
   expect(await account.token()).toBe("t2");
+  const page=cfg.origin+"/member-center#booking=Q0123456789ABCDEF12";
+  await account.sendFields("t2","test-openid","booking",{phrase1:{value:"已确认"}},page);
+  expect(sent.at(-1)).toMatchObject({template_id:"booking",touser:"test-openid",page,data:{phrase1:{value:"已确认"}}});
 });

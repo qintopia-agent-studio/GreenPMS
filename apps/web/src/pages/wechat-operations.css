@@ -1,0 +1,96 @@
+.wx-operations {
+  max-width: 62rem;
+  color: var(--text);
+}
+.wx-operations h1 {
+  margin: 0.4rem 0 0.8rem;
+}
+.wx-operations h2 {
+  font-size: 1.1rem;
+  margin: 0.1rem 0 0.65rem;
+}
+.wx-operations label {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.7rem 0;
+  max-width: 34rem;
+  font-weight: 600;
+}
+.wx-operations input:not([type="checkbox"]),
+.wx-operations select,
+.member-bookings select {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 0.55rem;
+  min-width: 0;
+  font: inherit;
+}
+.wx-operations .wx-switch {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.wx-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem 1.3rem;
+  margin: 0.85rem 0;
+}
+.wx-card p {
+  line-height: 1.55;
+}
+.wx-card small {
+  color: var(--muted);
+}
+.wx-card code,
+.wx-card dd {
+  overflow-wrap: anywhere;
+}
+.wx-card details {
+  margin: 0.8rem 0;
+}
+.wx-card dl {
+  display: grid;
+  gap: 0.4rem;
+}
+.wx-card dl div {
+  display: grid;
+  grid-template-columns: minmax(6rem, 1fr) 2fr;
+  gap: 0.6rem;
+}
+.wx-card dd {
+  margin: 0;
+}
+.wx-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: 0 0.8rem;
+}
+.wx-tabs,
+.wx-row {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.wx-row {
+  justify-content: space-between;
+}
+.wx-tabs button[aria-pressed="true"] {
+  background: var(--brand);
+  color: white;
+}
+.wx-decision {
+  border-top: 1px solid var(--border);
+  margin-top: 0.8rem;
+}
+.wx-decision .button {
+  margin: 0 0.45rem 0.4rem 0;
+}
+.wx-operations [role="alert"],
+.member-center [role="alert"] {
+  color: var(--danger, #923719);
+}

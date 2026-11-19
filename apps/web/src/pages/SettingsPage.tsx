@@ -19,7 +19,7 @@ class SettingsContentBoundary extends Component<{ children: ReactNode }, { faile
 
 export function SettingsPage() {
   const assistant = useAssistant();
-  const { principal, propertyId } = useWorkspace();
+  const { principal, propertyId, meta } = useWorkspace();
   const { pathname } = useLocation();
   const navigation = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -38,6 +38,7 @@ export function SettingsPage() {
     { to: "/settings/rooms", label: "房型与价格", detail: "新增或停用房型、配置房间床位，调整住宿价格", icon: BedDouble,
       visible: principalCan(principal, propertyId, "MANAGE_ROOM_CATALOG") },
     { to: "/settings/memberships", label: "会员产品", detail: "配置会员售价、房型、总夜数和有效期", icon: Users, visible: principalCan(principal, propertyId, "MANAGE_MEMBERSHIP_CATALOG") },
+    { to: "/settings/member-notifications", label: "会员通知", detail: "设置服务号通知、到期提醒和绑定短信模板", icon: Users, visible: meta.memberNotificationAdminProperties?.includes(propertyId) },
     { to: "/settings/accounts", label: "账号管理", detail: "管理工作人员账号、登录与操作权限", icon: Users, visible: true },
     { to: "/settings/tokens", label: "智能体与外部访问", detail: "管理访问密钥（Token）、权限范围与有效期", icon: KeyRound,
       visible: canManageTokens(principal, propertyId) },

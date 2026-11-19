@@ -4,13 +4,17 @@ import type { Database } from "./schema.ts";
 export async function wechatMemberReady(db: Kysely<Database>) {
   const result = await sql<{ ready: boolean }>`
     select
-      (select count(*) = 4 and bool_and(
+      (select count(*) = 8 and bool_and(
         has_table_privilege('qintopia_runtime', c.oid, 'SELECT')
         and has_table_privilege('qintopia_runtime', c.oid, 'INSERT')
         and not has_any_column_privilege('qintopia_ai_analytics_reader', c.oid, 'SELECT')
       ) from pg_class c where c.oid in (
         to_regclass('public.wechat_member_sessions'), to_regclass('public.wechat_member_bindings'),
-        to_regclass('public.wechat_member_expiry_notices'), to_regclass('public.wechat_member_sms_challenges')))
+        to_regclass('public.wechat_member_expiry_notices'), to_regclass('public.wechat_member_sms_challenges'),
+        to_regclass('public.wechat_member_rule_versions'),to_regclass('public.wechat_member_booking_requests'),to_regclass('public.wechat_member_bookings'),to_regclass('public.wechat_member_interactions')))
+      and not has_any_column_privilege('qintopia_runtime','public.wechat_member_rule_versions','UPDATE')
+      and has_column_privilege('qintopia_runtime','public.wechat_member_interactions','state','UPDATE')
+      and has_column_privilege('qintopia_runtime','public.wechat_member_bookings','order_id','UPDATE')
       and has_column_privilege('qintopia_runtime', 'public.wechat_member_sms_challenges', 'attempts_left', 'UPDATE')
       and exists (select from pg_constraint where conrelid = to_regclass('public.wechat_member_bindings')
         and conname = 'wechat_member_bindings_verification_check' and convalidated and pg_get_constraintdef(oid) like '%SMS_OTP%')

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { memberFacingLabel } from "@qintopia/contracts";
+import { memberFacingLabel, renderNoticeFields, type MemberNoticeTemplate } from "@qintopia/contracts";
 
 export interface WechatMemberConfig {
   appId: string;
@@ -33,7 +33,8 @@ export interface WechatService {
   subscriptionSignature(): Promise<{ appId: string; timestamp: number; nonceStr: string; signature: string }>;
   following(openId: string): Promise<boolean>;
   token(): Promise<string>;
-  send(token: string, openId: string, product: string, expiry: string, days: number): Promise<number>;
+  send(token: string, openId: string, product: string, expiry: string, days: number, template?: MemberNoticeTemplate): Promise<number>;
+  sendFields(token: string, openId: string, template: string, data: Record<string,{value:string}>, page: string): Promise<number>;
 }
 
 export function officialAccount(config: WechatMemberConfig, transport: typeof fetch = fetch): WechatService {
@@ -56,8 +57,15 @@ export function officialAccount(config: WechatMemberConfig, transport: typeof fe
     credential = { value: result.access_token, until: Date.now() + Math.max(0, result.expires_in - 120) * 1000 };
     return credential.value;
   }
+  async function sendFields(accessToken: string, openId: string, template: string, data: Record<string,{value:string}>, page?: string) {
+    const reply = await request("/cgi-bin/message/subscribe/bizsend", {access_token:accessToken}, {
+      touser:openId, template_id:template, lang:"zh_CN", miniprogram_state:"formal", data, ...(page ? {page} : {})
+    });
+    if (!Number.isSafeInteger(reply.errcode)) throw new Error("微信未返回明确的提交结果");
+    return reply.errcode as number;
+  }
   return {
-    token,
+    token, sendFields,
     async recognize(code) {
       const data = await request("/sns/oauth2/access_token", { appid: config.appId, secret: config.secret, code, grant_type: "authorization_code" });
       if (typeof data.openid !== "string" || !data.openid || data.openid.length > 128) throw new Error("微信身份验证未完成");
@@ -78,16 +86,10 @@ export function officialAccount(config: WechatMemberConfig, transport: typeof fe
       if (!(data.subscribe === 0 || data.subscribe === 1) || (data.subscribe === 1 && data.openid !== openId)) throw new Error("微信关注状态暂不可用");
       return data.subscribe === 1;
     },
-    async send(accessToken, openId, product, expiry, days) {
-      const setting = config.reminder!;
-      const [year, month, day] = expiry.split("-");
-      const values = { product: Array.from(memberFacingLabel(product)).slice(0, 20).join(""), expiry: year + "年" + Number(month) + "月" + Number(day) + "日", days: String(days) };
-      const data = Object.fromEntries(Object.entries(setting.fields).map(([key, meaning]) => [key, { value: values[meaning] }]));
-      const reply = await request("/cgi-bin/message/subscribe/bizsend", { access_token: accessToken }, {
-        touser: openId, template_id: setting.template, lang: "zh_CN", miniprogram_state: "formal", data
-      });
-      if (!Number.isSafeInteger(reply.errcode)) throw new Error("微信未返回明确的提交结果");
-      return reply.errcode as number;
+    async send(accessToken, openId, product, expiry, days, override) {
+      const setting = override ?? config.reminder!;
+      return sendFields(accessToken,openId,setting.template,renderNoticeFields(setting,{product:memberFacingLabel(product),expiry,days:String(days)}),
+        override ? config.origin + "/member-center" : undefined);
     }
   };
 }

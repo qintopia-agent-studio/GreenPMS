@@ -17,6 +17,9 @@ const TodayPage = lazy(() => import("./pages/TodayPage").then((module) => ({ def
 const TokensPage = lazy(() => import("./pages/TokensPage").then((module) => ({ default: module.TokensPage })));
 const RoomCatalogPage = lazy(() => import("./pages/RoomCatalogPage").then((module) => ({ default: module.RoomCatalogPage })));
 
+const WechatBookingOperations = lazy(() => import("./pages/WechatBookingOperations"));
+const WechatNotificationSettings = lazy(() => import("./pages/WechatNotificationSettings"));
+
 function SettingsRedirect({ section }: { section: string }) {
   const location = useLocation();
   return <Navigate to={`/settings/${section}${location.search}${location.hash}`} state={location.state} replace />;
@@ -78,6 +81,7 @@ export default function App() {
           <Route element={<AppShell onLogout={() => setPrincipal(undefined)} />}>
             <Route index element={<InventoryPage />} />
             <Route path="members" element={<MembersPage />} />
+            <Route path="members/bookings" element={<WechatBookingOperations />} />
             <Route path="orders" element={<OrdersPage />} />
             <Route path="orders/:orderId" element={<OrderDetailPage />} />
             <Route path="today" element={<TodayPage />} />
@@ -85,6 +89,7 @@ export default function App() {
             <Route path="settings" element={<SettingsPage />}>
               <Route path="rooms" element={<RoomCatalogPage />} />
               <Route path="memberships" element={<MembershipCatalogPage />} />
+              <Route path="member-notifications" element={<WechatNotificationSettings />} />
               <Route path="ai" element={<AssistantSettingsPage />} />
               <Route path="tokens" element={<TokensPage />} />
               <Route path="accounts" element={<AccountsPage />} />

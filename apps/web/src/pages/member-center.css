@@ -145,3 +145,8 @@
   display: block;
   min-height: 44px;
 }
+
+.member-tabs {display:flex;flex-wrap:wrap;margin-bottom:.6rem;gap:.2rem;}
+.member-tabs button[aria-pressed=true] {background:var(--brand);color:white;}
+.member-bookings select {width:100%;border:1px solid var(--border-strong);border-radius:8px;min-height:44px;background:var(--surface);color:var(--text);font:inherit;}
+.member-bookings small {display:block;}

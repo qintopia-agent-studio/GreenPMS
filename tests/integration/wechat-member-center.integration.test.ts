@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { MemberNoticeRules } from "@qintopia/contracts";
+import { deliverBookingResults } from "../../apps/api/src/wechat-booking-delivery.ts";
 import { sql, type Kysely } from "kysely";
 import type { FastifyInstance } from "fastify";
 import { createDatabase, databaseReady, propertyLocalToday, shiftMemberDate, withPropertyClockForTesting, type Database } from "@qintopia/db";
@@ -12,7 +14,7 @@ import { runtimeDatabaseUrlForTesting } from "../helpers/runtime-database.ts";
 const config: WechatMemberConfig = { appId: "test-app", secret: "test-secret", propertyId: demo.propertyId, origin: "https://member.example.test",
   reminder: { template: "expiry-test", fields: { thing1: "product", date2: "expiry", number3: "days" } } };
 const send = vi.fn<WechatService["send"]>(async () => 0);
-const service: WechatService = { recognize: async code => "wx-" + code, following: async () => true, token: async () => "test-token", send,
+const service: WechatService = { sendFields: vi.fn(async () => 0), recognize: async code => "wx-" + code, following: async () => true, token: async () => "test-token", send,
   subscriptionSignature: async () => ({ appId: config.appId, timestamp: 1, nonceStr: "test", signature: "test" }) };
 const sendCode = vi.fn(async (_phone: string, _code: string) => {});
 const root = "/api/wechat/member", headers = { origin: config.origin };
@@ -75,9 +77,11 @@ async function correct(commandType: string, input: object) {
   const confirmed = await app.inject({ method: "POST", url: "/api/v1/command-previews/" + preview.previewId + "/confirm", cookies: staff, headers: meta(commandType + "-confirm"),
     payload: { propertyId, commandType, confirmation: true, expectedEffectHash: preview.effectHash, reason: { code: "DATA_ENTRY_CORRECTION", note: "已核对测试档案" } } });
   expect(confirmed.json(), confirmed.body).toMatchObject({ businessCommitted: true });
+  return confirmed.json().result;
 }
 beforeEach(async () => {
   send.mockReset().mockResolvedValue(0);
+  vi.mocked(service.sendFields).mockReset().mockResolvedValue(0);
   sendCode.mockReset().mockResolvedValue(undefined);
   owner = await resetTestDatabase();
   runtime = createDatabase(runtimeDatabaseUrlForTesting(testDatabaseUrl));
@@ -126,6 +130,284 @@ it("binds a verified WeChat session to one member, projects only entitlements an
   expect((await app.inject({ method: "POST", url: staffUrl(demo.memberId), cookies: staff, payload })).statusCode).toBe(200);
   expect((await app.inject({ url: root, cookies: alice })).json().status).toBe("SIGNED_OUT");
 });
+const ops = (area: string) => "/api/v1/properties/" + demo.propertyId + "/member-" + area;
+async function publishRules(rules?: Partial<MemberNoticeRules>, version = 0) {
+  const current = await app.inject({ url: ops("notifications"), cookies: staff });
+  expect(current.statusCode, current.body).toBe(200);
+  return app.inject({
+    method: "POST",
+    url: ops("notifications"),
+    cookies: staff,
+    payload: { version, rules: { ...current.json().rules, ...rules } }
+  });
+}
+async function stayPayload(start: number, nights: number) {
+  const arrival = shiftMemberDate(await propertyLocalToday(runtime, demo.propertyId), start);
+  return {
+    arrival,
+    departure: shiftMemberDate(arrival, nights),
+    roomType: "shared_bath_single",
+    kind: "ROOM",
+    requestKey: crypto.randomUUID()
+  };
+}
+function submit(cookies: Cookies, payload: Awaited<ReturnType<typeof stayPayload>>) {
+  return app.inject({ method: "POST", url: root + "/bookings", cookies, headers, payload });
+}
+async function decide(id: string, unit?: string) {
+  return app.inject({
+    method: "POST",
+    url: ops("bookings/" + id + "/decision"),
+    cookies: staff,
+    payload: unit ? { action: "CONFIRM", unitId: unit } : { action: "DECLINE" }
+  });
+}
+async function firstUnit(id: string) {
+  const r = await app.inject({ url: ops("bookings/" + id + "/units"), cookies: staff });
+  expect(r.statusCode, r.body).toBe(200);
+  return r.json()[0].id as string;
+}
+const resultTemplate = {
+  template: "booking-test",
+  fields: { phrase1: "status", date2: "arrival", thing3: "room" }
+} as const;
+it("只在排房时建单占房及预留完整权益，重复提交幂等，权益不足仅提示联系客服", async () => {
+  const alice = await bind("booking-alice"),
+    foreign = await authorize("unbound");
+  const form = await stayPayload(5, 2);
+  expect((await submit(foreign, form)).statusCode).toBe(403);
+  const short = await submit(alice, await stayPayload(2, 3));
+  expect(short.statusCode, short.body).toBe(409);
+  expect(short.json().message).toContain("权益不足，请联系服务号客服");
+  const available = await app.inject({ url: root + "/bookings", cookies: alice });
+  expect(available.json().rooms).toContainEqual(expect.objectContaining({ code: form.roomType, kind: "ROOM" }));
+  const baselineOrders = await owner.selectFrom("orders").select("id").execute();
+  const retry={...form,requestKey:crypto.randomUUID()};
+  const requests = await Promise.all([
+    submit(alice, form),
+    submit(alice, retry)
+  ]);
+  expect(requests[0]?.statusCode, requests[0]?.body).toBe(200);
+  const id = requests[0]!.json().id;
+  expect(requests[1]!.json()).toMatchObject({ id, status: "PENDING" });
+  const competing = await submit(alice, await stayPayload(12, 2));
+  expect(competing.json().status).toBe("PENDING");
+  const otherId = competing.json().id;
+  expect(await owner.selectFrom("orders").select("id").execute()).toEqual(baselineOrders);
+  expect((await app.inject({ url: root, cookies: alice })).json().view.cards[0]).toMatchObject({
+    available: 2,
+    held: 0
+  });
+  const [unit, otherUnit] = await Promise.all([firstUnit(id), firstUnit(otherId)]);
+  const saved = await publishRules({ booking: resultTemplate });
+  expect(saved.statusCode, saved.body).toBe(200);
+  const opted = await app.inject({
+    method: "POST",
+    url: root + "/subscription",
+    cookies: alice,
+    headers,
+    payload: { enabled: true, template: "booking-test", kind: "booking" }
+  });
+  expect(opted.statusCode, opted.body).toBe(200);
+  const confirm = await decide(id, unit);
+  expect(confirm.statusCode, confirm.body).toBe(200);
+  expect(confirm.json()).toMatchObject({ status: "CONFIRMED", orderId: expect.any(String) });
+  expect((await submit(alice,retry)).json()).toMatchObject({id,status:"CONFIRMED"});
+  expect((await submit(alice,form)).json()).toMatchObject({id,status:"CONFIRMED"});
+  expect((await decide(id, unit)).json()).toEqual(confirm.json());
+  expect((await decide(id)).statusCode).toBe(409);
+  expect((await decide(id, "other-unit")).statusCode).toBe(409);
+  const failed = await decide(otherId, otherUnit);
+  expect(failed.statusCode, failed.body).toBe(409);
+  expect(failed.json().message).toContain("权益不足");
+  expect(await owner.selectFrom("orders").select("id").execute()).toHaveLength(baselineOrders.length + 1);
+  expect((await app.inject({ url: root, cookies: alice })).json().view.cards[0]).toMatchObject({
+    available: 0,
+    held: 2
+  });
+  const mine = await app.inject({ url: root + "/bookings?id=" + id, cookies: alice });
+  expect(mine.json().bookings[0]).toMatchObject({ id, status: "CONFIRMED" });
+  expect(mine.body).not.toMatch(/price|payment|currency|amount|open_id|member_id|phone/i);
+  expect(service.sendFields).toHaveBeenCalledTimes(1);
+  expect(service.sendFields).toHaveBeenCalledWith(
+    "test-token",
+    "wx-booking-alice",
+    "booking-test",
+    expect.objectContaining({ phrase1: { value: "已确认" } }),
+    config.origin + "/member-center#booking=" + id
+  );
+  const interactions = await app.inject({ url: ops("interactions") + "?memberId=" + demo.memberId, cookies: staff });
+  expect(interactions.json().items).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "预订已确认",
+        state: "ACCEPTED",
+        template: "booking-test",
+        content: expect.objectContaining({ phrase1: "已确认" })
+      })
+    ])
+  );
+  expect(interactions.body).not.toContain(sendCode.mock.calls[0]![1]);
+  expect(
+    await owner
+      .selectFrom("wechat_member_interactions")
+      .select("event_key")
+      .where("booking_id", "=", otherId)
+      .where("kind", "!=", "提交住宿预订")
+      .execute()
+  ).toHaveLength(0);
+  const attention = (await app.inject({ url: root + "/bookings?id=" + otherId, cookies: alice })).json().bookings[0]
+    .attention;
+  expect(attention).toContain("权益不足，请联系服务号客服");
+});
+it("管理员发布可预览的提醒规则，旧版不可覆盖，运营能看到跳过和受理结果", async () => {
+  const alice = await bind("rules-alice");
+  const settings = await publishRules({ leadDays: [15], booking: resultTemplate });
+  expect(settings.statusCode, settings.body).toBe(200);
+  expect(settings.json().version).toBe(1);
+  expect((await publishRules({ leadDays: [12] })).statusCode).toBe(409);
+  expect((await publishRules({ booking: { template: "foreign", fields: { amount1: "status" } } }, 1)).statusCode).toBe(
+    400
+  );
+  const operator = await app.inject({
+    method: "POST",
+    url: "/api/v1/auth/login",
+    payload: { username: "operator", password: "demo-pass-2026" }
+  });
+  const user = { qintopia_session: operator.cookies.find((c) => c.name === "qintopia_session")!.value };
+  expect((await app.inject({ url: ops("notifications"), cookies: user })).statusCode).toBe(403);
+  expect((await app.inject({ url: ops("interactions"), cookies: user })).statusCode).toBe(200);
+  expect(
+    (await app.inject({ url: ops("interactions").replace(demo.propertyId, "other"), cookies: user })).statusCode
+  ).toBe(403);
+  expect((await app.inject({ url: root, cookies: alice })).json().leadDays).toEqual([15]);
+  await run(15);
+  expect(
+    (await app.inject({ url: ops("interactions") + "?state=SKIPPED", cookies: user })).json().items[0].detail
+  ).toContain("授权");
+  await app.inject({
+    method: "POST",
+    url: root + "/subscription",
+    cookies: alice,
+    headers,
+    payload: { enabled: true, template: "expiry-test" }
+  });
+  await run(60);
+  await run(15);
+  await run(15);
+  expect(send.mock.calls.map((args) => args[4])).toEqual([15]);
+  const req = await submit(alice, await stayPayload(1, 1));
+  expect((await decide(req.json().id)).json().status).toBe("DECLINED");
+  expect(service.sendFields).not.toHaveBeenCalled();
+  const logs = (await app.inject({ url: ops("interactions"), cookies: staff })).json().items;
+  expect(logs).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "预订未能安排", state: "SKIPPED" }),
+      expect.objectContaining({
+        kind: "权益到期",
+        state: "ACCEPTED",
+        content: expect.objectContaining({ number3: "15" })
+      })
+    ])
+  );
+});
+it("同时确认只生成一张订单，已提交给微信但回执未知时不重发", async () => {
+  const alice = await bind("racer");
+  await publishRules({ booking: resultTemplate });
+  await app.inject({
+    method: "POST",
+    url: root + "/subscription",
+    cookies: alice,
+    headers,
+    payload: { enabled: true, template: "booking-test", kind: "booking" }
+  });
+  vi.mocked(service.sendFields).mockRejectedValueOnce(new Error("lost response"));
+  const b = await submit(alice, await stayPayload(3, 1));
+  const id = b.json().id,
+    unit = await firstUnit(id);
+  const results = await Promise.all([decide(id, unit), decide(id, unit)]);
+  expect(
+    results.some((r) => r.statusCode === 200),
+    results.map((r) => r.body).join(" / ")
+  ).toBe(true);
+  expect(
+    results.every((r) => [200, 409].includes(r.statusCode)),
+    results.map((r) => r.body).join(" / ")
+  ).toBe(true);
+  await deliverBookingResults(runtime, config, service);
+  const events = await owner
+    .selectFrom("wechat_member_interactions")
+    .select(["state", "content"])
+    .where("event_key", "=", "booking:" + id)
+    .execute();
+  expect(events).toHaveLength(1);
+  expect(events[0]!.state).toBe("UNKNOWN");
+  expect(service.sendFields).toHaveBeenCalledTimes(1);
+  await publishRules({ booking: null }, 1);
+  expect(
+    (
+      await owner
+        .selectFrom("wechat_member_interactions")
+        .select("content")
+        .where("event_key", "=", "booking:" + id)
+        .executeTakeFirstOrThrow()
+    ).content
+  ).toEqual(events[0]!.content);
+  expect((await app.inject({ url: root, cookies: alice })).json().view.cards[0]).toMatchObject({
+    available: 1,
+    held: 1
+  });
+});
+it("床夜会员按床位排房，另一个已绑定会员打开同一链接只能看到自己的记录", async () => {
+  const roomMember = await bind("room-reader"),
+    bedMember = "self-service-bed";
+  await owner
+    .insertInto("members")
+    .values({
+      id: bedMember,
+      full_name: "床夜测试会员",
+      nickname: "测试",
+      phone: "19600001016",
+      wechat: "未登记个人微信号",
+      identity_card_number: null
+    })
+    .execute();
+  await owner
+    .insertInto("member_property_links")
+    .values({ property_id: demo.propertyId, member_id: bedMember })
+    .execute();
+  const { membershipOrderId } = await correct("CREATE_MEMBERSHIP_ORDER", {
+    memberId: bedMember,
+    membershipProductId: "membership_product_shared_bath_quad_v1",
+    agreedPriceMinor: 93600
+  });
+  await correct("RECORD_MEMBERSHIP_PAYMENT", {
+    membershipOrderId,
+    amountMinor: 1,
+    transactionReference: "WX-bed-self-service"
+  });
+  await correct("ACTIVATE_MEMBERSHIP_ORDER", { membershipOrderId });
+  const bed = await bind("bed-reader", bedMember);
+  const options = (await app.inject({ url: root + "/bookings", cookies: bed })).json().rooms;
+  expect(options).toHaveLength(1);
+  expect(options[0].kind).toBe("BED");
+  const form = { ...(await stayPayload(4, 1)), roomType: options[0].code, kind: "BED" };
+  expect((await submit(bed, { ...form, kind: "ROOM" })).statusCode).toBe(409);
+  const applied = await submit(bed, form);
+  expect(applied.statusCode, applied.body).toBe(200);
+  const id = applied.json().id;
+  const foreign = await app.inject({ url: root + "/bookings?id=" + id, cookies: roomMember });
+  expect(foreign.json().bookings).toEqual([]);
+  const result = await decide(id, await firstUnit(id));
+  expect(result.statusCode, result.body).toBe(200);
+  const coverage = await owner
+    .selectFrom("coverage_items")
+    .select(["unit_kind", "status"])
+    .where("order_id", "=", result.json().orderId)
+    .execute();
+  expect(coverage).toEqual([{ unit_kind: "BED_NIGHT", status: "HELD" }]);
+});
+
 function run(days: number, account = service) {
   const instant = new Date(shiftMemberDate(expiry, -days) + "T00:01:00+08:00");
   return withPropertyClockForTesting(instant, () => runExpiryReminders(runtime, config, account));

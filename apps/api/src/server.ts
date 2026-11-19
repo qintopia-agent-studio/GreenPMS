@@ -707,7 +707,11 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
       propertyIds.length ? db.selectFrom("pricing_policy_versions").selectAll().where("property_id", "in", propertyIds).orderBy("code").execute() : [],
       Promise.all(propertyIds.map(id => membershipProductsForProperty(db, id))).then(groups => groups.flat())
     ]);
-    return { ...(wechatConfig && propertyIds.includes(wechatConfig.propertyId) ? { wechatMemberPropertyId: wechatConfig.propertyId } : {}),
+    const noticeAdmins = principal.credentialType === "SESSION" && propertyIds.length
+      ? await db.selectFrom("staff_profile_assignments").select("property_id").where("subject_id","=",principal.subjectId)
+        .where("property_id","in",propertyIds).where("profile","=","ADMIN").execute() : [];
+    return { ...(noticeAdmins.length ? { memberNotificationAdminProperties: noticeAdmins.map(row => row.property_id) } : {}),
+      ...(wechatConfig && propertyIds.includes(wechatConfig.propertyId) ? { wechatMemberPropertyId: wechatConfig.propertyId } : {}),
       properties, inventoryUnits: await projectCatalogUnitNames(db, units), pricingPolicyVersions: policies, members: [], memberContracts: [], membershipProducts };
   });
 

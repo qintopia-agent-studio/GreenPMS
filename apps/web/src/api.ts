@@ -103,6 +103,11 @@ async function request<T>(path: string, init: RequestInit = {}, acceptRejectedRe
   return body as T;
 }
 
+export function memberOps<T>(property: string, suffix: string, body?: unknown) {
+  return request<T>("/api/v1/properties/" + encodeURIComponent(property) + "/member-" + suffix,
+    body === undefined ? {} : { method: "POST", body: JSON.stringify(body) });
+}
+
 function commandHeaders(scope: string) {
   const nonce = crypto.randomUUID();
   return {

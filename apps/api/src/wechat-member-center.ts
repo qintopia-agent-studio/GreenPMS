@@ -1,13 +1,15 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { MemberSmsRejected } from "./tencent-member-sms.ts";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Type } from "@sinclair/typebox";
 import { sql, type Kysely, type Transaction } from "kysely";
-import { DomainError, type MemberCenterState } from "@qintopia/contracts";
+import { DomainError, type MemberCenterState, type MemberNoticeRules } from "@qintopia/contracts";
 import { sha256 } from "@qintopia/domain";
-import { authorizeCommandAccess, memberCenterView, withCommandAuthorizationAudit, type Database } from "@qintopia/db";
+import { authorizeCommandAccess, memberCenterView, withCommandAuthorizationAudit, memberRuleVersion, memberBookingRooms, propertyLocalToday, currentMemberBooking, submitMemberBooking, recordMemberInteraction, setInteractionState, type Database } from "@qintopia/db";
 import { requirePrincipal, requirePropertyAccess } from "./auth.ts";
 import { type WechatMemberConfig, type WechatService } from "./wechat-official-account.ts";
 import { startExpiryReminders } from "./wechat-member-reminders.ts";
+import { accountDefaults, registerWechatOperations, smsAvailable } from "./wechat-member-operations.ts";
 import type { MemberSms } from "./tencent-member-sms.ts";
 import { clearMemberCodes, requestMemberCode, verifyMemberCode } from "./wechat-sms-binding.ts";
 
@@ -29,6 +31,8 @@ function safeEqual(a: string, b: string) {
 }
 
 export function registerWechatMemberCenter(app: FastifyInstance, db: Kysely<Database>, config?: WechatMemberConfig, service?: WechatService, sms?: MemberSms) {
+  registerWechatOperations(app,db,config,sms,service);
+  const rulesFor = async (trx: Kysely<Database>) => (await memberRuleVersion(trx,available().propertyId,accountDefaults(config,sms))).rules;
   const sending = new Set<Promise<void>>();
   app.addHook("onClose", async () => { await Promise.all(sending); });
   const available = () => {
@@ -60,8 +64,10 @@ export function registerWechatMemberCenter(app: FastifyInstance, db: Kysely<Data
   }
   async function revoke(trx: Transaction<Database>, id: string, member: string, openId: string, actor: string | null) {
     const c = available();
-    await trx.updateTable("wechat_member_bindings").set({ open_id: null, revoked_at: new Date(), revoked_by: actor, subscription_template: null })
+    await trx.updateTable("wechat_member_bindings").set({ open_id: null, revoked_at: new Date(), revoked_by: actor, subscription_template: null, booking_template: null })
       .where("id", "=", id).where("open_id", "=", openId).execute();
+    await recordMemberInteraction(trx,{event_key:"unlink:"+id,app_id:c.appId,property_id:c.propertyId,member_id:member,binding_id:id,kind:"解除微信绑定",
+      state:"RECORDED",detail:actor?"员工核实后解绑":"会员主动解绑",content:"{}"});
     await clearMemberCodes(trx, c, member);
     await retireSessions(trx, c, openId);
   }
@@ -100,10 +106,13 @@ export function registerWechatMemberCenter(app: FastifyInstance, db: Kysely<Data
     return db.transaction().setIsolationLevel("repeatable read").execute(async trx => {
       const session = await identity(trx, req);
       if (!session) return { status: "SIGNED_OUT" } as const;
-      const binding = await bindings(trx).select(["b.member_id", "b.subscription_template"]).where("b.open_id", "=", session.open_id).executeTakeFirst();
-      if (!binding) return { status: "UNBOUND", smsAvailable: Boolean(sms) } as const;
-      return { status: "BOUND", view: await memberCenterView(trx, config.propertyId, binding.member_id, req.query.cursor),
-        remindersEnabled: Boolean(config.reminder), subscribed: Boolean(config.reminder && config.reminder.template === binding.subscription_template) } as const;
+      const rules = await rulesFor(trx);
+      const binding = await bindings(trx).select(["b.member_id", "b.subscription_template","b.booking_template"]).where("b.open_id", "=", session.open_id).executeTakeFirst();
+      if (!binding) return { status: "UNBOUND", smsAvailable: smsAvailable(sms,rules) } as const;
+      return { status: "BOUND", view: await memberCenterView(trx, config.propertyId, binding.member_id, req.query.cursor,rules.expiryEnabled ? rules.leadDays : []),
+        remindersEnabled: Boolean(rules.expiryEnabled && rules.expiry), subscribed: Boolean(rules.expiry && rules.expiry.template === binding.subscription_template),
+        bookingNoticeEnabled: Boolean(rules.bookingEnabled && rules.booking), bookingSubscribed: Boolean(rules.booking && rules.booking.template === binding.booking_template),
+        leadDays:rules.expiryEnabled?rules.leadDays:[] } as const;
     });
   });
   const smsRoutes = { rateLimit: { max: 30, timeWindow: "1 minute" } };
@@ -116,14 +125,23 @@ export function registerWechatMemberCenter(app: FastifyInstance, db: Kysely<Data
       await lockBindingChanges(trx);
       const session = await identity(trx, req);
       if (!session) throw denied();
-      if (!sender) throw new DomainError("SERVICE_NOT_READY", "本店尚未开通短信验证。", 503);
+      const rules = await rulesFor(trx);
+      if (!smsAvailable(sender,rules)) throw new DomainError("SERVICE_NOT_READY", "本店尚未开通短信验证。", 503);
       if (await bindings(trx).select("b.id").where("b.open_id", "=", session.open_id).executeTakeFirst()) throw conflict();
-      return requestMemberCode(trx, c, session, req.body.phone);
+      const issued = await requestMemberCode(trx, c, session, req.body.phone);
+      if (!issued) return;
+      await recordMemberInteraction(trx,{event_key:issued.id,app_id:c.appId,property_id:c.propertyId,member_id:issued.member,kind:"绑定验证码",state:"UNKNOWN",
+        detail:"短信受理结果待确认",template_id:rules.smsTemplate||null,content:JSON.stringify({签名:rules.smsSign,验证码:"******"})});
+      return {...issued, settings:rules.smsSign&&rules.smsTemplate?{sign:rules.smsSign,template:rules.smsTemplate}:undefined};
     });
     if (delivery && sender) {
       // Send once after commit. The HTTP response is the same for a missing or ambiguous member.
-      const job = Promise.resolve().then(() => sender.sendCode(delivery.phone, delivery.code))
-        .catch(() => { app.log.warn("会员绑定验证码未获短信服务确认"); });
+      const job = Promise.resolve().then(() => sender.sendCode(delivery.phone, delivery.code, delivery.settings))
+        .then(() => setInteractionState(db,delivery.id,"ACCEPTED","腾讯云已受理")).then(()=>{})
+        .catch(async error => {
+          if (error instanceof MemberSmsRejected) await setInteractionState(db,delivery.id,"REJECTED","腾讯云拒绝本次发送");
+          else app.log.warn("会员绑定验证码未获短信服务确认");
+        }).catch(() => app.log.warn("短信受理状态暂未更新"));
       sending.add(job);
       void job.finally(() => sending.delete(job));
     }
@@ -137,7 +155,7 @@ export function registerWechatMemberCenter(app: FastifyInstance, db: Kysely<Data
       await lockBindingChanges(trx);
       const session = await identity(trx, req);
       if (!session) throw denied();
-      if (!sms) throw new DomainError("SERVICE_NOT_READY", "本店尚未开通短信验证。", 503);
+      if (!smsAvailable(sms,await rulesFor(trx))) throw new DomainError("SERVICE_NOT_READY", "本店尚未开通短信验证。", 503);
       const status = await verifyMemberCode(trx, c, session, req.body.phone, req.body.code);
       if (status !== "BOUND") return { status } as const;
       await retireSessions(trx, c, session.open_id);
@@ -162,24 +180,63 @@ export function registerWechatMemberCenter(app: FastifyInstance, db: Kysely<Data
     reply.clearCookie(sessionName, cookieOptions);
     return { ok: true };
   });
-  app.get(publicRoot + "/subscription", { schema: hidden }, async (req, reply) => {
-    privateResponse(reply);
-    const c = available(), session = await identity(db, req);
-    if (!session || !c.reminder || !await bindings(db).select("b.id").where("b.open_id", "=", session.open_id).executeTakeFirst()) throw denied();
-    return { template: c.reminder.template, ...await service!.subscriptionSignature() };
+  async function currentBinding(trx: Kysely<Database>, req: FastifyRequest, lock = false) {
+    const session = await identity(trx,req);
+    if (!session) throw denied();
+    const q = bindings(trx).select(["b.id","b.member_id"]).where("b.open_id","=",session.open_id);
+    const bound = await (lock ? q.forShare("b") : q).executeTakeFirst();
+    if (!bound) throw denied();
+    return bound;
+  }
+  const noticeKind = Type.Union([Type.Literal("expiry"),Type.Literal("booking")]);
+  const templateFor = (r:MemberNoticeRules,kind:"expiry"|"booking") => kind==="booking" ? r.bookingEnabled && r.booking : r.expiryEnabled && r.expiry;
+  app.get<{Querystring:{kind?:"expiry"|"booking"}}>(publicRoot + "/subscription", { schema: {...hidden,querystring:Type.Object({kind:Type.Optional(noticeKind)})} }, async (req, reply) => {
+    privateResponse(reply); available();
+    await currentBinding(db,req);
+    const template=templateFor(await rulesFor(db),req.query.kind??"expiry");
+    if(!template) throw denied();
+    return {template:template.template,...await service!.subscriptionSignature()};
   });
-  app.post<{ Body: { enabled: boolean; template: string } }>(publicRoot + "/subscription", { schema: { ...hidden, body: Type.Object({ enabled: Type.Boolean(), template: chars(160) }, { additionalProperties: false }) } }, async (req, reply) => {
+  app.post<{ Body: { enabled:boolean; template:string; kind?:"expiry"|"booking" } }>(publicRoot + "/subscription", {schema:{...hidden,
+    body:Type.Object({enabled:Type.Boolean(),template:chars(160),kind:Type.Optional(noticeKind)},{additionalProperties:false})}}, async(req,reply)=>{
     privateResponse(reply); sameOrigin(req);
-    const c = available();
-    if (!c.reminder || req.body.template !== c.reminder.template) throw denied();
-    await db.transaction().execute(async trx => {
-      const session = await identity(trx, req);
-      if (!session) throw denied();
-      const binding = await bindings(trx).select("b.id").where("b.open_id", "=", session.open_id).forUpdate("b").executeTakeFirst();
-      if (!binding) throw denied();
-      await trx.updateTable("wechat_member_bindings").set({ subscription_template: req.body.enabled ? c.reminder!.template : null }).where("id", "=", binding.id).execute();
+    const c=available(), kind=req.body.kind??"expiry";
+    await db.transaction().execute(async trx=>{
+      await lockBindingChanges(trx);
+      const b=await currentBinding(trx,req);
+      const template=templateFor(await rulesFor(trx),kind);
+      if(!template || template.template!==req.body.template) throw denied();
+      const value=req.body.enabled?template.template:null;
+      await trx.updateTable("wechat_member_bindings").set(kind==="expiry"?{subscription_template:value}:{booking_template:value}).where("id","=",b.id).execute();
+      await recordMemberInteraction(trx,{event_key:randomUUID(),app_id:c.appId,property_id:c.propertyId,member_id:b.member_id,binding_id:b.id,
+        kind:kind==="booking"?"预订通知授权":"到期通知授权",state:"RECORDED",detail:value?"会员同意本次接收":"会员关闭接收",template_id:template.template,content:"{}"});
     });
-    return { ok: true };
+    return {ok:true};
+  });
+  app.get<{Querystring:{offset?:number;id?:string}}>(publicRoot+"/bookings",{schema:{...hidden,querystring:Type.Object({
+    offset:Type.Optional(Type.Integer({minimum:0,maximum:1000000})),id:Type.Optional(chars(64))},{additionalProperties:false})}},async(req,reply)=>{
+    privateResponse(reply);
+    const c=available();
+    return db.transaction().setIsolationLevel("repeatable read").execute(async trx=>{
+      const b=await currentBinding(trx,req);
+      let q=trx.selectFrom("wechat_member_bookings as w").leftJoin("orders as o","o.id","w.order_id").selectAll("w")
+        .select(["o.status as stay_status","o.arrival_date as stay_arrival","o.departure_date as stay_departure"])
+        .where("w.app_id","=",c.appId).where("w.property_id","=",c.propertyId).where("w.member_id","=",b.member_id);
+      if(req.query.id) q=q.where("w.id","=",req.query.id);
+      const offset=req.query.offset??0, rows=await q.orderBy("w.created_at","desc").orderBy("w.id","desc").limit(21).offset(offset).execute();
+      const today=await propertyLocalToday(trx,c.propertyId);
+      const bookings=[];
+      for(const row of rows.slice(0,20)) bookings.push(await currentMemberBooking(trx,row,today));
+      return {bookings,rooms:await memberBookingRooms(trx,c.propertyId,b.member_id),today,next:rows.length>20?String(offset+20):null};
+    });
+  });
+  app.post<{Body:{arrival:string;departure:string;roomType:string;kind:"ROOM"|"BED";requestKey:string}}>(publicRoot+"/bookings",{logLevel:"silent",config:{rateLimit:{max:25,timeWindow:"1 minute"}},schema:{...hidden,
+    body:Type.Object({arrival:Type.String({format:"date"}),departure:Type.String({format:"date"}),roomType:chars(160),kind:Type.Union([Type.Literal("ROOM"),Type.Literal("BED")]),requestKey:Type.String({format:"uuid"})},{additionalProperties:false})}},async(req,reply)=>{
+    privateResponse(reply);sameOrigin(req);const c=available();
+    return db.transaction().execute(async trx=>{
+      const b=await currentBinding(trx,req,true);
+      return submitMemberBooking(trx,{appId:c.appId,propertyId:c.propertyId,memberId:b.member_id,bindingId:b.id},req.body);
+    });
   });
 
   const staffPath = "/api/v1/wechat-member-bindings/:property/:member";
@@ -216,5 +273,5 @@ export function registerWechatMemberCenter(app: FastifyInstance, db: Kysely<Data
       return { bindingId: null };
     });
   });
-  if (config?.reminder && service) startExpiryReminders(app, db, config, service);
+  if (config && service) startExpiryReminders(app, db, config, service);
 }
