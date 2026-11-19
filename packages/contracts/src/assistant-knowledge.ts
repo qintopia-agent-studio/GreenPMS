@@ -13,7 +13,7 @@ export interface AssistantKnowledgeTopic {
   sources: readonly string[];
   content: string;
 }
-export const assistantKnowledgeRevision = "2026-11-17.2";
+export const assistantKnowledgeRevision = "2026-11-19.3";
 export const assistantKnowledgeBaseline = "1.9.1";
 
 export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
@@ -53,12 +53,13 @@ export const assistantKnowledgeTopics: readonly AssistantKnowledgeTopic[] = [
   },
   {
     id: "room-status", title: "房态查询与同日退房交接", commands: [],
-    sources: ["docs/implementation/channel-refund-readback.md", "docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房态稳定性欠款与状态显示-实施规格.md", "待开发项/房态30天连续时间轴与超长住宿开发规格.md", "apps/web/src/room-status/RoomStatusGrid.tsx", "apps/web/src/pages/InventoryPage.tsx", "packages/db/src/departure-day-stays.ts"],
-    content: `后台约15秒检查房态，办理后更新并保留填写。断网可看旧画面、继续填写，办理仍需服务端重新核对；新日期未载入不能办理。翻月校验失败不会无限自动重试，可以返回今天、改日期或重试。历史资料待核对时只读；权限失效不能绕过，结果未知应查询原回执，不重复提交。
-按日期、房型、房号筛选；点住宿看订单、选空闲日期安排住宿。返回自动读取最新数据、保留浏览位置，不显示选区变化提示，无需点击“刷新房态”；不自动打开订单详情，主动打开或完整订单页点击“返回房态”才展开。安全校验保留，实际操作受阻才提示具体原因及下一步。长住宿可跨显示区间；助手可用性最多查31晚，不是系统预订上限。
-桌面用屏幕最底端的横向滚动条浏览日期，无需先滚到房间列表底部；上下浏览房源仍使用整页滚动。
-住宿夜含入住日、不含离店日。前客当天应退未退，当晚可被后客预订，不代表后客现在可以入住；必须先让前客正式办理退房，再办理后客入住。不得为预订延长前客库存或撤销真实入住。
-未知、部分加载、失败不代表空房、零欠款或已结清，应刷新核对异常。维修、整房床位互斥、在住交接仍以服务端核对为准。
+    sources: ["docs/implementation/channel-refund-readback.md", "docs/implementation/spec-room-status-reliability-and-dorm-stats.md", "待开发项/QinTopia-PMS-房态稳定性欠款与状态显示-实施规格.md", "待开发项/房态30天连续时间轴与超长住宿开发规格.md", "apps/web/src/room-status/RoomStatusGrid.tsx", "apps/web/src/pages/InventoryPage.tsx", "packages/db/src/room-status.ts", "packages/db/src/departure-day-stays.ts"],
+    content: `后台约15秒查房态，办理后更新并保留填写。断网可看旧画面、填表，办理仍需服务端重新核对。日期未载入不能办理。翻月校验失败不会无限自动重试，可以返回今天、改日期或重试。历史资料待核对时只读，权限失效不能绕过，结果未知应查询原回执。
+按日期、房型、房号筛选，选空闲日期安排住宿。返回自动读取最新数据，保留浏览位置，不显示选区变化提示，无需点击“刷新房态”。不自动打开订单详情，主动打开或完整订单页点击“返回房态”才展开。安全校验保留，实际操作受阻才提示具体原因及下一步。长住可跨显示区间，助手最多查31晚，不是系统预订上限。
+桌面用屏幕最底端的横向滚动条看日期，无需先滚到房间列表底部，上下浏览房源仍使用整页滚动。
+“待退”标在最后一晚实际入住的房间或床位。点“待退”看应退订单，点住宿条看对应订单。
+住宿夜含入住日、不含离店日。待退当晚可订，不代表后客现在可以入住。先让前客正式办理退房，再办后客入住。勿为预订延长前客库存或撤销真实入住。
+房态未知、部分加载或失败时刷新核对，不能推断空房、零欠款或已结清。维修、整房床位互斥、在住交接以服务端为准。
 渠道全退应结为0，完整退款与计价依据可核对的已退房住宿仍显示已结单，不因合法全退禁用其他订单；缺失或矛盾资料仍须核对。`
   },
   {
