@@ -4,7 +4,7 @@
 
 ## 首版路径
 
-服务号菜单「我的权益」与关键词回复共用 `/member-center` 链接。微信网页基础授权认出本服务号下的用户。第一次打开显示短时绑定码，会员同意绑定后出示给前台。员工在已有会员详情核实本人后录入。异地会员由员工回拨档案内预留的手机号，在通话中核身并核对绑定码。一个微信在本店关联一份有效会员档案，名下多份权益自动列出。换绑先显式解除旧绑定，旧会话和订阅接收资格随之失效。
+服务号菜单「我的权益」与关键词回复共用 `/member-center` 链接。会员第一次在微信里打开时，微信网页授权会给系统一个该会员在本服务号下的标识（OpenID）。前台在原档案上逐人绑定，无需预先收集 OpenID 或修改档案里的「微信号」。一个微信在本店关联一份有效会员档案，名下多份权益自动列出。换绑先显式解除旧绑定，旧会话和订阅接收资格随之失效。
 
 会员页只返回正式订单权益的名称、适用房型、单位、可用及预留数量、生效与截止日期、权益使用明细。按门店当地日期和购买时的订单快照计算。间夜和床夜分别显示，预订预留后入住核销只展示本次数量。不同房型共享一份额度时只列一次。消费在此指已使用的住宿权益。服务端使用专用字段白名单，财务数据、住客资料、房号和内部备注均不进入会员响应或微信提醒。
 
@@ -16,9 +16,22 @@
 
 实际对接需管理员核对认证状态、网页授权域名、JS 安全域名、订阅通知类目与模板允许的字段，以及现有菜单由谁维护。AppSecret 通过服务器的安全配置提供。真实会员推送和改动线上菜单属于上线联调。[网页授权](https://developers.weixin.qq.com/doc/service/guide/h5/auth.html) · [订阅通知](https://developers.weixin.qq.com/doc/service/guide/product/subscription_messages/intro.html) · [订阅按钮](https://developers.weixin.qq.com/doc/service/guide/h5/opentag.html) · [发送接口](https://developers.weixin.qq.com/doc/service/api/notify/notify/api_sendnewsubscribemsg.html)
 
-## 上线配置与排查
+## 老会员第一次绑定
 
-1. 管理员确认服务号已认证，在后台核对网页授权域名。把现有菜单或关键词回复指向同一 HTTPS 地址 `/member-center`。保留原服务号消息回调。应用使用对应服务号的 AppID 与服务端密钥换取基础用户标识。
+1. 会员用自己的微信进入「秦托邦 → 我的权益」，点「同意绑定并生成绑定码」。页面显示 10 位绑定码，有效期 10 分钟，过期可重新生成。
+2. 有会员建档权限的员工登录 Green PMS，进入「会员」，用档案预留手机号或姓名找到原档案，打开详情，点「服务号绑定」。现场办理时核实会员本人。异地办理由前台回拨档案里原先登记的号码，在电话中核实本人并核对绑定码。原号码已停用时，可到前台办理。
+3. 员工选择核身方式，输入绑定码，核对当前会员姓名，勾选核验确认并点「确认绑定」。会员回到微信点「已完成核验」，即可看到原档案下的权益。此后用同一微信打开可直接查询。
+
+## 服务号管理员设置入口
+
+1. 在电脑上用管理员微信扫码登录，选「秦托邦」服务号，查看认证状态和现有菜单。若菜单由第三方代管，请在维护现有菜单的平台添加入口。[微信公众平台](https://mp.weixin.qq.com/)
+2. 技术人员提供会员页的正式 HTTPS 网址后，打开「设置与开发 → 账号设置（或服务号设置）→ 功能设置 → 网页授权域名」。填入该网址的完整主机名。若微信要求验证，下载页面给出的校验文件，交给技术人员按提示放到相应位置，然后完成验证。[微信网页授权说明](https://developers.weixin.qq.com/doc/service/guide/h5/auth.html)
+3. 在「内容与互动 → 自定义菜单」点加号，可选已有分组下的子菜单。菜单名称填「我的权益」，菜单内容选「跳转网页」，页面地址粘贴完整的会员网址，路径为 `/member-center`。先在微信中用一位测试会员走通绑定和查询，再点「保存并发布」。[微信自定义菜单说明](https://developers.weixin.qq.com/doc/service/guide/product/menu/intro.html)
+4. 开通主动提醒时，在「功能设置」配置同一网站的「JS接口安全域名」，在「添加功能插件 → 订阅通知」确认所属类目是否提供合适的到期模板。会员通过微信另行授权接收提醒。[微信 JS 接口域名说明](https://developers.weixin.qq.com/doc/service/guide/h5/jssdk.html) · [订阅通知说明](https://developers.weixin.qq.com/doc/service/guide/product/subscription_messages/intro.html)
+
+## 服务器配置与排查
+
+1. 技术人员部署含此功能的版本，完成数据库迁移并确认会员页的公网域名。应用使用对应服务号的 AppID 与服务端密钥换取微信用户标识。
 2. 服务器配置 `WECHAT_MEMBER_ENABLED=true`、`WECHAT_MEMBER_APP_ID`、`WECHAT_MEMBER_APP_SECRET`、`WECHAT_MEMBER_PROPERTY_ID`、`WECHAT_MEMBER_ORIGIN`。最后一项是页面的公网 HTTPS 源，例如 `https://member.example.com`。密钥由管理员在部署环境填入。
 3. 微信后台另核对 JS 接口安全域名、适用类目、一次性订阅模板和接口 IP 白名单。确认模板实际字段后再配置 `WECHAT_MEMBER_TEMPLATE_ID` 与 `WECHAT_MEMBER_TEMPLATE_FIELDS`。例如实际模板含权益名称、到期日期、提前天数三个字段时，可映射为 `{"thing1":"product","date2":"expiry","number3":"days"}`。查询可先单独开通。使用专用域名时，只需将会员页面、它的静态资源及 `/api/wechat/member` 路由到本应用。
 4. 服务进程每十分钟扫描当天到期窗口。投递记录 `wechat_member_expiry_notices` 中的 `ACCEPTED` 表示微信接口已受理，`RETRY` 为已明确退回且允许重试，`REJECTED` 为其他明确拒绝。`UNKNOWN` 为可能已提交，系统保留记录供复核。关闭开关并重启可停用会员查询和投递。
