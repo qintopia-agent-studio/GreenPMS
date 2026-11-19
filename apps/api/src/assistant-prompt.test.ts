@@ -71,6 +71,7 @@ describe("versioned employee operating knowledge", () => {
     { question: "取消的600留到下次怎么操作？", ids: ["retained-create"], facts: ["来源订单", "登记客户留存", "联系方式/核验依据", "不是充值钱包", "不会自动转成公共余额"] },
     { question: "客户让我用留存给朋友付400，还剩多少？", ids: ["retained-use"], facts: ["目标住宿订单", "授权", "剩余200元", "不新增现金收入", "不能直接查询留存清单或实时余额"] },
     { question: "剩下200退款，误标留存如何解除？", ids: ["retained-refund-release"], facts: ["来源订单", "已成功", "不发起实际退款", "不成为公共可分配余额", "已使用部分不能直接抹掉"] },
+    { question: "客人先改期又换房，退房日在哪间房看待退，点开是哪一单？", ids: ["room-status"], facts: ["最后一晚实际入住的房间或床位", "点“待退”看应退订单", "点住宿条看对应订单"] },
     { question: "今天能预订为什么不能入住？", ids: ["room-status"], facts: ["不含离店日", "不代表后客现在可以入住", "先让前客正式办理退房", "不是系统预订上限"] },
     { question: "冲销后是不是就可以重新分配？", ids: ["reverse-facts"], facts: ["普通冲销不会自动释放", "不能直接撤销", "不改变实际收退款"] },
     { question: "怎么把这笔拆分资金升级成会员？", ids: ["membership-conversion"], facts: ["拆分收款或内部划转来源禁止转会员", "不是再次收款"] },

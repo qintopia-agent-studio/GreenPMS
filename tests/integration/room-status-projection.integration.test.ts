@@ -31,6 +31,7 @@ import { demo } from "../../packages/db/src/seed.ts";
 import { createQuoteForTesting as createQuote } from "../../packages/db/src/pricing-service.ts";
 import { getDashboard } from "../../packages/db/src/dashboard.ts";
 import { assertRoomStatusBoard } from "../../apps/web/src/room-status/roomStatusValidation.ts";
+import { roomStatusDepartureTasks } from "../../apps/web/src/room-status/roomStatusState.ts";
 import { parseOrderView } from "../../apps/web/src/orderViewValidation.ts";
 import * as orderReader from "../../packages/db/src/orders.ts";
 import { buildServer } from "../../apps/api/src/server.ts";
@@ -1712,6 +1713,75 @@ describe("PostgreSQL room-status projection", () => {
       range: { arrivalDate: "2030-02-01", departureDate: "2030-02-02" },
       pageIndex: 0
     })).not.toThrow();
+  });
+
+  it("shows the due-out reminder on the room occupied on the final night after a reschedule and move", async () => {
+    const originalRoom = demo.secondRoomId;
+    const finalRoom = demo.roomId;
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const moveDate = shiftLocalDate(today, 1);
+    const departure = shiftLocalDate(today, 3);
+    const originalDeparture = shiftLocalDate(today, 5);
+    const outgoing = await createOrder({
+      unitId: originalRoom, arrivalDate: moveDate, departureDate: originalDeparture, prefix: "handoff-rescheduled"
+    });
+    const outgoingId = String(outgoing.result!.orderId);
+    const rescheduled = await execute({ commandType: "RESCHEDULE_STAY", input: {
+      propertyId: demo.propertyId, orderId: outgoingId, newArrivalDate: today, newDepartureDate: departure
+    } }, "handoff-reschedule");
+    expect(rescheduled.businessCommitted, JSON.stringify(rescheduled.error)).toBe(true);
+    const checkIn = await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId: outgoingId } }, "handoff-check-in");
+    expect(checkIn.businessCommitted, JSON.stringify(checkIn.error)).toBe(true);
+    const moved = await execute({ commandType: "MOVE_UNIT", input: {
+      propertyId: demo.propertyId, orderId: outgoingId, effectiveDate: moveDate, newInventoryUnitId: finalRoom
+    } }, "handoff-move");
+    expect(moved.businessCommitted, JSON.stringify(moved.error)).toBe(true);
+    const otherId = await withPropertyClockForTesting(new Date(`${moveDate}T05:00:00Z`), async () => {
+      const created = await createOrder({
+        unitId: originalRoom, arrivalDate: moveDate, departureDate: originalDeparture, prefix: "handoff-other-guest"
+      });
+      const orderId = String(created.result!.orderId);
+      const checkIn = await execute({ commandType: "CHECK_IN", input: { propertyId: demo.propertyId, orderId } }, "handoff-other-check-in");
+      expect(checkIn.businessCommitted).toBe(true);
+      return orderId;
+    });
+
+    const snapshot = await withPropertyClockForTesting(new Date(`${departure}T05:00:00Z`), () =>
+      board({ arrivalDate: departure, departureDate: shiftLocalDate(departure, 1), pageSize: 200 }));
+    expect(snapshot.projectionState).toBe("READY");
+    expect(roomStatusDepartureTasks(snapshot, unitIn(snapshot, finalRoom), departure)).toMatchObject([{
+      taskKind: "DEPARTURE", roomId: finalRoom, actualInventoryUnitId: finalRoom,
+      references: expect.arrayContaining([
+        expect.objectContaining({ type: "ORDER", id: outgoingId, href: `/orders/${outgoingId}` }),
+        expect.objectContaining({ type: "INVENTORY_UNIT", id: finalRoom })
+      ]), claimIds: []
+    }]);
+    expect(roomStatusDepartureTasks(snapshot, unitIn(snapshot, originalRoom), departure)).toEqual([]);
+    expect(intervalForOrder(snapshot, originalRoom, otherId)).toMatchObject({ status: "IN_HOUSE", operationalAttention: null });
+    expect(unitIn(snapshot, finalRoom).days[0]).toMatchObject({ serviceDate: departure, available: true });
+  });
+
+  it.each(["missing", "duplicated"])("reports an exception when the due-out stay's final-night Claim is %s", async (damage) => {
+    const today = await propertyLocalToday(db, demo.propertyId);
+    const yesterday = shiftLocalDate(today, -1);
+    const created = await createOrder({
+      unitId: demo.bedAId, arrivalDate: yesterday, departureDate: today, stayType: "FREE", prefix: "handoff-damaged-night"
+    });
+    const orderId = String(created.result!.orderId);
+    await markOrderInHouseFixture(orderId);
+    const claim = await db.selectFrom("inventory_claims").selectAll()
+      .where("source_id", "=", String(created.result!.segmentId)).where("service_date", "=", yesterday).executeTakeFirstOrThrow();
+    if (damage === "missing") {
+      await db.updateTable("inventory_claims").set({ active: false, released_at: new Date() }).where("id", "=", claim.id).execute();
+    } else {
+      await db.insertInto("inventory_claims").values({ ...claim, id: "claim_duplicate_departure_night" }).execute();
+    }
+    const snapshot = await board({ arrivalDate: today, departureDate: shiftLocalDate(today, 1) });
+    expect(snapshot.projectionState).toBe("PARTIAL");
+    expect(taskForOrder(snapshot, orderId)).toMatchObject({
+      taskKind: "EXCEPTION", status: "UNKNOWN", blocking: true, operationalAttention: null, claimIds: []
+    });
+    expect(roomStatusDepartureTasks(snapshot, unitIn(snapshot, demo.bedAId), today)).toEqual([]);
   });
 
   it("serializes checkout and a waiting check-in on their shared departure-day room lock", async () => {
