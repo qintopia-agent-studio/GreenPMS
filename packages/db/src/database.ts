@@ -1,3 +1,4 @@
+import { wechatMemberReady } from "./wechat-member-readiness.ts";
 import { membershipCatalogReady } from "./membership-catalog-readiness.ts";
 import { membershipScopeReady } from "./membership-scope-readiness.ts";
 import { membershipCancellationReady } from "./membership-cancellation-readiness.ts";
@@ -106,7 +107,10 @@ export const currentMigrationNames = [
   "080_ai_provider_priority_swap.sql",
   "081_wecom_refund_reconciliation.sql",
   "082_private_bath_shared_membership.sql",
-  "083_membership_product_catalog.sql"
+  "083_membership_product_catalog.sql",
+  "084_wechat_member_entitlements.sql",
+  "085_wechat_member_sms_binding.sql",
+  "086_wechat_member_bookings.sql"
 ] as const;
 
 export function databaseUrl(): string {
@@ -360,6 +364,28 @@ export async function databaseReady(
           ('membership_orders', 'activated_at'),
           ('membership_orders', 'valid_from'),
           ('membership_orders', 'valid_until'),
+          ('wechat_member_bookings', 'status'),
+          ('wechat_member_bookings', 'order_id'),
+          ('wechat_member_bookings', 'decided_by'),
+          ('wechat_member_bookings', 'decided_at'),
+          ('wechat_member_interactions', 'state'),
+          ('wechat_member_interactions', 'detail'),
+          ('wechat_member_interactions', 'template_id'),
+          ('wechat_member_interactions', 'content'),
+          ('wechat_member_interactions', 'updated_at'),
+          ('wechat_member_bindings', 'booking_template'),
+          ('wechat_member_sessions', 'expires_at'),
+          ('wechat_member_sms_challenges', 'attempts_left'),
+          ('wechat_member_sessions', 'pairing_hash'),
+          ('wechat_member_sessions', 'pairing_expires_at'),
+          ('wechat_member_bindings', 'open_id'),
+          ('wechat_member_bindings', 'subscription_template'),
+          ('wechat_member_bindings', 'revoked_at'),
+          ('wechat_member_bindings', 'revoked_by'),
+          ('wechat_member_expiry_notices', 'binding_id'),
+          ('wechat_member_expiry_notices', 'state'),
+          ('wechat_member_expiry_notices', 'attempted_at'),
+          ('wechat_member_expiry_notices', 'error_code'),
           ('membership_orders', 'contract_id'),
           ('membership_orders', 'entitlement_lot_id'),
           ('membership_orders', 'version'),
@@ -3316,7 +3342,7 @@ export async function databaseReady(
       && temporaryOtherRoomObjects.rows[0]?.body_marker_count === "22"
       && temporaryOtherRoomObjects.rows[0]?.function_bodies_ready === true
       && temporaryOtherRoomObjects.rows[0]?.runtime_privileges_ready === true;
-    return finalReady && await membershipCatalogReady(db) && await membershipScopeReady(db) && await membershipCancellationReady(db) && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db);
+    return finalReady && await membershipCatalogReady(db) && await membershipScopeReady(db) && await membershipCancellationReady(db) && await crossRoomUpgradeReady(db) && await roomCatalogReady(db) && await accountManagementReady(db) && await checkoutReversalReady(db) && await companionReady(db) && await integrationReady(db) && await wecomRefundReady(db) && await externalPaymentsReady(db) && await paymentDeliveryReady(db) && await paymentAllocationReady(db) && await operatingSalesReady(db) && await wechatMemberReady(db);
   } catch {
     return false;
   }

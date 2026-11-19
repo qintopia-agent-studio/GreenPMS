@@ -2864,6 +2864,8 @@ export const MembershipProductRowSchema = strictObject({
 });
 
 export const MetaResponseSchema = strictObject({
+  memberNotificationAdminProperties: Type.Optional(Type.Array(Type.String())),
+  wechatMemberPropertyId: Type.Optional(Type.String()),
   properties: Type.Array(PropertyRowSchema),
   inventoryUnits: Type.Array(InventoryUnitRowSchema),
   pricingPolicyVersions: Type.Array(PricingPolicyRowSchema),

@@ -1485,6 +1485,7 @@ async function buildRawCommandEffect(db: DbExecutor, commandType: CommandType, r
       : pricing.currentContractAmount.minorUnits - backfillCollectedAmountMinor;
     const effect = {
       quoteId,
+      ...(quote.wechatBookingId ? { wechatBookingId: quote.wechatBookingId } : {}),
       primaryGuest: guest,
       occupants,
       occupancyCapacity: unit.occupancyCapacity,

@@ -1,3 +1,4 @@
+import { pendingMemberBooking, decideMemberBooking } from "../wechat-member-bookings.ts";
 import { applyMembershipCatalogEffect } from "../membership-catalog.ts";
 import { applyChannelFunds, externalChannel, recordChannelRevision } from "../channel-operating.ts";
 import { applyRetainedFundsCommand, isRetainedFundsCommand, lockPaymentAllocationResources } from "../retained-funds.ts";
@@ -1045,6 +1046,17 @@ export async function applyCommand(trx: Transaction<Database>, options: {
       free_stay_category_code: freeStayCategoryCode,
       pricing_policy_version_id: policyVersionId, member_id: memberId, member_contract_id: memberContractId, current_revision_id: null, version: 1
     }).execute();
+    if (typeof effect.wechatBookingId === "string") {
+      const booking = await pendingMemberBooking(trx, propertyId, effect.wechatBookingId);
+      if (booking.member_id !== memberId || booking.arrival_date !== arrivalDate || booking.departure_date !== departureDate
+        || booking.inventory_kind !== inventoryUnit.kind || booking.room_type_code !== inventoryUnit.roomTypeCode || backfill || temporaryOtherRoomArrangement
+        || pricing.coverageSet.length !== enumerateServiceDates(arrivalDate,departureDate).length || pricing.cashLines.length
+        || pricing.currentContractAmountMinor !== 0 || pricing.manualAdjustmentMinor !== 0) {
+        throw new DomainError("ENTITLEMENT_CONFLICT", "本次申请与可用权益不匹配，请会员联系服务号客服。", 409);
+      }
+      const actor = await trx.selectFrom("command_previews").select("subject_id").where("id","=",options.previewId!).executeTakeFirstOrThrow();
+      await decideMemberBooking(trx, booking, actor.subject_id, orderId);
+    }
     const occupantCreatedAt = new Date();
     const persistedOccupants = occupants.map(({ id, ordinal, role, ...snapshot }) => ({
       id,

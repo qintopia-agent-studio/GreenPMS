@@ -407,7 +407,7 @@ export async function resolveTemporaryOtherRoomCoverage(db: DbExecutor, options:
   };
 }
 
-export type StoredQuote = StoredQuoteDto;
+export type StoredQuote = StoredQuoteDto & { wechatBookingId?: string };
 
 export async function loadPricingPolicy(db: DbExecutor, propertyId: string, policyVersionId: string, lockedForOrder = false): Promise<PricingPolicy> {
   const row = await db.selectFrom("pricing_policy_versions")
@@ -510,7 +510,7 @@ async function enforceQuoteQuota(db: Transaction<Database>, propertyId: string, 
   }
 }
 
-export async function createQuoteInTransaction(db: Transaction<Database>, request: QuoteRequest): Promise<StoredQuote> {
+export async function createQuoteInTransaction(db: Transaction<Database>, request: QuoteRequest, wechatBookingId?: string): Promise<StoredQuote> {
   const { assertCurrentCatalogQuote, lockRoomCatalog } = await import("./room-catalog.ts");
   await lockRoomCatalog(db, request.propertyId);
   if (request.stayType !== "FREE") await assertCurrentCatalogQuote(db, request.propertyId, request.pricingPolicyVersionId, request.arrivalDate);
@@ -658,6 +658,7 @@ export async function createQuoteInTransaction(db: Transaction<Database>, reques
   const inputHash = stableHash(normalizedRequest);
   await db.insertInto("quotes").values({
     id: quoteId,
+    ...(wechatBookingId ? {wechat_booking_id: wechatBookingId} : {}),
     property_id: request.propertyId,
     inventory_unit_id: unit.id,
     stay_type: stayType,
@@ -736,6 +737,7 @@ export async function loadStoredQuote(db: DbExecutor, quoteId: string, requireFr
   const temporaryOtherRoomArrangement = temporaryOtherRoomArrangementFromJson(row.temporary_other_room_arrangement);
   const storedQuote: StoredQuote = {
     quoteId: row.id,
+    ...(row.wechat_booking_id ? {wechatBookingId: row.wechat_booking_id} : {}),
     propertyId: row.property_id,
     inventoryUnitId: row.inventory_unit_id,
     stayType: row.stay_type as StayType,

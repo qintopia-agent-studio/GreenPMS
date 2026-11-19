@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthPrincipal, CommandEnvelope, ReceiptDto } from "@qintopia/contracts";
-import { confirmCommandPreview, createCommandPreview, getMemberView, propertyLocalToday, type Database } from "@qintopia/db";
+import { confirmCommandPreview, createCommandPreview, getMemberView, memberCenterView, propertyLocalToday, type Database } from "@qintopia/db";
 import type { Kysely } from "kysely";
 import { createQuoteForTesting } from "../../packages/db/src/pricing-service.ts";
 import { demo } from "../../packages/db/src/seed.ts";
@@ -224,6 +224,24 @@ describe("step 2C member balances and stays", () => {
     expect(view.availableBalance.ROOM_NIGHT).toBe(27);
   });
 
+  it("pages an entire month of entitlement activity without exposing internal fact identifiers or accepting another member's page", async () => {
+    const member = "member_portal_history", other = "member_portal_other";
+    await createMember(member);
+    await createMember(other);
+    await activateProduct(member, products.sharedSingle, "portal-history");
+    const arrival = await propertyLocalToday(db, demo.propertyId);
+    const quote = await memberQuote(member, await unitId("D01"), arrival, shiftDate(arrival, 28));
+    await createStay(quote.quoteId, "portal-history");
+    const first = await memberCenterView(db, demo.propertyId, member);
+    expect(first.history).toHaveLength(25);
+    expect(first.next).toMatch(/^[0-9a-f]{64}$/);
+    const rest = await memberCenterView(db, demo.propertyId, member, first.next!);
+    expect(rest.history).toHaveLength(3);
+    expect(rest.next).toBeNull();
+    expect(new Set([...first.history, ...rest.history].map(row => row.serviceDate)).size).toBe(28);
+    await expect(memberCenterView(db, demo.propertyId, other, first.next!)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
   it("moves a checked-in shared membership to the other applicable type without consuming any night twice", async () => {
     const memberId = "member_shared_private_move";
     await createMember(memberId);
@@ -421,6 +439,9 @@ describe("step 2C member balances and stays", () => {
     const checkedInQuote = await memberQuote(checkedInMember, d01, checkedInArrival, checkedInDeparture);
     const checkedIn = await createStay(checkedInQuote.quoteId, "checked-in");
     const checkedInOrderId = checkedIn.result!.orderId as string;
+    const beforeCheckIn = await memberCenterView(db, demo.propertyId, checkedInMember);
+    expect(beforeCheckIn.cards[0]).toMatchObject({ available: 28, held: 2 });
+    expect(beforeCheckIn.history.map(row => [row.action, row.quantity])).toEqual([["预订预留", 1], ["预订预留", 1]]);
     expect(await db.selectFrom("orders").select(["member_id", "booking_channel_code", "channel_order_reference"]).where("id", "=", checkedInOrderId).executeTakeFirstOrThrow()).toEqual({
       member_id: checkedInMember,
       booking_channel_code: null,
@@ -431,6 +452,10 @@ describe("step 2C member balances and stays", () => {
     expect(await db.selectFrom("coverage_items").select("status").where("order_id", "=", checkedInOrderId).execute()).toEqual([{ status: "CONSUMED" }, { status: "CONSUMED" }]);
     expect((await getMemberView(db, demo.propertyId, checkedInMember)).lotBalances).toContainEqual({ lotId: checkedInMembership.lotId, unitKind: "ROOM_NIGHT", availableUnits: 28 });
 
+    const afterCheckIn = await memberCenterView(db, demo.propertyId, checkedInMember);
+    expect(afterCheckIn.cards[0]).toMatchObject({ available: 28, held: 0 });
+    expect(afterCheckIn.history.filter(row => row.action === "入住核销").map(row => row.quantity)).toEqual([1, 1]);
+
     const cancelledMember = "member_step2c_cancelled";
     await createMember(cancelledMember);
     const cancelledMembership = await activateProduct(cancelledMember, products.sharedSingle, "cancelled");
@@ -439,6 +464,9 @@ describe("step 2C member balances and stays", () => {
     const cancelledOrderId = cancelled.result!.orderId as string;
     await confirm({ commandType: "CANCEL_ORDER", input: { propertyId: demo.propertyId, orderId: cancelledOrderId } }, "cancel-before-arrival");
     expect(await db.selectFrom("coverage_items").select("status").where("order_id", "=", cancelledOrderId).execute()).toEqual([{ status: "RELEASED" }, { status: "RELEASED" }]);
+    const afterCancel = await memberCenterView(db, demo.propertyId, cancelledMember);
+    expect(afterCancel.cards[0]).toMatchObject({ available: 30, held: 0 });
+    expect(afterCancel.history.filter(row => row.action === "预留释放").map(row => row.quantity)).toEqual([1, 1]);
     expect((await getMemberView(db, demo.propertyId, cancelledMember)).lotBalances).toContainEqual({ lotId: cancelledMembership.lotId, unitKind: "ROOM_NIGHT", availableUnits: 30 });
   });
 

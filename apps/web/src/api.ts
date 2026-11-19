@@ -103,6 +103,11 @@ async function request<T>(path: string, init: RequestInit = {}, acceptRejectedRe
   return body as T;
 }
 
+export function memberOps<T>(property: string, suffix: string, body?: unknown) {
+  return request<T>("/api/v1/properties/" + encodeURIComponent(property) + "/member-" + suffix,
+    body === undefined ? {} : { method: "POST", body: JSON.stringify(body) });
+}
+
 function commandHeaders(scope: string) {
   const nonce = crypto.randomUUID();
   return {
@@ -185,6 +190,10 @@ function normalizeCommandResult(
 }
 
 export const api = {
+  wechatBinding: (property: string, member: string) => request<{ enabled: boolean; bindingId?: string | null }>(
+    `/api/v1/wechat-member-bindings/${encodeURIComponent(property)}/${encodeURIComponent(member)}`),
+  changeWechatBinding: (property: string, member: string, change: { action: "REVOKE"; bindingId: string }) =>
+    request<{ bindingId: string | null }>(`/api/v1/wechat-member-bindings/${encodeURIComponent(property)}/${encodeURIComponent(member)}`, { method: "POST", body: JSON.stringify(change) }),
   paymentReconciliation: (query: PaymentReconciliationQuery, signal?: AbortSignal) => {
     const params = new URLSearchParams({ propertyId: query.propertyId });
     for (const key of ["kind", "status", "afterId", "orderId", "limit"] as const) if (query[key] !== undefined) params.set(key, String(query[key]));

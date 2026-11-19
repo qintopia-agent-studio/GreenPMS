@@ -1,3 +1,6 @@
+import { officialAccount, wechatMemberConfig, type WechatMemberConfig, type WechatService } from "./wechat-official-account.ts";
+import { registerWechatMemberCenter } from "./wechat-member-center.ts";
+import { tencentMemberSms, type MemberSms } from "./tencent-member-sms.ts";
 import { membershipProductsForProperty } from "../../../packages/db/src/membership-catalog.ts";
 import { registerMembershipCatalog } from "./membership-catalog.ts";
 import { registerDashboard } from "./dashboard.ts";
@@ -550,7 +553,7 @@ async function replayHistoricalCreateOrderPreview(
   return { preview, receipt };
 }
 
-export async function buildServer(db: Kysely<Database>, options: { assistantTransport?: ModelTransport } = {}) {
+export async function buildServer(db: Kysely<Database>, options: { assistantTransport?: ModelTransport; wechatMember?: { config: WechatMemberConfig; service: WechatService; sms?: MemberSms } } = {}) {
   const allowedWebOrigins = webOriginAllowlist();
   const app = Fastify({ ajv: { customOptions: { discriminator: true } }, logger: { level: process.env.LOG_LEVEL ?? "info" }, genReqId: () => crypto.randomUUID() });
   const receiptSerializerCompiler = createReceiptSerializerCompiler();
@@ -676,6 +679,13 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
     return projectMeResponse(principal);
   });
 
+  const wechatConfig = options.wechatMember?.config ?? wechatMemberConfig();
+  let sms = options.wechatMember?.sms;
+  if (!options.wechatMember && wechatConfig) {
+    try { sms = tencentMemberSms(); }
+    catch { app.log.warn("会员短信配置不完整，新会员绑定暂未开通。"); }
+  }
+  registerWechatMemberCenter(app, db, wechatConfig, options.wechatMember?.service ?? (wechatConfig ? officialAccount(wechatConfig) : undefined), sms);
   registerAccountManagement(app, db);
   registerAssistant(app, db, options.assistantTransport);
   registerRoomCatalog(app, db);
@@ -697,7 +707,12 @@ export async function buildServer(db: Kysely<Database>, options: { assistantTran
       propertyIds.length ? db.selectFrom("pricing_policy_versions").selectAll().where("property_id", "in", propertyIds).orderBy("code").execute() : [],
       Promise.all(propertyIds.map(id => membershipProductsForProperty(db, id))).then(groups => groups.flat())
     ]);
-    return { properties, inventoryUnits: await projectCatalogUnitNames(db, units), pricingPolicyVersions: policies, members: [], memberContracts: [], membershipProducts };
+    const noticeAdmins = principal.credentialType === "SESSION" && propertyIds.length
+      ? await db.selectFrom("staff_profile_assignments").select("property_id").where("subject_id","=",principal.subjectId)
+        .where("property_id","in",propertyIds).where("profile","=","ADMIN").execute() : [];
+    return { ...(noticeAdmins.length ? { memberNotificationAdminProperties: noticeAdmins.map(row => row.property_id) } : {}),
+      ...(wechatConfig && propertyIds.includes(wechatConfig.propertyId) ? { wechatMemberPropertyId: wechatConfig.propertyId } : {}),
+      properties, inventoryUnits: await projectCatalogUnitNames(db, units), pricingPolicyVersions: policies, members: [], memberContracts: [], membershipProducts };
   });
 
   app.get("/api/v1/properties/:id/availability", {

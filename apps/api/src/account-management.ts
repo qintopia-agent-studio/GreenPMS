@@ -33,9 +33,9 @@ const contextSchema = Type.Object({ self: Type.Object(selfSchema, { additionalPr
 const previewSchema = Type.Object({ memberId: Id, fullName: Type.String(), nickname: Type.String(), phone: Type.String(), version: Type.String(), canDelete: Type.Boolean(), blockedReason: Type.Union([Type.String(), Type.Null()]), membershipOrderCount: Type.Integer(), roomNights: Type.Integer(), bedNights: Type.Integer(), reversalAmountMinor: Type.Integer() }, { additionalProperties: false });
 const failures = { 400: ErrorResponse, 401: ErrorResponse, 403: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse, 429: ErrorResponse, 500: ErrorResponse };
 
-async function sessionContext(db: Kysely<Database>, principal: AuthPrincipal, propertyId: string) {
+export async function staffSessionContext(db: Kysely<Database>, principal: AuthPrincipal, propertyId: string, lock = false) {
   if (principal.credentialType !== "SESSION") throw new DomainError("INSUFFICIENT_ACCESS", "账号管理仅支持网页登录", 403);
-  const actor = await db.selectFrom("subjects")
+  const query = db.selectFrom("subjects")
     .innerJoin("web_sessions", "web_sessions.subject_id", "subjects.id")
     .innerJoin("subject_property_grants", "subject_property_grants.subject_id", "subjects.id")
     .innerJoin("staff_profile_assignments", (join) => join.onRef("staff_profile_assignments.subject_id", "=", "subjects.id").onRef("staff_profile_assignments.property_id", "=", "subject_property_grants.property_id"))
@@ -43,8 +43,8 @@ async function sessionContext(db: Kysely<Database>, principal: AuthPrincipal, pr
     .where("subjects.id", "=", principal.subjectId).where("subjects.status", "=", "ACTIVE")
     .where("web_sessions.id", "=", principal.credentialId).where("web_sessions.revoked_at", "is", null)
     .where("web_sessions.expires_at", ">", sql<Date>`clock_timestamp()`)
-    .where("subject_property_grants.property_id", "=", propertyId).where("subject_property_grants.access_level", "=", "WRITE")
-    .executeTakeFirst();
+    .where("subject_property_grants.property_id", "=", propertyId).where("subject_property_grants.access_level", "=", "WRITE");
+  const actor = await (lock ? query.forShare(["web_sessions","subjects","subject_property_grants"]) : query).executeTakeFirst();
   if (!actor) throw new DomainError("INSUFFICIENT_ACCESS", "当前账号无权管理此门店的账号", 403);
   return actor;
 }
@@ -74,7 +74,7 @@ export function registerAccountManagement(app: FastifyInstance, db: Kysely<Datab
   app.get("/api/v1/account-management", { schema: { tags: ["auth"], querystring: Type.Object({ propertyId: Id }, { additionalProperties: false }), response: { 200: contextSchema, ...failures } } }, async (request): Promise<AccountManagementContext> => {
     const principal = await requirePrincipal(db, request);
     const { propertyId } = request.query as { propertyId: string };
-    const actor = await sessionContext(db, principal, propertyId);
+    const actor = await staffSessionContext(db, principal, propertyId);
     const canManageStaff = actor.profile === "ADMIN";
     const accounts = canManageStaff ? (await sql<StaffAccountDto>`
       SELECT subject.id, subject.username, subject.display_name AS "displayName", subject.status,
@@ -107,7 +107,7 @@ export function registerAccountManagement(app: FastifyInstance, db: Kysely<Datab
 
   app.get("/api/v1/members/:id/deletion-preview", { schema: { tags: ["auth"], params: Type.Object({ id: Id }), querystring: Type.Object({ propertyId: Id }, { additionalProperties: false }), response: { 200: previewSchema, ...failures } } }, async (request) => {
     const { propertyId } = request.query as { propertyId: string };
-    const actor = await sessionContext(db, await requirePrincipal(db, request), propertyId);
+    const actor = await staffSessionContext(db, await requirePrincipal(db, request), propertyId);
     if (actor.profile !== "ADMIN") throw new DomainError("INSUFFICIENT_ACCESS", "仅管理员可删除会员", 403);
     const { id } = request.params as { id: string };
     const result = await sql<{ preview: MemberDeletionPreview | null }>`SELECT qintopia_member_deletion_basis(${id}, ${propertyId}) AS preview`.execute(db);
@@ -127,7 +127,7 @@ export function registerAccountManagement(app: FastifyInstance, db: Kysely<Datab
     const sessionSecret = request.cookies[sessionCookieName];
     if (principal.credentialType !== "SESSION" || !sessionSecret) throw new DomainError("INSUFFICIENT_ACCESS", "账号管理仅支持网页登录", 403);
     try {
-      const actor = await sessionContext(db, principal, body.propertyId);
+      const actor = await staffSessionContext(db, principal, body.propertyId);
       if (body.action !== "CHANGE_PASSWORD" && actor.profile !== "ADMIN") throw new DomainError("INSUFFICIENT_ACCESS", "无权执行此账号操作", 403);
       const { currentPassword, newPassword: password, ...publicInput } = body;
       let verifiedPasswordHash: string | undefined;

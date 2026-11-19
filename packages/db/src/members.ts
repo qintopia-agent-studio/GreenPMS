@@ -402,7 +402,7 @@ export async function listMemberPage(db: DbExecutor, propertyId: string, query?:
 }
 
 
-async function memberDirectoryEntitlements(db: DbExecutor, propertyId: string, memberIds: string[]) {
+export async function memberDirectoryEntitlements(db: DbExecutor, propertyId: string, memberIds: string[]) {
   const asOfDate = await propertyLocalToday(db, propertyId);
   const rows = await db.selectFrom("membership_orders as o")
     .leftJoin("member_contracts as c", "c.id", "o.contract_id")

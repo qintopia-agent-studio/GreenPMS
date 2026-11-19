@@ -1,3 +1,4 @@
+import { WechatMemberBinding } from "../components/WechatMemberBinding";
 import { membershipPeriodLabel } from "./MembershipCatalogPage";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { BadgeCheck, CalendarClock, CircleDollarSign, CreditCard, FilePenLine, PencilLine, RefreshCw, Search, UserPlus } from "lucide-react";
@@ -1175,7 +1176,7 @@ export function MembershipOrdersPanel({ view, disabled, targetMembershipOrderId,
 export function MembersPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { principal, propertyId, refreshMeta } = useWorkspace();
+  const { principal, propertyId, meta, refreshMeta } = useWorkspace();
   const initialDeepLink = useRef(parseMemberDeepLink(location.search));
   const initialStayUpgradeCreation = useRef(stayUpgradeMemberCreationState(parseStayUpgradeMemberCreationIntent(location.search)));
   const memberParams = new URLSearchParams(location.search);
@@ -1501,6 +1502,7 @@ export function MembersPage() {
     <header className="page-heading page-heading-actions">
       <div><p className="eyebrow">会员管理</p><h1>会员档案</h1><p>查询和维护当前门店的会员资料</p></div>
       <div className="page-heading-buttons" role="group" aria-label="会员档案操作">
+        {principal.credentialType === "SESSION" && principalCan(principal, propertyId, "CREATE_ORDER") && <Link className="button button-secondary" to="/members/bookings">服务号预订与交互</Link>}
         {canCreateMember ? <button className="button button-primary" type="button" onClick={() => setCreatingMember(true)} disabled={commandsBlocked} data-testid="create-member"><UserPlus aria-hidden="true" size={17} />新建会员</button> : null}
         <button className="button button-secondary" type="button" onClick={refresh} disabled={loadingList || loadingMember}><RefreshCw className={loadingList || loadingMember ? "spin" : ""} aria-hidden="true" size={17} />刷新</button>
       </div>
@@ -1538,6 +1540,8 @@ export function MembersPage() {
       </div>
       {currentMemberId ? <button type="button" className="button button-secondary member-list-return" onClick={() => { setSelectedMemberId(""); changeMemberUrl({ memberId: undefined }); }}>返回会员列表</button> : null}
       {loadingMember ? <LoadingBlock label="正在载入会员档案" /> : member ? <div className="member-detail-stack">
+        {meta.wechatMemberPropertyId === propertyId && canCreateMember && principal.credentialType === "SESSION" && <WechatMemberBinding key={propertyId + member.member.id} propertyId={propertyId} memberId={member.member.id} name={member.member.full_name} />}
+        {principal.credentialType === "SESSION" && principalCan(principal, propertyId, "CREATE_ORDER") && <Link to={"/members/bookings?tab=history&memberId="+encodeURIComponent(member.member.id)}>查看这位会员的服务号交互</Link>}
         <MemberProfile member={member} canCorrect={canCorrectMemberRecords} disabled={commandsBlocked} onCorrect={openMemberCorrections} deletionControl={canCorrectMemberRecords && principal.credentialType === "SESSION" ? <MemberDeletionButton key={`${propertyId}:${member.member.id}`} propertyId={propertyId} memberId={member.member.id} disabled={commandsBlocked} onDeleted={() => { setSelectedMemberId(""); setMember(undefined); setCommandNotice("会员已删除，原档案与删除记录已保留。"); refresh(); }} /> : undefined} />
         {principalCan(principal, propertyId, "CREATE_ORDER") ? <div className="member-stay-continuation"><InfoHint label="安排住宿说明" text="前往房态选择日期与房间，自动带入当前会员。" /><button type="button" className="button button-primary" disabled={commandsBlocked} onClick={() => navigate(memberStayHref(propertyId, member.member.id))} data-testid="arrange-member-stay"><CalendarClock aria-hidden="true" size={17} />安排住宿</button></div> : null}
         <MemberEntitlementsPanel view={member} disabled={commandsBlocked} canCorrect={canCorrectEntitlementBalance} {...(activeTargetContractId ? { targetContractId: activeTargetContractId } : {})} onCorrect={(lot, currentBalance) => setCorrectingEntitlement({ lot, currentBalance })} />
